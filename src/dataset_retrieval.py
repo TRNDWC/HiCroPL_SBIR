@@ -117,9 +117,9 @@ class ValidDataset(torch.utils.data.Dataset):
         self.paths = []
         for category in self.all_categories:
             if self.mode == "photo":
-                self.paths.extend(glob.glob(os.path.join(self.args.root, 'sketch', category, '*')))
+                self.paths.extend(glob.glob(os.path.join(self.args.data_dir, 'sketch', category, '*')))
             else:
-                self.paths.extend(glob.glob(os.path.join(self.args.root, 'photo', category, '*')))
+                self.paths.extend(glob.glob(os.path.join(self.args.data_dir, 'photo', category, '*')))
 
     def __getitem__(self, index):
         filepath = self.paths[index]                
