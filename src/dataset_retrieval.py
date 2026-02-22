@@ -84,10 +84,10 @@ class Sketchy(torch.utils.data.Dataset):
         neg_tensor = self.transform(neg_data)
         
         if self.return_orig:
-            return (sk_tensor, img_tensor, neg_tensor, category, filename,
-                sk_data, img_data, neg_data)
+            return sk_tensor, img_tensor, neg_tensor, category, filename, \
+                sk_data, img_data, neg_data
         else:
-            return (sk_tensor, img_tensor, neg_tensor, category, filename)
+            return sk_tensor, img_tensor, neg_tensor, category, filename
 
     @staticmethod
     def data_transform(opts):
