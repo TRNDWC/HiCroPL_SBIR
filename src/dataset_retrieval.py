@@ -112,7 +112,6 @@ class ValidDataset(torch.utils.data.Dataset):
         self.args = args
         self.mode = mode
         self.transform = normal_transform()
-        unseen_classes = unseen_classes
         self.all_categories = list(set(unseen_classes))
 
         self.paths = []
