@@ -96,15 +96,8 @@ class Model(pl.LightningModule):
         gallery = gallery_feat_all
         ap = torch.zeros(len(query_feat_all))
         precision = torch.zeros(len(query_feat_all))
-        if self.args.dataset == "sketchy_2":
-            map_k = 200
-            p_k = 200
-        else:
-            map_k = 0
-            if self.args.dataset == "quickdraw":
-                p_k = 200
-            else:
-                p_k = 100
+        map_k = 200
+        p_k = 200
                 
         for idx, sk_feat in enumerate(query_feat_all):
             category = all_sketch_category[idx]
