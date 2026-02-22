@@ -5,29 +5,48 @@ import torch
 from torchvision import transforms
 from PIL import Image, ImageOps
 
-unseen_classes = [
-    "bat",
-    "cabin",
-    "cow",
-    "dolphin",
-    "door",
-    "giraffe",
-    "helicopter",
-    "mouse",
-    "pear",
-    "raccoon",
-    "rhinoceros",
-    "saw",
-    "scissors",
-    "seagull",
-    "skyscraper",
-    "songbird",
-    "sword",
-    "tree",
-    "wheelchair",
-    "windmill",
-    "window",
-]
+# Unseen classes for different datasets (ZS-SBIR evaluation)
+UNSEEN_CLASSES = {
+    "sketchy": [
+        "bat", "cabin", "cow", "dolphin", "door", "giraffe", "helicopter",
+        "mouse", "pear", "raccoon", "rhinoceros", "saw", "scissors",
+        "seagull", "skyscraper", "songbird", "sword", "tree", "wheelchair",
+        "windmill", "window"
+    ],
+    "sketchy_ext": [
+        "bat", "cabin", "cow", "dolphin", "door", "giraffe", "helicopter",
+        "mouse", "pear", "raccoon", "rhinoceros", "saw", "scissors",
+        "seagull", "skyscraper", "songbird", "sword", "tree", "wheelchair",
+        "windmill", "window"
+    ],
+    "sketchy_1": [
+        "cup", "swan", "harp", "squirrel", "snail", "ray", "pineapple",
+        "volcano", "rifle", "scissors", "parrot", "windmill", "teddy_bear",
+        "tree", "wine_bottle", "deer", "chicken", "hotdog", "wheelchair",
+        "tank", "umbrella", "butterfly", "camel", "horse", "bell"
+    ],
+    "sketchy_2": [
+        "bat", "cabin", "cow", "dolphin", "door", "giraffe", "helicopter",
+        "mouse", "pear", "raccoon", "rhinoceros", "saw", "scissors",
+        "seagull", "skyscraper", "songbird", "sword", "tree", "wheelchair",
+        "windmill", "window"
+    ],
+    "tuberlin": [
+        "helicopter", "wrist-watch", "mermaid", "mosquito", "pear", "couch",
+        "hammer", "purse", "house", "tennis-racket", "toilet", "panda",
+        "butterfly", "mug", "wineglass", "motorbike", "eyeglasses",
+        "hot air balloon", "screwdriver", "skull", "truck", "palm tree",
+        "cell phone", "horse", "sailboat", "suv", "church", "floor lamp",
+        "pipe (for smoking)", "tv"
+    ],
+    "quickdraw": [
+        "airplane", "alarm_clock", "ant", "apple", "axe", "banana", "bat",
+        "bear", "bee", "bench", "bicycle", "bread", "bus", "butterfly",
+        "cactus", "cake", "camel", "candle", "car", "castle", "cat", "chair",
+        "church", "couch", "cow", "crab", "crocodilian", "dolphin",
+        "eyeglasses", "guitar"
+    ]
+}
 
 class Sketchy(torch.utils.data.Dataset):
 
@@ -36,6 +55,9 @@ class Sketchy(torch.utils.data.Dataset):
         self.opts = opts
         self.transform = transform
         self.return_orig = return_orig
+
+        dataset_key = self.opts.dataset if hasattr(self.opts, 'dataset') else 'sketchy'
+        unseen_classes = UNSEEN_CLASSES.get(dataset_key, UNSEEN_CLASSES['sketchy'])
 
         self.all_categories = os.listdir(os.path.join(self.opts.data_dir, 'sketch'))
         if '.ipynb_checkpoints' in self.all_categories:
@@ -50,15 +72,41 @@ class Sketchy(torch.utils.data.Dataset):
         else:
             if mode == 'train':
                 self.all_categories = list(set(self.all_categories) - set(unseen_classes))
-            else:
+            else:  # mode == 'val'
                 self.all_categories = unseen_classes
 
         self.all_sketches_path = []
         self.all_photos_path = {}
+        valid_categories = []
 
         for category in self.all_categories:
-            self.all_sketches_path.extend(glob.glob(os.path.join(self.opts.data_dir, 'sketch', category, '*')))
-            self.all_photos_path[category] = glob.glob(os.path.join(self.opts.data_dir, 'photo', category, '*'))
+            # Try multiple extensions for sketches
+            sketches = glob.glob(os.path.join(self.opts.data_dir, 'sketch', category, '*.png'))
+            if len(sketches) == 0:
+                sketches = glob.glob(os.path.join(self.opts.data_dir, 'sketch', category, '*'))
+            
+            # Try multiple extensions for photos
+            photos = glob.glob(os.path.join(self.opts.data_dir, 'photo', category, '*.jpg'))
+            if len(photos) == 0:
+                photos = glob.glob(os.path.join(self.opts.data_dir, 'photo', category, '*.png'))
+            if len(photos) == 0:
+                photos = glob.glob(os.path.join(self.opts.data_dir, 'photo', category, '*.jpeg'))
+            if len(photos) == 0:
+                photos = glob.glob(os.path.join(self.opts.data_dir, 'photo', category, '*'))
+            
+            # Debug: print categories that don't have data
+            if len(sketches) == 0 or len(photos) == 0:
+                if mode == 'val':  # Only print for validation to debug
+                    print(f"Skipping category '{category}': {len(sketches)} sketches, {len(photos)} photos")
+            
+            # Only add category if both sketches and photos exist
+            if len(sketches) > 0 and len(photos) > 0:
+                self.all_sketches_path.extend(sketches)
+                self.all_photos_path[category] = photos
+                valid_categories.append(category)
+        
+        # Update all_categories to only include valid ones
+        self.all_categories = valid_categories
 
     def __len__(self):
         return len(self.all_sketches_path)
@@ -112,14 +160,17 @@ class ValidDataset(torch.utils.data.Dataset):
         self.args = args
         self.mode = mode
         self.transform = normal_transform()
+        
+        dataset_key = self.args.dataset if hasattr(self.args, 'dataset') else 'sketchy'
+        unseen_classes = UNSEEN_CLASSES.get(dataset_key, UNSEEN_CLASSES['sketchy'])
         self.all_categories = list(set(unseen_classes))
 
         self.paths = []
         for category in self.all_categories:
             if self.mode == "photo":
-                self.paths.extend(glob.glob(os.path.join(self.args.data_dir, 'sketch', category, '*')))
-            else:
                 self.paths.extend(glob.glob(os.path.join(self.args.data_dir, 'photo', category, '*')))
+            else:
+                self.paths.extend(glob.glob(os.path.join(self.args.data_dir, 'sketch', category, '*')))
 
     def __getitem__(self, index):
         filepath = self.paths[index]                

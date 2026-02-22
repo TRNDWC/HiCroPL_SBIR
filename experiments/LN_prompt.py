@@ -13,13 +13,19 @@ from experiments.options import opts
 if __name__ == '__main__':
     dataset_transforms = Sketchy.data_transform(opts)
 
+    from src.dataset_retrieval import ValidDataset
+    
     train_dataset = Sketchy(opts, dataset_transforms, mode='train', return_orig=False)
     val_sketch = ValidDataset(opts, mode='sketch')
-    val_photo = ValidDataset(opts)
+    val_photo = ValidDataset(opts, mode='photo')
+
+    print(f"Train dataset: {len(train_dataset)} samples, {len(train_dataset.all_categories)} categories")
+    print(f"Val sketch dataset: {len(val_sketch)} samples")
+    print(f"Val photo dataset: {len(val_photo)} samples")
 
     train_loader = DataLoader(dataset=train_dataset, batch_size=opts.batch_size, num_workers=opts.workers)
-    val_sketch_loader = DataLoader(dataset=val_sketch, batch_size=opts.test_batch_size, num_workers=opts.workers, shuffle=True)
-    val_photo_loader = DataLoader(dataset=val_sketch, batch_size=opts.test_batch_size, num_workers=opts.workers, shuffle=True)
+    val_sketch_loader = DataLoader(dataset=val_sketch, batch_size=opts.test_batch_size, num_workers=opts.workers, shuffle=False)
+    val_photo_loader = DataLoader(dataset=val_photo, batch_size=opts.test_batch_size, num_workers=opts.workers, shuffle=False)
 
     logger = TensorBoardLogger('tb_logs', name=opts.exp_name)
 
@@ -27,10 +33,10 @@ if __name__ == '__main__':
         monitor='mAP',
         dirpath='saved_models/%s'%opts.exp_name,
         filename="{epoch:02d}-{mAP:.2f}",
-        mode='min',
+        mode='max',
         save_last=True)
 
-    ckpt_path = os.path.join('/kaggle/working/', 'last.ckpt')
+    ckpt_path = os.path.join('saved_models/%s'%opts.exp_name, 'last.ckpt')
     if not os.path.exists(ckpt_path):
         ckpt_path = None
     else:

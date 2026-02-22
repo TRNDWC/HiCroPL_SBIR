@@ -9,6 +9,9 @@ parser.add_argument('--exp_name', type=str, default='LN_prompt')
 # --------------------
 
 # Path to 'Sketchy' folder holding Sketch_extended dataset. It should have 2 folders named 'sketch' and 'photo'.
+parser.add_argument('--dataset', type=str, default='sketchy', 
+                    choices=['sketchy', 'sketchy_ext', 'tuberlin', 'quickdraw'],
+                    help='Dataset name: sketchy, sketchy_ext, tuberlin, or quickdraw')
 parser.add_argument('--data_dir', type=str, default='/isize2/sain/data/Sketchy/') 
 parser.add_argument('--max_size', type=int, default=224)
 parser.add_argument('--nclass', type=int, default=10)
@@ -19,12 +22,12 @@ parser.add_argument('--data_split', type=float, default=-1.0)
 # ----------------------
 
 parser.add_argument('--clip_lr', type=float, default=1e-4)
-parser.add_argument('--clip_LN_lr', type=float, default=1e-6)
+parser.add_argument('--clip_LN_lr', type=float, default=1e-5)
 parser.add_argument('--prompt_lr', type=float, default=1e-5)
 parser.add_argument('--linear_lr', type=float, default=1e-4)
-parser.add_argument('--batch_size', type=int, default=128)
+parser.add_argument('--batch_size', type=int, default=64)
 parser.add_argument('--test_batch_size', type=int, default=1024)
-parser.add_argument('--epochs', type=int, default=50)
+parser.add_argument('--epochs', type=int, default=60)
 parser.add_argument('--workers', type=int, default=4)
 
 # ----------------------
