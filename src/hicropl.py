@@ -14,6 +14,7 @@ import copy
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import torch.utils.checkpoint as checkpoint
 from collections import OrderedDict
 
 
@@ -169,7 +170,11 @@ class TextEncoder(nn.Module):
                     .to(x.dtype)
                 )  # [n_ctx, n_cls, dim]
                 x = torch.cat([prefix, textual_ctx, suffix], dim=0)
-            x = block(x)
+            
+            if x.requires_grad:
+                x = checkpoint.checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
 
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
@@ -247,7 +252,11 @@ class VisualEncoder(nn.Module):
                     .to(x.dtype)
                 )  # [n_ctx, B, width]
                 x = torch.cat([prefix, visual_ctx], dim=0)
-            x = block(x)
+            
+            if x.requires_grad:
+                x = checkpoint.checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
 
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_post(x[:, 0, :])  # CLS token only
@@ -318,7 +327,7 @@ class CrossModalPromptLearner(nn.Module):
         # ---- Text Prompts: L layers x [n_ctx, ctx_dim] ----
         if ctx_init and n_ctx <= 4:
             from src.clip import clip as _clip
-            prompt = _clip.tokenize(ctx_init)
+            prompt = _clip.tokenize(ctx_init).to(clip_model.token_embedding.weight.device)
             with torch.no_grad():
                 embedding = clip_model.token_embedding(prompt).type(self.dtype)
             ctx_vectors = embedding[0, 1 : 1 + n_ctx, :]

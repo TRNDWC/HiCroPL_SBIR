@@ -71,8 +71,12 @@ class DummyCfgTrainer:
 class DummyCfg:
     TRAINER = DummyCfgTrainer()
 
-class MockTokenEmbedding:
-    def __call__(self, x):
+class MockTokenEmbedding(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(49408, 512))
+        
+    def forward(self, x):
         return torch.randn(x.shape[0], x.shape[1], 512)
 
 class MockTransformer(nn.Module):
@@ -129,9 +133,7 @@ class TestCustomCLIPSpecification(unittest.TestCase):
         self.neg_img = torch.randn(self.batch_size, 3, 224, 224)
         
         self.x = [
-            self.photo_img, self.sk_img,
-            torch.randn(self.batch_size, 3, 224, 224), # photo_aug
-            torch.randn(self.batch_size, 3, 224, 224), # sk_aug
+            self.sk_img, self.photo_img,
             self.neg_img,
             torch.randint(0, 3, (self.batch_size,)) # labels
         ]

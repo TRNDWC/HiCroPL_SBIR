@@ -85,53 +85,54 @@ class CustomCLIP(nn.Module):
         # --- 3. Frozen Reference Model ---
         self.frozen_visual_encoder = clip_model_frozen.visual
 
-    def extract_features(self, image, classnames, modality='photo'):
-        """Extract features using the specified modality branch."""
-        # 1. Get Prompts from Learner
-        learner = self.prompt_learner_photo if modality == 'photo' else self.prompt_learner_sketch
-        (
-            text_input, 
-            tokenized_prompts, 
-            first_visual_prompt, 
-            deeper_text_prompts, 
-            deeper_visual_prompts
-        ) = learner(classnames)
-        
-        # 2. Extract Text Features
-        text_features = self.text_encoder(text_input, tokenized_prompts, deeper_text_prompts)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-        
-        # 3. Extract Visual Features
-        visual_features = self.visual_encoder(image, first_visual_prompt, deeper_visual_prompts)
-        visual_features_norm = visual_features / visual_features.norm(dim=-1, keepdim=True)
-        
-        # 4. Extract Frozen Reference Features
-        with torch.no_grad():
-            frozen_features = self.frozen_visual_encoder(image.type(self.dtype))
-            frozen_features_norm = frozen_features / frozen_features.norm(dim=-1, keepdim=True)
-            
-        # 5. Calculate Logits for Classification Loss
-        logit_scale = self.logit_scale.exp()
-        logits = logit_scale * visual_features_norm @ text_features.t()
-        
-        return visual_features_norm, frozen_features_norm, text_features, logits
-
     def forward(self, x, classnames):
         """
         Forward pass for training.
-        x: [photo_tensor, sk_tensor, photo_aug_tensor, sk_aug_tensor, neg_tensor, label]
-        (Assuming input format matches CoPrompt_SBIR dataset)
+        x: batch from the DataLoader (e.g. [sk_tensor, img_tensor, neg_tensor, category, ...])
         """
-        photo_tensor, sk_tensor, photo_aug_tensor, sk_aug_tensor, neg_tensor, label = x
+        sk_tensor, photo_tensor, neg_tensor, label = x[:4]
         
-        # --- Photo Branch ---
-        photo_feat, frozen_photo_feat, text_feat_photo, logits_photo = self.extract_features(photo_tensor, classnames, modality='photo')
+        # 1. Evaluate Prompt Learners Once
+        (
+            text_input_p, tok_p, first_v_p, deep_t_p, deep_v_p
+        ) = self.prompt_learner_photo(classnames)
         
-        # --- Sketch Branch ---
-        sketch_feat, frozen_sketch_feat, text_feat_sketch, logits_sketch = self.extract_features(sk_tensor, classnames, modality='sketch')
+        (
+            text_input_s, tok_s, first_v_s, deep_t_s, deep_v_s
+        ) = self.prompt_learner_sketch(classnames)
         
-        # --- Negative Photo Branch (for Triplet Loss) ---
-        neg_feat, _, _, _ = self.extract_features(neg_tensor, classnames, modality='photo')
+        # 2. Extract Text Features Once
+        text_feat_photo = self.text_encoder(text_input_p, tok_p, deep_t_p)
+        text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
+        
+        text_feat_sketch = self.text_encoder(text_input_s, tok_s, deep_t_s)
+        text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
+        
+        # 3. Extract Visual Features
+        # - Photo
+        photo_feat = self.visual_encoder(photo_tensor, first_v_p, deep_v_p)
+        photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
+        
+        # - Sketch
+        sketch_feat = self.visual_encoder(sk_tensor, first_v_s, deep_v_s)
+        sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
+        
+        # - Negative Photo (Uses Photo Prompts)
+        neg_feat = self.visual_encoder(neg_tensor, first_v_p, deep_v_p)
+        neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
+        
+        # 4. Extract Frozen Visual Features
+        with torch.no_grad():
+            frozen_photo_feat = self.frozen_visual_encoder(photo_tensor.type(self.dtype))
+            frozen_photo_feat = frozen_photo_feat / frozen_photo_feat.norm(dim=-1, keepdim=True)
+            
+            frozen_sketch_feat = self.frozen_visual_encoder(sk_tensor.type(self.dtype))
+            frozen_sketch_feat = frozen_sketch_feat / frozen_sketch_feat.norm(dim=-1, keepdim=True)
+            
+        # 5. Compute Logits
+        logit_scale = self.logit_scale.exp()
+        logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
+        logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
         
         return (
             photo_feat, frozen_photo_feat, logits_photo,
@@ -188,7 +189,7 @@ class HiCroPL_SBIR(pl.LightningModule):
         return optimizer
 
     def training_step(self, batch, batch_idx):
-        from src.losses import loss_fn_hicropl
+        from src.losses_hicropl import loss_fn_hicropl
         
         # Unpack batch and push to device happens in Lightning automatically, but we might need label explicitly
         features = self.model(batch, self.classnames)
@@ -210,22 +211,23 @@ class HiCroPL_SBIR(pl.LightningModule):
             
         return visual_features_norm
 
-    def validation_step(self, batch, batch_idx):
-        tensor, label, type_data = batch
-        
-        # Split batch based on modality type (Assuming type_data: 0 for sketch, 1 for photo)
-        idx_sketch = (type_data == 0)
-        idx_photo = (type_data == 1)
-        
-        if idx_sketch.any():
-            sketch_feat = self.extract_eval_features(tensor[idx_sketch], modality='sketch')
-            self.test_sketch_features.append(sketch_feat)
-            self.test_sketch_labels.append(label[idx_sketch])
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        # Depending on how ValidDataset yields, it's typically (image_tensor, label)
+        # We use dataloader_idx to determine modality: 0 for sketch, 1 for photo
+        if len(batch) == 3:
+            tensor, label, type_data = batch
+        else:
+            tensor, label = batch
+            type_data = None
             
-        if idx_photo.any():
-            photo_feat = self.extract_eval_features(tensor[idx_photo], modality='photo')
+        if dataloader_idx == 0:
+            sketch_feat = self.extract_eval_features(tensor, modality='sketch')
+            self.test_sketch_features.append(sketch_feat)
+            self.test_sketch_labels.append(label)
+        elif dataloader_idx == 1:
+            photo_feat = self.extract_eval_features(tensor, modality='photo')
             self.test_photo_features.append(photo_feat)
-            self.test_photo_labels.append(label[idx_photo])
+            self.test_photo_labels.append(label)
 
     def on_validation_epoch_end(self):
         if not self.test_photo_features or not self.test_sketch_features:
@@ -284,8 +286,8 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.test_sketch_labels.clear()
 
     # Reuse validation logic for testing
-    def test_step(self, batch, batch_idx):
-        return self.validation_step(batch, batch_idx)
+    def test_step(self, batch, batch_idx, dataloader_idx=0):
+        return self.validation_step(batch, batch_idx, dataloader_idx)
 
     def on_test_epoch_end(self):
         return self.on_validation_epoch_end()

@@ -45,9 +45,9 @@ if __name__ == '__main__':
     logger = TensorBoardLogger('tb_logs', name=opts.exp_name)
 
     checkpoint_callback = ModelCheckpoint(
-        monitor='val_mAP_all' if opts.dataset != 'sketchy_ext' else 'val_mAP_200',
+        monitor='val_map_all' if opts.dataset != 'sketchy_ext' else 'val_map_200',
         dirpath='saved_models/%s'%opts.exp_name,
-        filename="{epoch:02d}-{val_map:.4f}",
+        filename="{epoch:02d}-{val_map_all:.4f}",
         mode='max',
         save_last=True)
 
