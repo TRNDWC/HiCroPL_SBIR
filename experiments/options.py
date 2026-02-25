@@ -31,9 +31,19 @@ parser.add_argument('--epochs', type=int, default=60)
 parser.add_argument('--workers', type=int, default=4)
 
 # ----------------------
-# ViT Prompt Parameters
+# ViT & HiCroPL Prompt Parameters
 # ----------------------
 parser.add_argument('--prompt_dim', type=int, default=768)
 parser.add_argument('--n_prompts', type=int, default=3)
+
+# HiCroPL Params
+parser.add_argument('--n_ctx', type=int, default=4, help='Number of context tokens for prompts')
+parser.add_argument('--prompt_depth', type=int, default=9, help='Depth of deep prompts')
+parser.add_argument('--cross_layer', type=int, default=4, help='Layer at which bidirectional flow switches direction')
+parser.add_argument('--ctx_init', type=str, default='a photo of a', help='Initial text context')
+
+# HiCroPL Loss Weights
+parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for Cross-Entropy Loss')
+parser.add_argument('--lambda_consist', type=float, default=0.1, help='Weight for Consistency Loss')
 
 opts = parser.parse_args()
