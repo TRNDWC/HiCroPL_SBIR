@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -149,11 +150,17 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.classnames = classnames
         self.model = model
         
+        self.best_metric = 1e-3
+
         # Temporary buffer for metrics
         self.test_photo_features = []
         self.test_sketch_features = []
         self.test_photo_labels = []
         self.test_sketch_labels = []
+
+        # Cache prompt outputs để tránh recompute mỗi validation batch
+        self._cached_photo_prompts = None
+        self._cached_sketch_prompts = None
 
     def on_train_epoch_start(self):
         # Ensure that clip models are in correct mode during training (frozen aside from LN)
@@ -200,15 +207,27 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
-    def extract_eval_features(self, tensor, modality):
-        """Extract normalized visual features for evaluation/inference."""
-        learner = self.model.prompt_learner_photo if modality == 'photo' else self.model.prompt_learner_sketch
-        
+    def on_validation_epoch_start(self):
+        """Cache prompt outputs ONE TIME trước toàn bộ validation loop (giống GitHub CoPrompt)."""
         with torch.no_grad():
-            _, _, first_visual_prompt, _, deeper_visual_prompts = learner(self.classnames)
+            _, _, first_v_p, _, deep_v_p = self.model.prompt_learner_photo(self.classnames)
+            self._cached_photo_prompts = (
+                first_v_p.detach() if first_v_p is not None else None,
+                [p.detach() for p in deep_v_p] if deep_v_p is not None else None,
+            )
+            _, _, first_v_s, _, deep_v_s = self.model.prompt_learner_sketch(self.classnames)
+            self._cached_sketch_prompts = (
+                first_v_s.detach() if first_v_s is not None else None,
+                [p.detach() for p in deep_v_s] if deep_v_s is not None else None,
+            )
+
+    def extract_eval_features(self, tensor, modality):
+        """Extract normalized visual features dùng CACHED prompts (không re-compute learner)."""
+        cached = self._cached_photo_prompts if modality == 'photo' else self._cached_sketch_prompts
+        first_visual_prompt, deeper_visual_prompts = cached
+        with torch.no_grad():
             visual_features = self.model.visual_encoder(tensor, first_visual_prompt, deeper_visual_prompts)
             visual_features_norm = visual_features / visual_features.norm(dim=-1, keepdim=True)
-            
         return visual_features_norm
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
@@ -222,62 +241,86 @@ class HiCroPL_SBIR(pl.LightningModule):
             
         if dataloader_idx == 0:
             sketch_feat = self.extract_eval_features(tensor, modality='sketch')
-            self.test_sketch_features.append(sketch_feat)
-            self.test_sketch_labels.append(label)
+            self.test_sketch_features.append(sketch_feat.detach().cpu())
+            self.test_sketch_labels.append(label.detach().cpu())
         elif dataloader_idx == 1:
             photo_feat = self.extract_eval_features(tensor, modality='photo')
-            self.test_photo_features.append(photo_feat)
-            self.test_photo_labels.append(label)
+            self.test_photo_features.append(photo_feat.detach().cpu())
+            self.test_photo_labels.append(label.detach().cpu())
 
     def on_validation_epoch_end(self):
         if not self.test_photo_features or not self.test_sketch_features:
             print("Warning: Missing features for validation. Skipping metrics.")
             return
 
-        gallery_features = torch.cat(self.test_photo_features, dim=0)
-        gallery_labels = torch.cat(self.test_photo_labels, dim=0)
-        
-        query_features = torch.cat(self.test_sketch_features, dim=0)
-        query_labels = torch.cat(self.test_sketch_labels, dim=0)
-        
-        # Set metrics according to dataset (following paper and model_LN_prompt logic)
-        dataset = getattr(self.opts, 'dataset', 'sketchy') if hasattr(self, 'opts') else getattr(self.args, 'dataset', 'sketchy')
-        if dataset == 'sketchy_ext':
+        # Ghép features & labels (tất cả đã trên CPU)
+        gallery_features = torch.cat(self.test_photo_features, dim=0)   # [N_g, d]
+        query_features   = torch.cat(self.test_sketch_features, dim=0)  # [N_q, d]
+
+        # Dùng numpy array cho labels (giống hệt GitHub CoPrompt)
+        all_photo_category  = np.array(sum([list(t.numpy()) for t in self.test_photo_labels], []))
+        all_sketch_category = np.array(sum([list(t.numpy()) for t in self.test_sketch_labels], []))
+
+        # Xác định top-k theo dataset (giống GitHub)
+        dataset = getattr(self.args, 'dataset', 'sketchy')
+        if dataset == "sketchy_2" or dataset == "sketchy_ext":
             map_k = 200
             p_k = 200
-        elif dataset == 'tuberlin':
+        elif dataset == "quickdraw":
+            map_k = 0
+            p_k = 200
+        else:  # tuberlin, sketchy basic
             map_k = 0
             p_k = 100
-        elif dataset == 'quickdraw':
-            map_k = 0
-            p_k = 200
-        else:  # sketchy (basic)
-            map_k = 0
-            p_k = 200
-            
-        # Calculate Cosine Similarity Matrix
-        sim_matrix = query_features @ gallery_features.T
-        
-        # Create boolean target matrix [n_queries, n_gallery]
-        target_matrix = query_labels.unsqueeze(1) == gallery_labels.unsqueeze(0)
-        
-        val_map = 0.0
-        # Calculate map
+
+        ap        = torch.zeros(len(query_features))
+        precision = torch.zeros(len(query_features))
+        gallery   = gallery_features
+
+        for idx, sk_feat in enumerate(query_features):
+            category = all_sketch_category[idx]
+            distance = F.cosine_similarity(sk_feat.unsqueeze(0), gallery)
+
+            # Target theo numpy where – giống hệt GitHub CoPrompt
+            target = torch.zeros(len(gallery), dtype=torch.bool)
+            target[np.where(all_photo_category == category)] = True
+
+            if map_k != 0:
+                top_k_actual = min(map_k, len(gallery))
+                ap[idx] = retrieval_average_precision(distance.cpu(), target.cpu(), top_k=top_k_actual)
+            else:
+                ap[idx] = retrieval_average_precision(distance.cpu(), target.cpu())
+
+            precision[idx] = retrieval_precision(distance.cpu(), target.cpu(), top_k=p_k)
+
+        mAP            = torch.mean(ap)
+        mean_precision = torch.mean(precision)
+
+        self.log("val_mAP", mAP, on_step=False, on_epoch=True, prog_bar=True)
+        self.log(f"val_P@{p_k}", mean_precision, on_step=False, on_epoch=True)
+
+        # Thêm alias key để ModelCheckpoint có thể monitor đúng tên
         if map_k != 0:
-            top_k_actual = min(map_k, len(gallery_features))
-            val_map = retrieval_average_precision(sim_matrix, target_matrix, top_k=top_k_actual)
-            self.log(f'val_map_{map_k}', val_map, prog_bar=True, logger=True)
+            self.log(f"val_map_{map_k}", mAP, on_step=False, on_epoch=True)
         else:
-            val_map = retrieval_average_precision(sim_matrix, target_matrix)
-            self.log('val_map_all', val_map, prog_bar=True, logger=True)
-            
-        val_p = retrieval_precision(sim_matrix, target_matrix, top_k=p_k)
-        self.log(f'val_p_{p_k}', val_p, prog_bar=True, logger=True)
-        
+            self.log("val_map_all", mAP, on_step=False, on_epoch=True)
+        self.log(f"val_p_{p_k}", mean_precision, on_step=False, on_epoch=True)
+
+        # Track best mAP (giống GitHub)
+        if self.global_step > 0:
+            self.best_metric = self.best_metric if (self.best_metric > mAP.item()) else mAP.item()
+
         if map_k != 0:
-            print(f"\n[Validation] mAP@{map_k}: {val_map:.4f}, P@{p_k}: {val_p:.4f}")
+            print('mAP@{}: {:.4f}, P@{}: {:.4f}, Best mAP: {:.4f}'.format(
+                map_k, mAP.item(), p_k, mean_precision.item(), self.best_metric))
         else:
-            print(f"\n[Validation] mAP@all: {val_map:.4f}, P@{p_k}: {val_p:.4f}")
+            print('mAP@all: {:.4f}, P@{}: {:.4f}, Best mAP: {:.4f}'.format(
+                mAP.item(), p_k, mean_precision.item(), self.best_metric))
+
+        # In train_loss (giống GitHub)
+        train_loss = self.trainer.callback_metrics.get("train_loss", None)
+        if train_loss is not None:
+            print(f"Train loss (epoch avg): {train_loss.item():.6f}")
 
         # Clear buffers
         self.test_photo_features.clear()
