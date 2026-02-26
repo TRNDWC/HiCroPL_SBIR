@@ -204,7 +204,11 @@ class HiCroPL_SBIR(pl.LightningModule):
         # Calculate custom loss
         loss = loss_fn_hicropl(self.args, features)
         
-        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        # Log to TensorBoard (both step and epoch) but NOT to progress bar
+        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
+        # Log to Progress Bar only the epoch average for cleaner output
+        self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=False)
+        
         return loss
 
     def on_validation_epoch_start(self):
@@ -241,27 +245,30 @@ class HiCroPL_SBIR(pl.LightningModule):
             
         if dataloader_idx == 0:
             sketch_feat = self.extract_eval_features(tensor, modality='sketch')
-            self.test_sketch_features.append(sketch_feat.detach().cpu())
-            self.test_sketch_labels.append(label.detach().cpu())
+            self.test_sketch_features.append(sketch_feat.detach()) # Keep on GPU
+            self.test_sketch_labels.append(label.detach())
         elif dataloader_idx == 1:
             photo_feat = self.extract_eval_features(tensor, modality='photo')
-            self.test_photo_features.append(photo_feat.detach().cpu())
-            self.test_photo_labels.append(label.detach().cpu())
+            self.test_photo_features.append(photo_feat.detach())   # Keep on GPU
+            self.test_photo_labels.append(label.detach())
 
     def on_validation_epoch_end(self):
         if not self.test_photo_features or not self.test_sketch_features:
             print("Warning: Missing features for validation. Skipping metrics.")
             return
 
-        # Ghép features & labels (tất cả đã trên CPU)
+        # Ghép features & labels
         gallery_features = torch.cat(self.test_photo_features, dim=0)   # [N_g, d]
         query_features   = torch.cat(self.test_sketch_features, dim=0)  # [N_q, d]
+        
+        all_photo_category  = torch.cat(self.test_photo_labels, dim=0)  # [N_g]
+        all_sketch_category = torch.cat(self.test_sketch_labels, dim=0) # [N_q]
 
-        # Dùng numpy array cho labels (giống hệt GitHub CoPrompt)
-        all_photo_category  = np.array(sum([list(t.numpy()) for t in self.test_photo_labels], []))
-        all_sketch_category = np.array(sum([list(t.numpy()) for t in self.test_sketch_labels], []))
+        # Tính toán ma trận tương quan trên GPU dùng Matrix Multiplication
+        # Vì features đã được normalize, sim = dot product
+        similarity_matrix = query_features @ gallery_features.t()       # [N_q, N_g]
 
-        # Xác định top-k theo dataset (giống GitHub)
+        # Xác định top-k theo dataset
         dataset = getattr(self.args, 'dataset', 'sketchy')
         if dataset == "sketchy_2" or dataset == "sketchy_ext":
             map_k = 200
@@ -269,29 +276,27 @@ class HiCroPL_SBIR(pl.LightningModule):
         elif dataset == "quickdraw":
             map_k = 0
             p_k = 200
-        else:  # tuberlin, sketchy basic
+        else:
             map_k = 0
             p_k = 100
 
-        ap        = torch.zeros(len(query_features))
-        precision = torch.zeros(len(query_features))
-        gallery   = gallery_features
+        ap        = torch.zeros(len(query_features), device=self.device)
+        precision = torch.zeros(len(query_features), device=self.device)
 
-        for idx, sk_feat in enumerate(query_features):
+        for idx in range(len(query_features)):
             category = all_sketch_category[idx]
-            distance = F.cosine_similarity(sk_feat.unsqueeze(0), gallery)
+            distance = similarity_matrix[idx] # Scores on GPU
 
-            # Target theo numpy where – giống hệt GitHub CoPrompt
-            target = torch.zeros(len(gallery), dtype=torch.bool)
-            target[np.where(all_photo_category == category)] = True
+            # Target mask
+            target = (all_photo_category == category)
 
             if map_k != 0:
-                top_k_actual = min(map_k, len(gallery))
-                ap[idx] = retrieval_average_precision(distance.cpu(), target.cpu(), top_k=top_k_actual)
+                top_k_actual = min(map_k, len(gallery_features))
+                ap[idx] = retrieval_average_precision(distance, target, top_k=top_k_actual)
             else:
-                ap[idx] = retrieval_average_precision(distance.cpu(), target.cpu())
+                ap[idx] = retrieval_average_precision(distance, target)
 
-            precision[idx] = retrieval_precision(distance.cpu(), target.cpu(), top_k=p_k)
+            precision[idx] = retrieval_precision(distance, target, top_k=p_k)
 
         mAP            = torch.mean(ap)
         mean_precision = torch.mean(precision)
