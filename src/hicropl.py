@@ -289,6 +289,8 @@ class CrossModalPromptLearner(nn.Module):
     Note: Following the original HiCroPL, prompts are updated via .data.copy_()
     which detaches the gradient. The mapper/LKP act as fixed transformations;
     learning happens in the prompt parameters themselves via encoder gradients.
+    WARNING: In-place data copy might introduce subtle non-determinism across
+    different hardware or CUDA versions due to floating point accumulation.
     """
 
     def __init__(

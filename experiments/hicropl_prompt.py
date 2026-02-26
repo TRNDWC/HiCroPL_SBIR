@@ -1,6 +1,10 @@
 import os
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+import random
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
+import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -13,6 +17,21 @@ from experiments.options import opts
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 if __name__ == '__main__':
+    SEED = 42
+    # Set seed for reproducibility — bao gồm Python, NumPy, PyTorch, CUDA
+    pl.seed_everything(SEED, workers=True)
+
+    def seed_worker(worker_id):
+        """Seed numpy và random trong mỗi DataLoader worker (fix np.random.choice non-determinism)."""
+        worker_seed = torch.initial_seed() % 2**32
+        import numpy as np
+        import random
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+
+    g = torch.Generator()
+    g.manual_seed(SEED)
+
     # 1. Prepare Datasets
     dataset_transforms = Sketchy.data_transform(opts)
     
@@ -23,11 +42,28 @@ if __name__ == '__main__':
     print(f"Train dataset: {len(train_dataset)} samples, {len(train_dataset.all_categories)} categories")
     print(f"Val sketch dataset: {len(val_sketch)} samples")
     print(f"Val photo dataset: {len(val_photo)} samples")
+    # Debug: verify category ordering is consistent across runs
+    print(f"[DEBUG] Val categories (first 5): {val_sketch.all_categories[:5]}")
+    print(f"[DEBUG] Val photo categories (first 5): {val_photo.all_categories[:5]}")
+    assert val_sketch.all_categories == val_photo.all_categories, \
+        "CRITICAL: sketch and photo category lists differ! Fix dataset loading."
 
     # 2. Prepare DataLoaders
-    train_loader = DataLoader(dataset=train_dataset, batch_size=opts.batch_size, num_workers=opts.workers, shuffle=True)
-    val_sketch_loader = DataLoader(dataset=val_sketch, batch_size=opts.test_batch_size, num_workers=opts.workers, shuffle=False)
-    val_photo_loader = DataLoader(dataset=val_photo, batch_size=opts.test_batch_size, num_workers=opts.workers, shuffle=False)
+    train_loader = DataLoader(
+        dataset=train_dataset, batch_size=opts.batch_size,
+        num_workers=opts.workers, shuffle=True,
+        worker_init_fn=seed_worker, generator=g,
+    )
+    val_sketch_loader = DataLoader(
+        dataset=val_sketch, batch_size=opts.test_batch_size,
+        num_workers=opts.workers, shuffle=False,
+        worker_init_fn=seed_worker, generator=g,
+    )
+    val_photo_loader = DataLoader(
+        dataset=val_photo, batch_size=opts.test_batch_size,
+        num_workers=opts.workers, shuffle=False,
+        worker_init_fn=seed_worker, generator=g,
+    )
 
     # 3. Setup CLIP backbones
     print("Loading CLIP models...")
@@ -47,7 +83,7 @@ if __name__ == '__main__':
     checkpoint_callback = ModelCheckpoint(
         monitor='val_map_all' if opts.dataset != 'sketchy_ext' else 'val_map_200',
         dirpath='saved_models/%s'%opts.exp_name,
-        filename="{epoch:02d}-{val_map_all:.4f}",
+        filename="{epoch:02d}-{val_map_200:.4f}" if opts.dataset == 'sketchy_ext' else "{epoch:02d}-{val_map_all:.4f}",
         mode='max',
         save_last=True)
 
@@ -60,7 +96,8 @@ if __name__ == '__main__':
     # 5. Initialize Trainer
     trainer = Trainer(accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1,
         min_epochs=1, max_epochs=opts.epochs,
-        benchmark=True,
+        benchmark=False,  # Set False for reproducibility (True causes CUDNN non-determinism)
+        deterministic=True,
         logger=logger,
         check_val_every_n_epoch=1,
         enable_progress_bar=True,
@@ -79,4 +116,4 @@ if __name__ == '__main__':
         model = HiCroPL_SBIR.load_from_checkpoint(ckpt_path, cfg=opts, args=opts, classnames=classnames, model=custom_clip)
 
     print ('\nBeginning training HiCroPL-SBIR... Good luck!')
-    trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
+    trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader], ckpt_path=ckpt_path)

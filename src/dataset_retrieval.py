@@ -59,7 +59,7 @@ class Sketchy(torch.utils.data.Dataset):
         dataset_key = self.opts.dataset if hasattr(self.opts, 'dataset') else 'sketchy'
         unseen_classes = UNSEEN_CLASSES.get(dataset_key, UNSEEN_CLASSES['sketchy'])
 
-        self.all_categories = os.listdir(os.path.join(self.opts.data_dir, 'sketch'))
+        self.all_categories = sorted(os.listdir(os.path.join(self.opts.data_dir, 'sketch')))
         if '.ipynb_checkpoints' in self.all_categories:
             self.all_categories.remove('.ipynb_checkpoints')
             
@@ -68,12 +68,12 @@ class Sketchy(torch.utils.data.Dataset):
             if used_cat is None:
                 self.all_categories = self.all_categories[:int(len(self.all_categories)*self.opts.data_split)]
             else:
-                self.all_categories = list(set(self.all_categories) - set(used_cat))
+                self.all_categories = sorted(set(self.all_categories) - set(used_cat))  # sorted!
         else:
             if mode == 'train':
-                self.all_categories = list(set(self.all_categories) - set(unseen_classes))
+                self.all_categories = sorted(set(self.all_categories) - set(unseen_classes))  # sorted!
             else:  # mode == 'val'
-                self.all_categories = unseen_classes
+                self.all_categories = sorted(unseen_classes)  # sorted!
 
         self.all_sketches_path = []
         self.all_photos_path = {}
@@ -101,11 +101,11 @@ class Sketchy(torch.utils.data.Dataset):
             
             # Only add category if both sketches and photos exist
             if len(sketches) > 0 and len(photos) > 0:
-                self.all_sketches_path.extend(sketches)
-                self.all_photos_path[category] = photos
+                self.all_sketches_path.extend(sorted(sketches))  # sorted!
+                self.all_photos_path[category] = sorted(photos)  # sorted!
                 valid_categories.append(category)
         
-        # Update all_categories to only include valid ones
+        # Update all_categories to only include valid ones (already sorted from above)
         self.all_categories = valid_categories
 
     def __len__(self):
@@ -163,14 +163,14 @@ class ValidDataset(torch.utils.data.Dataset):
         
         dataset_key = self.args.dataset if hasattr(self.args, 'dataset') else 'sketchy'
         unseen_classes = UNSEEN_CLASSES.get(dataset_key, UNSEEN_CLASSES['sketchy'])
-        self.all_categories = list(set(unseen_classes))
+        self.all_categories = sorted(set(unseen_classes))
 
         self.paths = []
         for category in self.all_categories:
             if self.mode == "photo":
-                self.paths.extend(glob.glob(os.path.join(self.args.data_dir, 'photo', category, '*')))
+                self.paths.extend(sorted(glob.glob(os.path.join(self.args.data_dir, 'photo', category, '*'))))
             else:
-                self.paths.extend(glob.glob(os.path.join(self.args.data_dir, 'sketch', category, '*')))
+                self.paths.extend(sorted(glob.glob(os.path.join(self.args.data_dir, 'sketch', category, '*'))))
 
     def __getitem__(self, index):
         filepath = self.paths[index]                
