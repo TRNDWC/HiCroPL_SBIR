@@ -46,8 +46,8 @@ class CustomCLIP(nn.Module):
         self.clip_model = clip_model
         self.clip_model_frozen = clip_model_frozen
         
-        # Freeze the base CLIP models according to paper
-        self.clip_model.apply(freeze_all_but_bn)
+        # Freeze the base CLIP models completely
+        self.clip_model.apply(freeze_model)
         self.clip_model_frozen.apply(freeze_model)
         
         self.dtype = clip_model.dtype
@@ -163,10 +163,9 @@ class HiCroPL_SBIR(pl.LightningModule):
         self._cached_sketch_prompts = None
 
     def on_train_epoch_start(self):
-        # Ensure that clip models are in correct mode during training (frozen aside from LN)
+        # Ensure that clip models are in fully eval mode during training
         self.model.clip_model_frozen.eval()
         self.model.clip_model.eval()
-        self.model.clip_model.apply(set_ln_to_train)
 
     def configure_optimizers(self):
         clip_ln_params = []
@@ -181,17 +180,18 @@ class HiCroPL_SBIR(pl.LightningModule):
                 else:
                     clip_ln_params.append(p)
         
-        print(f"Number of trainable prompt params: {sum(p.numel() for p in prompt_params):,}")
-        print(f"Number of trainable LayerNorm params: {sum(p.numel() for p in clip_ln_params):,}")
+        self.print(f"Number of trainable prompt params: {sum(p.numel() for p in prompt_params):,}")
+        self.print(f"Number of trainable LayerNorm params: {sum(p.numel() for p in clip_ln_params):,}")
         
         prompt_lr = getattr(self.cfg, 'prompt_lr', 1e-5)
         clip_ln_lr = getattr(self.cfg, 'clip_LN_lr', 1e-5)
         weight_decay = getattr(self.cfg, 'weight_decay', 1e-4)
-        
-        optimizer = torch.optim.Adam([
-            {'params': prompt_params, 'lr': prompt_lr},
-            {'params': clip_ln_params, 'lr': clip_ln_lr}
-        ], weight_decay=weight_decay)
+
+        param_groups = [{'params': prompt_params, 'lr': prompt_lr}]
+        if clip_ln_params:
+            param_groups.append({'params': clip_ln_params, 'lr': clip_ln_lr})
+
+        optimizer = torch.optim.Adam(param_groups, weight_decay=weight_decay)
         
         return optimizer
 
@@ -206,8 +206,8 @@ class HiCroPL_SBIR(pl.LightningModule):
         
         # Log to TensorBoard (both step and epoch) but NOT to progress bar
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
-        # Log to Progress Bar only the epoch average for cleaner output
-        self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=False)
+        # Log to Progress Bar only the epoch average for cleaner output (set prog_bar=False as requested)
+        self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False, logger=False)
         
         return loss
 
@@ -254,7 +254,7 @@ class HiCroPL_SBIR(pl.LightningModule):
 
     def on_validation_epoch_end(self):
         if not self.test_photo_features or not self.test_sketch_features:
-            print("Warning: Missing features for validation. Skipping metrics.")
+            self.print("Warning: Missing features for validation. Skipping metrics.")
             return
 
         # Ghép features & labels
@@ -301,8 +301,10 @@ class HiCroPL_SBIR(pl.LightningModule):
         mAP            = torch.mean(ap)
         mean_precision = torch.mean(precision)
 
-        self.log("val_mAP", mAP, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val_mAP", mAP, on_step=False, on_epoch=True, prog_bar=False)
         self.log(f"val_P@{p_k}", mean_precision, on_step=False, on_epoch=True)
+        # Log best metric (internally) without cluttering the progress bar
+        self.log("best_mAP", self.best_metric, on_step=False, on_epoch=True, prog_bar=False)
 
         # Thêm alias key để ModelCheckpoint có thể monitor đúng tên
         if map_k != 0:
@@ -316,16 +318,16 @@ class HiCroPL_SBIR(pl.LightningModule):
             self.best_metric = self.best_metric if (self.best_metric > mAP.item()) else mAP.item()
 
         if map_k != 0:
-            print('mAP@{}: {:.4f}, P@{}: {:.4f}, Best mAP: {:.4f}'.format(
+            self.print('mAP@{}: {:.4f}, P@{}: {:.4f}, Best mAP: {:.4f}'.format(
                 map_k, mAP.item(), p_k, mean_precision.item(), self.best_metric))
         else:
-            print('mAP@all: {:.4f}, P@{}: {:.4f}, Best mAP: {:.4f}'.format(
+            self.print('mAP@all: {:.4f}, P@{}: {:.4f}, Best mAP: {:.4f}'.format(
                 mAP.item(), p_k, mean_precision.item(), self.best_metric))
 
         # In train_loss (giống GitHub)
         train_loss = self.trainer.callback_metrics.get("train_loss", None)
         if train_loss is not None:
-            print(f"Train loss (epoch avg): {train_loss.item():.6f}")
+            self.print(f"Train loss (epoch avg): {train_loss.item():.6f}")
 
         # Clear buffers
         self.test_photo_features.clear()

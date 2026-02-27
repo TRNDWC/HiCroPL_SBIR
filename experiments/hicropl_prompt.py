@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, RichProgressBar
 
 from src.clip import clip
 from src.model_hicropl import CustomCLIP, HiCroPL_SBIR
@@ -93,6 +93,10 @@ if __name__ == '__main__':
     else:
         print ('resuming training from %s'%ckpt_path)
 
+    rich_progress_bar = RichProgressBar(
+        leave=True
+    )
+
     # 5. Initialize Trainer
     trainer = Trainer(accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1,
         min_epochs=1, max_epochs=opts.epochs,
@@ -101,7 +105,7 @@ if __name__ == '__main__':
         logger=logger,
         check_val_every_n_epoch=1,
         enable_progress_bar=True,
-        callbacks=[checkpoint_callback]
+        callbacks=[checkpoint_callback, rich_progress_bar]
     )
 
     # 6. Initialize Model

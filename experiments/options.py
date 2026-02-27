@@ -45,5 +45,7 @@ parser.add_argument('--ctx_init', type=str, default='a photo of a', help='Initia
 # HiCroPL Loss Weights
 parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for Cross-Entropy Loss')
 parser.add_argument('--lambda_consist', type=float, default=0.1, help='Weight for Consistency Loss')
+parser.add_argument('--lambda_infonce', type=float, default=1.0, help='Weight for InfoNCE Loss')
+parser.add_argument('--temperature', type=float, default=0.07, help='Temperature for InfoNCE Loss')
 
 opts = parser.parse_args()

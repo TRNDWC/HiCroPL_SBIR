@@ -2,6 +2,35 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+def cross_loss(feature_1, feature_2, temperature):
+    device = feature_1.device
+    labels = torch.cat([torch.arange(len(feature_1)) for _ in range(2)], dim=0)
+    labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
+    labels = labels.to(device)
+
+    feature_1 = F.normalize(feature_1, dim=1)
+    feature_2 = F.normalize(feature_2, dim=1)
+    features = torch.cat((feature_1, feature_2), dim=0)  # (2*B, Feat_dim)
+
+    similarity_matrix = torch.matmul(features, features.T)  # (2*B, 2*B)
+
+    # discard the main diagonal from both: labels and similarities matrix
+    mask = torch.eye(labels.shape[0], dtype=torch.bool).to(device)
+    labels = labels[~mask].view(labels.shape[0], -1)
+    similarity_matrix = similarity_matrix[~mask].view(similarity_matrix.shape[0], -1)  # (2*B, 2*B - 1)
+
+    # select and combine multiple positives
+    positives = similarity_matrix[labels.bool()].view(labels.shape[0], -1)  # (2*B, 1)
+
+    negatives = similarity_matrix[~labels.bool()].view(similarity_matrix.shape[0], -1)  # (2*B, 2*(B - 1))
+
+    logits = torch.cat([positives, negatives], dim=1)
+    labels_target = torch.zeros(logits.shape[0], dtype=torch.long).to(device)
+
+    logits = logits / temperature
+
+    return F.cross_entropy(logits, labels_target)
+
 def loss_fn_hicropl(args, features):
     """
     Combined Loss Function for HiCroPL-SBIR.
@@ -45,7 +74,12 @@ def loss_fn_hicropl(args, features):
     lambda_consist = getattr(args, 'lambda_consist', 0.1)
     loss_consist = lambda_consist * (loss_consist_photo + loss_consist_sk)
 
+    # --- 4. InfoNCE Loss (sketch - positive_photo) ---
+    temperature = getattr(args, 'temperature', 0.07)
+    lambda_infonce = getattr(args, 'lambda_infonce', 1.0)
+    loss_infonce = lambda_infonce * cross_loss(sketch_feat, photo_feat, temperature)
+
     # Total aggregate loss
-    total_loss = loss_triplet + loss_cls + loss_consist
+    total_loss = loss_cls + loss_consist + loss_infonce
 
     return total_loss
