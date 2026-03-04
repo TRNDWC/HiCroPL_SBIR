@@ -42,10 +42,10 @@ def loss_fn_hicropl(args, features):
     L4: Cross-Entropy Loss (text - photo) + Cross-Entropy Loss (text - sketch) - Classification
     """
     (
-        photo_feat, frozen_photo_feat, logits_photo,
-        sketch_feat, frozen_sketch_feat, logits_sketch,
+        photo_feat, logits_photo,
+        sketch_feat, logits_sketch,
         neg_feat, label,
-        frozen_photo_aug_feat, frozen_sketch_aug_feat
+        photo_aug_feat, sketch_aug_feat
     ) = features
 
     device = logits_photo.device
@@ -54,7 +54,7 @@ def loss_fn_hicropl(args, features):
     # Get hyperparameters
     temperature = getattr(args, 'temperature', 0.07)
     lambda_triplet = getattr(args, 'lambda_triplet', 1.0)
-    lambda_cross_modal = getattr(args, 'lambda_cross_modal', 1.0)
+    lambda_cross_modal = getattr(args, 'lambda_cross_modal', 2.0)
     lambda_consistency = getattr(args, 'lambda_consistency', 1.0)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
     triplet_margin = getattr(args, 'triplet_margin', 0.3)
@@ -71,9 +71,9 @@ def loss_fn_hicropl(args, features):
     loss_cross_modal = lambda_cross_modal * cross_loss(sketch_feat, photo_feat, temperature)
 
     # --- L3: InfoNCE Loss (sketch - sketch_aug) + (photo - photo_aug) ---
-    # Consistency regularization with frozen augmented features
-    loss_consistency_sketch = cross_loss(sketch_feat, frozen_sketch_aug_feat, temperature)
-    loss_consistency_photo = cross_loss(photo_feat, frozen_photo_aug_feat, temperature)
+    # Self-consistency regularization (CoPrompt-style: both trainable)
+    loss_consistency_sketch = cross_loss(sketch_feat, sketch_aug_feat, temperature)
+    loss_consistency_photo = cross_loss(photo_feat, photo_aug_feat, temperature)
     loss_consistency = lambda_consistency * (loss_consistency_sketch + loss_consistency_photo)
 
     # --- L4: Cross-Entropy Loss (text - photo) + (text - sketch) ---
