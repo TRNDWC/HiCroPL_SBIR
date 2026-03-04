@@ -46,9 +46,9 @@ class CustomCLIP(nn.Module):
         self.clip_model = clip_model
         self.clip_model_frozen = clip_model_frozen
         
-        # Freeze the base CLIP models completely
-        self.clip_model.apply(freeze_model)
-        self.clip_model_frozen.apply(freeze_model)
+        # Freeze the base CLIP models (except LayerNorm which will be trainable)
+        self.clip_model.apply(freeze_all_but_bn)
+        self.clip_model_frozen.apply(freeze_model)  # Frozen model stays completely frozen
         
         self.dtype = clip_model.dtype
         self.logit_scale = clip_model.logit_scale
@@ -83,6 +83,15 @@ class CustomCLIP(nn.Module):
         # --- 2. Encoders with Deep Injection ---
         self.text_encoder = TextEncoder(clip_model)
         self.visual_encoder = VisualEncoder(clip_model)
+        
+        # Unfreeze LayerNorm in encoders for training (following HiCroPL practice)
+        for name, param in self.text_encoder.named_parameters():
+            if 'ln' in name.lower() or 'layernorm' in name.lower():
+                param.requires_grad_(True)
+        
+        for name, param in self.visual_encoder.named_parameters():
+            if 'ln' in name.lower() or 'layernorm' in name.lower():
+                param.requires_grad_(True)
         
         # --- 3. Frozen Reference Model ---
         self.frozen_visual_encoder = clip_model_frozen.visual
