@@ -98,10 +98,11 @@ class CustomCLIP(nn.Module):
 
     def forward(self, x, classnames):
         """
-        Forward pass for training.
-        x: batch from the DataLoader (e.g. [sk_tensor, img_tensor, neg_tensor, category, ...])
+        Forward pass for training with augmentation support.
+        x: batch from DataLoader with augmented images
+        Format: [sk_tensor, img_tensor, neg_tensor, sk_aug_tensor, img_aug_tensor, label, filename]
         """
-        sk_tensor, photo_tensor, neg_tensor, label = x[:4]
+        sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
         
         # 1. Evaluate Prompt Learners Once
         (
@@ -119,7 +120,7 @@ class CustomCLIP(nn.Module):
         text_feat_sketch = self.text_encoder(text_input_s, tok_s, deep_t_s)
         text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
         
-        # 3. Extract Visual Features
+        # 3. Extract Visual Features with Prompts (Trainable Branch)
         # - Photo
         photo_feat = self.visual_encoder(photo_tensor, first_v_p, deep_v_p)
         photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
@@ -132,13 +133,21 @@ class CustomCLIP(nn.Module):
         neg_feat = self.visual_encoder(neg_tensor, first_v_p, deep_v_p)
         neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
         
-        # 4. Extract Frozen Visual Features
+        # 4. Extract Frozen Visual Features (Consistency Reference)
+        # Frozen features for original images
         with torch.no_grad():
             frozen_photo_feat = self.frozen_visual_encoder(photo_tensor.type(self.dtype))
             frozen_photo_feat = frozen_photo_feat / frozen_photo_feat.norm(dim=-1, keepdim=True)
             
             frozen_sketch_feat = self.frozen_visual_encoder(sk_tensor.type(self.dtype))
             frozen_sketch_feat = frozen_sketch_feat / frozen_sketch_feat.norm(dim=-1, keepdim=True)
+            
+            # Frozen features for augmented images (CoPrompt-style)
+            frozen_photo_aug_feat = self.frozen_visual_encoder(photo_aug_tensor.type(self.dtype))
+            frozen_photo_aug_feat = frozen_photo_aug_feat / frozen_photo_aug_feat.norm(dim=-1, keepdim=True)
+            
+            frozen_sketch_aug_feat = self.frozen_visual_encoder(sk_aug_tensor.type(self.dtype))
+            frozen_sketch_aug_feat = frozen_sketch_aug_feat / frozen_sketch_aug_feat.norm(dim=-1, keepdim=True)
             
         # 5. Compute Logits
         logit_scale = self.logit_scale.exp()
@@ -148,7 +157,8 @@ class CustomCLIP(nn.Module):
         return (
             photo_feat, frozen_photo_feat, logits_photo,
             sketch_feat, frozen_sketch_feat, logits_sketch,
-            neg_feat, label
+            neg_feat, label,
+            frozen_photo_aug_feat, frozen_sketch_aug_feat
         )
 
 

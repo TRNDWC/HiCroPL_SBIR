@@ -42,11 +42,11 @@ parser.add_argument('--prompt_depth', type=int, default=9, help='Depth of deep p
 parser.add_argument('--cross_layer', type=int, default=4, help='Layer at which bidirectional flow switches direction')
 parser.add_argument('--ctx_init', type=str, default='a photo of a', help='Initial text context for photo prompt learner')
 parser.add_argument('--ctx_init_sketch', type=str, default='a sketch of a', help='Initial text context for sketch prompt learner')
-
-# HiCroPL Loss Weights
-parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for Cross-Entropy Loss')
-parser.add_argument('--lambda_consist', type=float, default=0.1, help='Weight for Consistency Loss')
-parser.add_argument('--lambda_infonce', type=float, default=1.0, help='Weight for InfoNCE Loss')
+parser.add_argument('--lambda_triplet', type=float, default=1.0, help='Weight for L1: Triplet Loss')
+parser.add_argument('--lambda_cross_modal', type=float, default=1.0, help='Weight for L2: InfoNCE (sketch-photo)')
+parser.add_argument('--lambda_consistency', type=float, default=1.0, help='Weight for L3: InfoNCE (augmentation consistency)')
+parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for L4: Cross-Entropy Loss')
+parser.add_argument('--triplet_margin', type=float, default=0.3, help='Margin for Triplet Loss')
 parser.add_argument('--temperature', type=float, default=0.07, help='Temperature for InfoNCE Loss')
 
 opts = parser.parse_args()

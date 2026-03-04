@@ -54,6 +54,7 @@ class Sketchy(torch.utils.data.Dataset):
 
         self.opts = opts
         self.transform = transform
+        self.augmentation = augmented_transform()  # Strong augmentation for consistency
         self.return_orig = return_orig
 
         dataset_key = self.opts.dataset if hasattr(self.opts, 'dataset') else 'sketchy'
@@ -131,11 +132,16 @@ class Sketchy(torch.utils.data.Dataset):
         img_tensor = self.transform(img_data)
         neg_tensor = self.transform(neg_data)
         
+        # Apply strong augmentation for consistency regularization
+        sk_aug_tensor = self.augmentation(sk_data)
+        img_aug_tensor = self.augmentation(img_data)
+        
         if self.return_orig:
             return sk_tensor, img_tensor, neg_tensor, self.all_categories.index(category), filename, \
                 sk_data, img_data, neg_data
         else:
-            return sk_tensor, img_tensor, neg_tensor, self.all_categories.index(category), filename
+            return sk_tensor, img_tensor, neg_tensor, sk_aug_tensor, img_aug_tensor, \
+                   self.all_categories.index(category), filename
 
     @staticmethod
     def data_transform(opts):
@@ -145,6 +151,22 @@ class Sketchy(torch.utils.data.Dataset):
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         return dataset_transforms
+
+def augmented_transform():
+    """Strong augmentation for consistency regularization (CoPrompt-style)"""
+    transform_list = [
+        transforms.RandomResizedCrop(224, scale=(0.85, 1.0)),
+        transforms.RandomHorizontalFlip(0.8),
+        transforms.ColorJitter(
+            brightness=0.15, contrast=0.15, saturation=0.15),
+        transforms.RandomRotation(70),
+        transforms.ToTensor(),
+        transforms.RandomErasing(p=0.5, scale=(
+            0.02, 0.33), ratio=(0.3, 3.3), value=0),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
+                             0.229, 0.224, 0.225])
+    ]
+    return transforms.Compose(transform_list)
 
 def normal_transform():
     dataset_transforms = transforms.Compose([

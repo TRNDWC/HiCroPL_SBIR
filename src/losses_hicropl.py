@@ -35,51 +35,53 @@ def loss_fn_hicropl(args, features):
     """
     Combined Loss Function for HiCroPL-SBIR.
     
-    Includes:
-    1. Triplet Loss (Semantic retrieval alignment)
-    2. Cross-Entropy Loss (Photo vs Text, Sketch vs Text)
-    3. Consistency Loss (Photo vs Frozen Photo, Sketch vs Frozen Sketch)
+    Loss Components (CoPrompt-style):
+    L1: Triplet Loss (sketch, positive_photo, negative_photo) - Retrieval alignment
+    L2: InfoNCE Loss (sketch - positive_photo) - Cross-modal alignment
+    L3: InfoNCE Loss (sketch - sketch_aug) + InfoNCE (photo - photo_aug) - Consistency regularization
+    L4: Cross-Entropy Loss (text - photo) + Cross-Entropy Loss (text - sketch) - Classification
     """
     (
         photo_feat, frozen_photo_feat, logits_photo,
         sketch_feat, frozen_sketch_feat, logits_sketch,
-        neg_feat, label
+        neg_feat, label,
+        frozen_photo_aug_feat, frozen_sketch_aug_feat
     ) = features
 
     device = logits_photo.device
     label = label.to(device)
+    
+    # Get hyperparameters
+    temperature = getattr(args, 'temperature', 0.07)
+    lambda_triplet = getattr(args, 'lambda_triplet', 1.0)
+    lambda_cross_modal = getattr(args, 'lambda_cross_modal', 1.0)
+    lambda_consistency = getattr(args, 'lambda_consistency', 1.0)
+    lambda_ce = getattr(args, 'lambda_ce', 1.0)
+    triplet_margin = getattr(args, 'triplet_margin', 0.3)
 
-    # --- 1. Triplet Loss for Retrieval Alignment ---
+    # --- L1: Triplet Loss (sketch, positive_photo, negative_photo) ---
     distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
     triplet = nn.TripletMarginWithDistanceLoss(
-        distance_function=distance_fn, margin=0.3
+        distance_function=distance_fn, 
+        margin=triplet_margin
     )
-    # Target: sketch should be closer to pos_photo than neg_photo
-    loss_triplet = triplet(sketch_feat, photo_feat, neg_feat)
+    loss_triplet = lambda_triplet * triplet(sketch_feat, photo_feat, neg_feat)
 
-    # --- 2. Cross-Entropy Losses for Classification ---
+    # --- L2: InfoNCE Loss (sketch - positive_photo) ---
+    loss_cross_modal = lambda_cross_modal * cross_loss(sketch_feat, photo_feat, temperature)
+
+    # --- L3: InfoNCE Loss (sketch - sketch_aug) + (photo - photo_aug) ---
+    # Consistency regularization with frozen augmented features
+    loss_consistency_sketch = cross_loss(sketch_feat, frozen_sketch_aug_feat, temperature)
+    loss_consistency_photo = cross_loss(photo_feat, frozen_photo_aug_feat, temperature)
+    loss_consistency = lambda_consistency * (loss_consistency_sketch + loss_consistency_photo)
+
+    # --- L4: Cross-Entropy Loss (text - photo) + (text - sketch) ---
     loss_ce_photo = F.cross_entropy(logits_photo, label)
-    loss_ce_sk = F.cross_entropy(logits_sketch, label)
-    
-    # Weight classification loss based on arguments (default to 1.0 if not specified)
-    lambda_ce = getattr(args, 'lambda_ce', 1.0)
-    loss_cls = lambda_ce * (loss_ce_photo + loss_ce_sk)
+    loss_ce_sketch = F.cross_entropy(logits_sketch, label)
+    loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
-    # --- 3. Consistency Losses ---
-    # Prevents learned prompts from drifting too far from original frozen CLIP features
-    loss_consist_photo = 1.0 - F.cosine_similarity(photo_feat, frozen_photo_feat).mean()
-    loss_consist_sk = 1.0 - F.cosine_similarity(sketch_feat, frozen_sketch_feat).mean()
-    
-    # Weight consistency loss based on arguments (default to 0.1 if not specified)
-    lambda_consist = getattr(args, 'lambda_consist', 1)
-    loss_consist = lambda_consist * (loss_consist_photo + loss_consist_sk)
-
-    # --- 4. InfoNCE Loss (sketch - positive_photo) ---
-    temperature = getattr(args, 'temperature', 0.07)
-    lambda_infonce = getattr(args, 'lambda_infonce', 1.0)
-    loss_infonce = lambda_infonce * cross_loss(sketch_feat, photo_feat, temperature)
-
-    # Total aggregate loss
-    total_loss = loss_triplet + loss_cls + loss_consist + loss_infonce
+    # Total loss
+    total_loss = loss_triplet + loss_cross_modal + loss_consistency + loss_ce
 
     return total_loss
