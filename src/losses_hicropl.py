@@ -71,7 +71,7 @@ def loss_fn_hicropl(args, features):
     loss_consist_sk = 1.0 - F.cosine_similarity(sketch_feat, frozen_sketch_feat).mean()
     
     # Weight consistency loss based on arguments (default to 0.1 if not specified)
-    lambda_consist = getattr(args, 'lambda_consist', 0.1)
+    lambda_consist = getattr(args, 'lambda_consist', 1)
     loss_consist = lambda_consist * (loss_consist_photo + loss_consist_sk)
 
     # --- 4. InfoNCE Loss (sketch - positive_photo) ---
@@ -80,6 +80,6 @@ def loss_fn_hicropl(args, features):
     loss_infonce = lambda_infonce * cross_loss(sketch_feat, photo_feat, temperature)
 
     # Total aggregate loss
-    total_loss = loss_cls + loss_consist + loss_infonce
+    total_loss = loss_triplet + loss_cls + loss_consist + loss_infonce
 
     return total_loss
