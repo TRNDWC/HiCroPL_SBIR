@@ -35,17 +35,19 @@ def loss_fn_hicropl(args, features):
     """
     Combined Loss Function for HiCroPL-SBIR.
     
-    Loss Components (CoPrompt-style):
+    Loss Components:
     L1: Triplet Loss (sketch, positive_photo, negative_photo) - Retrieval alignment
     L2: InfoNCE Loss (sketch - positive_photo) - Cross-modal alignment
-    L3: InfoNCE Loss (sketch - sketch_aug) + InfoNCE (photo - photo_aug) - Consistency regularization
-    L4: Cross-Entropy Loss (text - photo) + Cross-Entropy Loss (text - sketch) - Classification
+    L3: InfoNCE Loss (sketch - sketch_aug) + (photo - photo_aug) - Consistency regularization
+    L4: Cross-Entropy Loss (text - photo) + (text - sketch) - Classification
+    L5: Cross-Entropy Loss (text - photo_aug) + (text - sketch_aug) - Augmented Classification
     """
     (
         photo_feat, logits_photo,
         sketch_feat, logits_sketch,
         neg_feat, label,
-        photo_aug_feat, sketch_aug_feat
+        photo_aug_feat, sketch_aug_feat,
+        logits_photo_aug, logits_sketch_aug
     ) = features
 
     device = logits_photo.device
@@ -57,6 +59,7 @@ def loss_fn_hicropl(args, features):
     lambda_cross_modal = getattr(args, 'lambda_cross_modal', 2.0)
     lambda_consistency = getattr(args, 'lambda_consistency', 1.0)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
+    lambda_ce_aug = getattr(args, 'lambda_ce_aug', 1.0)
     triplet_margin = getattr(args, 'triplet_margin', 0.3)
 
     # --- L1: Triplet Loss (sketch, positive_photo, negative_photo) ---
@@ -80,8 +83,14 @@ def loss_fn_hicropl(args, features):
     loss_ce_photo = F.cross_entropy(logits_photo, label)
     loss_ce_sketch = F.cross_entropy(logits_sketch, label)
     loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
+    
+    # --- L5: Cross-Entropy Loss (text - photo_aug) + (text - sketch_aug) ---
+    # Classification loss for augmented images
+    loss_ce_photo_aug = F.cross_entropy(logits_photo_aug, label)
+    loss_ce_sketch_aug = F.cross_entropy(logits_sketch_aug, label)
+    loss_ce_aug = lambda_ce_aug * (loss_ce_photo_aug + loss_ce_sketch_aug)
 
     # Total loss
-    total_loss = loss_triplet + loss_cross_modal + loss_consistency + loss_ce
+    total_loss = loss_cross_modal + loss_consistency + loss_ce + loss_ce_aug
 
     return total_loss

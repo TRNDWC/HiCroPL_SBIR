@@ -208,12 +208,12 @@ class VisualEncoder(nn.Module):
         self.proj = vit.proj
         self.dtype = clip_model.dtype
 
-    def forward(self, image, first_visual_prompt, deeper_visual_prompts):
+    def forward(self, image, first_visual_prompt=None, deeper_visual_prompts=None):
         """
         Args:
             image: [B, 3, 224, 224] - input image
-            first_visual_prompt: [n_ctx, v_dim] - prompt for first layer
-            deeper_visual_prompts: list of L-1 tensors [n_ctx, v_dim] for layers 1..L-1
+            first_visual_prompt: [n_ctx, v_dim] - prompt for first layer (None = no prompts)
+            deeper_visual_prompts: list of L-1 tensors [n_ctx, v_dim] for layers 1..L-1 (None = no prompts)
         Returns:
             [B, embed_dim] - image features (e.g. [B, 512])
         """
@@ -229,20 +229,23 @@ class VisualEncoder(nn.Module):
         x = torch.cat([cls_token, x], dim=1)  # [B, grid^2+1, width]
         x = x + self.positional_embedding.to(x.dtype)
 
-        # Attach first layer visual prompt (after positional embedding)
-        n_ctx = first_visual_prompt.shape[0]
-        visual_ctx = (
-            first_visual_prompt.unsqueeze(0)
-            .expand(x.shape[0], -1, -1)
-            .to(x.dtype)
-        )  # [B, n_ctx, width]
-        x = torch.cat([x, visual_ctx], dim=1)  # [B, grid^2+1+n_ctx, width]
+        # Attach first layer visual prompt (after positional embedding) - if provided
+        n_ctx = 0
+        if first_visual_prompt is not None:
+            n_ctx = first_visual_prompt.shape[0]
+            visual_ctx = (
+                first_visual_prompt.unsqueeze(0)
+                .expand(x.shape[0], -1, -1)
+                .to(x.dtype)
+            )  # [B, n_ctx, width]
+            x = torch.cat([x, visual_ctx], dim=1)  # [B, grid^2+1+n_ctx, width]
 
         x = self.ln_pre(x)
         x = x.permute(1, 0, 2)  # NLD -> LND
 
         for i, block in enumerate(self.transformer_resblocks):
-            if i > 0 and i <= len(deeper_visual_prompts):
+            # Replace prompts at deeper layers - if provided
+            if n_ctx > 0 and deeper_visual_prompts is not None and i > 0 and i <= len(deeper_visual_prompts):
                 # Remove previous layer's prompt tokens and attach new ones
                 prefix = x[: x.shape[0] - n_ctx, :, :]  # all tokens except prompts
                 visual_ctx = deeper_visual_prompts[i - 1]  # [n_ctx, width]

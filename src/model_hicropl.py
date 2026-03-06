@@ -133,12 +133,13 @@ class CustomCLIP(nn.Module):
         neg_feat = self.visual_encoder(neg_tensor, first_v_p, deep_v_p)
         neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
         
-        # 4. Extract Augmented Visual Features (Trainable - CoPrompt style)
-        # Use TRAINABLE branch for augmented images (with prompts)
-        photo_aug_feat = self.visual_encoder(photo_aug_tensor, first_v_p, deep_v_p)
+        # 4. Extract Augmented Visual Features WITHOUT Learnable Prompts
+        # Use encoder with NO prompts (like frozen CLIP) for augmented images
+        # This provides pure visual features without bidirectional knowledge flow
+        photo_aug_feat = self.visual_encoder(photo_aug_tensor, None, None)
         photo_aug_feat = photo_aug_feat / photo_aug_feat.norm(dim=-1, keepdim=True)
         
-        sketch_aug_feat = self.visual_encoder(sk_aug_tensor, first_v_s, deep_v_s)
+        sketch_aug_feat = self.visual_encoder(sk_aug_tensor, None, None)
         sketch_aug_feat = sketch_aug_feat / sketch_aug_feat.norm(dim=-1, keepdim=True)
             
         # 5. Compute Logits
@@ -146,11 +147,16 @@ class CustomCLIP(nn.Module):
         logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
         logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
         
+        # 6. Compute Logits for Augmented Images
+        logits_photo_aug = logit_scale * photo_aug_feat @ text_feat_photo.t()
+        logits_sketch_aug = logit_scale * sketch_aug_feat @ text_feat_sketch.t()
+        
         return (
             photo_feat, logits_photo,
             sketch_feat, logits_sketch,
             neg_feat, label,
-            photo_aug_feat, sketch_aug_feat
+            photo_aug_feat, sketch_aug_feat,
+            logits_photo_aug, logits_sketch_aug
         )
 
 

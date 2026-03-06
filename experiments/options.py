@@ -46,6 +46,7 @@ parser.add_argument('--lambda_triplet', type=float, default=1.0, help='Weight fo
 parser.add_argument('--lambda_cross_modal', type=float, default=1.0, help='Weight for L2: InfoNCE (sketch-photo)')
 parser.add_argument('--lambda_consistency', type=float, default=1.0, help='Weight for L3: InfoNCE (augmentation consistency)')
 parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for L4: Cross-Entropy Loss')
+parser.add_argument('--lambda_ce_aug', type=float, default=1.0, help='Weight for L5: Cross-Entropy Loss (augmented)')
 parser.add_argument('--triplet_margin', type=float, default=0.3, help='Margin for Triplet Loss')
 parser.add_argument('--temperature', type=float, default=0.07, help='Temperature for InfoNCE Loss')
 
