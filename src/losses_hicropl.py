@@ -56,7 +56,7 @@ def loss_fn_hicropl(args, features):
     # Get hyperparameters
     temperature = getattr(args, 'temperature', 0.07)
     lambda_triplet = getattr(args, 'lambda_triplet', 1.0)
-    lambda_cross_modal = getattr(args, 'lambda_cross_modal', 2.0)
+    lambda_cross_modal = getattr(args, 'lambda_cross_modal', 1.0)
     lambda_consistency = getattr(args, 'lambda_consistency', 1.0)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
     lambda_ce_aug = getattr(args, 'lambda_ce_aug', 1.0)
@@ -74,7 +74,6 @@ def loss_fn_hicropl(args, features):
     loss_cross_modal = lambda_cross_modal * cross_loss(sketch_feat, photo_feat, temperature)
 
     # --- L3: InfoNCE Loss (sketch - sketch_aug) + (photo - photo_aug) ---
-    # Self-consistency regularization (CoPrompt-style: both trainable)
     loss_consistency_sketch = cross_loss(sketch_feat, sketch_aug_feat, temperature)
     loss_consistency_photo = cross_loss(photo_feat, photo_aug_feat, temperature)
     loss_consistency = lambda_consistency * (loss_consistency_sketch + loss_consistency_photo)
@@ -85,7 +84,6 @@ def loss_fn_hicropl(args, features):
     loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
     
     # --- L5: Cross-Entropy Loss (text - photo_aug) + (text - sketch_aug) ---
-    # Classification loss for augmented images
     loss_ce_photo_aug = F.cross_entropy(logits_photo_aug, label)
     loss_ce_sketch_aug = F.cross_entropy(logits_sketch_aug, label)
     loss_ce_aug = lambda_ce_aug * (loss_ce_photo_aug + loss_ce_sketch_aug)

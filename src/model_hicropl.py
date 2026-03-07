@@ -57,8 +57,8 @@ class CustomCLIP(nn.Module):
         n_ctx = getattr(cfg, 'n_ctx', 4)
         prompt_depth = getattr(cfg, 'prompt_depth', 9)
         cross_layer = getattr(cfg, 'cross_layer', 4)
-        ctx_init_photo = getattr(cfg, 'ctx_init', "a photo of a")
-        ctx_init_sketch = getattr(cfg, 'ctx_init_sketch', "a sketch of a")
+        ctx_init_photo = getattr(cfg, 'ctx_init', "a photo or a sketch of a")
+        ctx_init_sketch = getattr(cfg, 'ctx_init_sketch', "a photo or a sketch of a")
         
         print("Initializing Photo Prompt Learner...")
         self.prompt_learner_photo = CrossModalPromptLearner(
