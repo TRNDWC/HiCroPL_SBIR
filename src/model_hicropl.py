@@ -11,6 +11,7 @@ from src.hicropl import (
     TextEncoder,
     VisualEncoder,
 )
+from src.hicropl_shared_text import SharedTextDualVisualPromptLearner
 
 def freeze_model(m):
     m.requires_grad_(False)
@@ -31,10 +32,10 @@ def set_ln_to_train(m):
 
 class CustomCLIP(nn.Module):
     """
-    HiCroPL-SBIR Architecture Wrapper.
+    HiCroPL-SBIR Architecture Wrapper with Shared Text Prompts.
     
     Contains:
-    - 2x CrossModalPromptLearner (one for Photo, one for Sketch)
+    - 1x SharedTextDualVisualPromptLearner (shared text + dual visual prompts)
     - 1x TextEncoder (shared, with deep prompt injection)
     - 1x VisualEncoder (shared, with deep prompt injection)
     - 1x Frozen CLIP (for consistency loss reference features)
@@ -53,30 +54,19 @@ class CustomCLIP(nn.Module):
         self.dtype = clip_model.dtype
         self.logit_scale = clip_model.logit_scale
         
-        # --- 1. Dual Prompt Learners ---
+        # --- 1. Shared Text + Dual Visual Prompt Learner ---
         n_ctx = getattr(cfg, 'n_ctx', 4)
         prompt_depth = getattr(cfg, 'prompt_depth', 9)
         cross_layer = getattr(cfg, 'cross_layer', 4)
-        ctx_init_photo = getattr(cfg, 'ctx_init', "a photo or a sketch of a")
-        ctx_init_sketch = getattr(cfg, 'ctx_init_sketch', "a photo or a sketch of a")
+        ctx_init = getattr(cfg, 'ctx_init', "a photo or a sketch of a")
         
-        print("Initializing Photo Prompt Learner...")
-        self.prompt_learner_photo = CrossModalPromptLearner(
+        print("Initializing Shared Text + Dual Visual Prompt Learner...")
+        self.prompt_learner = SharedTextDualVisualPromptLearner(
             clip_model=clip_model,
             n_ctx=n_ctx,
             prompt_depth=prompt_depth,
             cross_layer=cross_layer,
-            ctx_init=ctx_init_photo,
-            use_fp16=True if self.dtype == torch.float16 else False
-        )
-        
-        print("Initializing Sketch Prompt Learner...")
-        self.prompt_learner_sketch = CrossModalPromptLearner(
-            clip_model=clip_model,
-            n_ctx=n_ctx,
-            prompt_depth=prompt_depth,
-            cross_layer=cross_layer,
-            ctx_init=ctx_init_sketch,
+            ctx_init=ctx_init,
             use_fp16=True if self.dtype == torch.float16 else False
         )
 
@@ -104,21 +94,17 @@ class CustomCLIP(nn.Module):
         """
         sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
         
-        # 1. Evaluate Prompt Learners Once
+        # 1. Evaluate Shared Prompt Learner Once
+        # Returns: (text_input, tok, first_v_p, deep_t, deep_v_p, first_v_s, deep_v_s)
         (
-            text_input_p, tok_p, first_v_p, deep_t_p, deep_v_p
-        ) = self.prompt_learner_photo(classnames)
+            text_input, tok, 
+            first_v_p, deep_t, deep_v_p,
+            first_v_s, deep_v_s
+        ) = self.prompt_learner(classnames)
         
-        (
-            text_input_s, tok_s, first_v_s, deep_t_s, deep_v_s
-        ) = self.prompt_learner_sketch(classnames)
-        
-        # 2. Extract Text Features Once
-        text_feat_photo = self.text_encoder(text_input_p, tok_p, deep_t_p)
-        text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
-        
-        text_feat_sketch = self.text_encoder(text_input_s, tok_s, deep_t_s)
-        text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
+        # 2. Extract Text Features Once (shared for both photo and sketch)
+        text_feat = self.text_encoder(text_input, tok, deep_t)
+        text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
         
         # 3. Extract Visual Features with Prompts (Trainable Branch)
         # - Photo
@@ -142,14 +128,14 @@ class CustomCLIP(nn.Module):
         sketch_aug_feat = self.visual_encoder(sk_aug_tensor, None, None)
         sketch_aug_feat = sketch_aug_feat / sketch_aug_feat.norm(dim=-1, keepdim=True)
             
-        # 5. Compute Logits
+        # 5. Compute Logits (using shared text features)
         logit_scale = self.logit_scale.exp()
-        logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
-        logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
+        logits_photo = logit_scale * photo_feat @ text_feat.t()
+        logits_sketch = logit_scale * sketch_feat @ text_feat.t()
         
-        # 6. Compute Logits for Augmented Images
-        logits_photo_aug = logit_scale * photo_aug_feat @ text_feat_photo.t()
-        logits_sketch_aug = logit_scale * sketch_aug_feat @ text_feat_sketch.t()
+        # 6. Compute Logits for Augmented Images (using shared text features)
+        logits_photo_aug = logit_scale * photo_aug_feat @ text_feat.t()
+        logits_sketch_aug = logit_scale * sketch_aug_feat @ text_feat.t()
         
         return (
             photo_feat, logits_photo,
@@ -157,6 +143,18 @@ class CustomCLIP(nn.Module):
             neg_feat, label,
             photo_aug_feat, sketch_aug_feat,
             logits_photo_aug, logits_sketch_aug
+        )
+    
+    def get_visual_prompts(self):
+        """Return photo and sketch visual prompts for regularization loss.
+        
+        Returns:
+            photo_prompts: list of L tensors [n_ctx, v_dim]
+            sketch_prompts: list of L tensors [n_ctx, v_dim]
+        """
+        return (
+            [p for p in self.prompt_learner.cross_prompts_visual_photo],
+            [p for p in self.prompt_learner.cross_prompts_visual_sketch]
         )
 
 
@@ -219,8 +217,8 @@ class HiCroPL_SBIR(pl.LightningModule):
         # Unpack batch and push to device happens in Lightning automatically, but we might need label explicitly
         features = self.model(batch, self.classnames)
         
-        # Calculate custom loss
-        loss = loss_fn_hicropl(self.args, features)
+        # Calculate custom loss (pass model for prompt alignment loss)
+        loss = loss_fn_hicropl(self.args, features, model=self.model)
         
         # Log to TensorBoard (both step and epoch) but NOT to progress bar
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
@@ -232,12 +230,13 @@ class HiCroPL_SBIR(pl.LightningModule):
     def on_validation_epoch_start(self):
         """Cache prompt outputs ONE TIME trước toàn bộ validation loop (giống GitHub CoPrompt)."""
         with torch.no_grad():
-            _, _, first_v_p, _, deep_v_p = self.model.prompt_learner_photo(self.classnames)
+            # Call shared prompt learner once - returns (text_input, tok, first_v_p, deep_t, deep_v_p, first_v_s, deep_v_s)
+            _, _, first_v_p, _, deep_v_p, first_v_s, deep_v_s = self.model.prompt_learner(self.classnames)
+            
             self._cached_photo_prompts = (
                 first_v_p.detach() if first_v_p is not None else None,
                 [p.detach() for p in deep_v_p] if deep_v_p is not None else None,
             )
-            _, _, first_v_s, _, deep_v_s = self.model.prompt_learner_sketch(self.classnames)
             self._cached_sketch_prompts = (
                 first_v_s.detach() if first_v_s is not None else None,
                 [p.detach() for p in deep_v_s] if deep_v_s is not None else None,

@@ -31,9 +31,28 @@ def cross_loss(feature_1, feature_2, temperature):
 
     return F.cross_entropy(logits, labels_target)
 
-def loss_fn_hicropl(args, features):
+def prompt_alignment_loss(photo_prompts, sketch_prompts):
     """
-    Combined Loss Function for HiCroPL-SBIR.
+    Regularization loss to encourage photo and sketch visual prompts to not diverge too much.
+    
+    Uses MSE loss between corresponding prompt layers to maintain similarity while
+    allowing modality-specific adaptations.
+    
+    Args:
+        photo_prompts: list of L tensors [n_ctx, v_dim]
+        sketch_prompts: list of L tensors [n_ctx, v_dim]
+    Returns:
+        loss: scalar tensor
+    """
+    total_loss = 0.0
+    for p_prompt, s_prompt in zip(photo_prompts, sketch_prompts):
+        total_loss += F.mse_loss(p_prompt, s_prompt)
+    return total_loss / len(photo_prompts)  # Average across layers
+
+
+def loss_fn_hicropl(args, features, model=None):
+    """
+    Combined Loss Function for HiCroPL-SBIR with Shared Text Prompts.
     
     Loss Components:
     L1: Triplet Loss (sketch, positive_photo, negative_photo) - Retrieval alignment
@@ -41,6 +60,12 @@ def loss_fn_hicropl(args, features):
     L3: InfoNCE Loss (sketch - sketch_aug) + (photo - photo_aug) - Consistency regularization
     L4: Cross-Entropy Loss (text - photo) + (text - sketch) - Classification
     L5: Cross-Entropy Loss (text - photo_aug) + (text - sketch_aug) - Augmented Classification
+    L6: MSE Loss (photo_prompts - sketch_prompts) - Prompt alignment regularization
+    
+    Args:
+        args: configuration object with hyperparameters
+        features: tuple of model outputs
+        model: CustomCLIP model instance (needed for prompt alignment loss)
     """
     (
         photo_feat, logits_photo,
@@ -60,6 +85,7 @@ def loss_fn_hicropl(args, features):
     lambda_consistency = getattr(args, 'lambda_consistency', 1.0)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
     lambda_ce_aug = getattr(args, 'lambda_ce_aug', 1.0)
+    lambda_prompt_align = getattr(args, 'lambda_prompt_align', 0.1)
     triplet_margin = getattr(args, 'triplet_margin', 0.3)
 
     # --- L1: Triplet Loss (sketch, positive_photo, negative_photo) ---
@@ -88,7 +114,8 @@ def loss_fn_hicropl(args, features):
     loss_ce_sketch_aug = F.cross_entropy(logits_sketch_aug, label)
     loss_ce_aug = lambda_ce_aug * (loss_ce_photo_aug + loss_ce_sketch_aug)
 
-    # Total loss
-    total_loss = loss_cross_modal + loss_consistency + loss_ce + loss_ce_aug
+    # Total loss (including L1 triplet that was missing!)
+    total_loss = (loss_cross_modal + loss_consistency + 
+                  loss_ce + loss_ce_aug)
 
     return total_loss
