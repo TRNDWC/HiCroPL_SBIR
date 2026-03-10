@@ -2,6 +2,7 @@ import os
 import glob
 import numpy as np
 import torch
+from src_fg.utils_fg import parse_sketchy_fg_photo, parse_sketchy_fg_sketch
 from torchvision import transforms
 from PIL import Image, ImageOps
 
@@ -206,3 +207,62 @@ class ValidDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.paths)
 
+class ValidDatasetFG(torch.utils.data.Dataset):
+    def __init__(self, args, mode='photo'):
+        super(ValidDatasetFG, self).__init__()
+        self.args = args
+        self.mode = mode
+        self.transform = normal_transform()
+        
+        # Get unseen categories
+        unseen_classes = UNSEEN_CLASSES.get('sketchy', UNSEEN_CLASSES['sketchy'])
+        self.all_categories = sorted(set(unseen_classes))
+
+        #Collect all file paths
+        self.paths = []
+        for category in self.all_categories:
+            if self.mode == "photo":
+                pattern = os.path.join(self.args.data_dir, 'photo', category, '*')
+            else:
+                pattern = os.path.join(self.args.data_dir, 'sketch', category, '*')
+
+            category_files = sorted(glob.glob(pattern))
+            self.paths.extend(category_files)
+
+
+        self.labels = []
+        self.filenames = []
+        self.base_naems = []
+
+        for path in self.paths:
+            category = path.split(os.path.sep)[-2]
+            cat_index = self.all_categories.index(category)
+            self.labels.append(cat_index)
+
+            filename = os.path.basename(path)
+            self.filenames.append(filename)
+
+            if self.mode == "photo":
+                base_name = parse_sketchy_fg_photo(path)
+            else:
+                base_name = parse_sketchy_fg_sketch(path)
+            self.base_naems.append(base_name)
+
+
+    def __getitem__(self, index):
+        filepath = self.paths[index]                
+        category_index = self.labels[index]
+        filename = self.filenames[index]
+        base_name = self.base_naems[index]
+
+        image = ImageOps.pad(
+            Image.open(filepath).convert('RGB'),  
+            size=(self.args.max_size, self.args.max_size)
+        )
+
+        image_tensor = self.transform(image)
+
+        return image_tensor, category_index, filename, base_name
+    
+    def __len__(self):
+        return len(self.paths)

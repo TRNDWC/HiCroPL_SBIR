@@ -31,6 +31,48 @@ def cross_loss(feature_1, feature_2, temperature):
 
     return F.cross_entropy(logits, labels_target)
 
+
+def mcc_loss(sketch_feat, photo_feat, mcc_sk=0.1, mcc_ph=0.0):
+    """
+    MCC (Modal Consistent Center) Loss - Intra-modal similarity regularization.
+    
+    Controls the intra-modal similarity to prevent mode collapse and maintain
+    feature diversity. Different modalities may have different capacity requirements:
+    - Sketch: More abstract, lower capacity (higher similarity target ~0.1)
+    - Photo: More detailed, higher capacity (lower similarity target ~0.0)
+    
+    Args:
+        sketch_feat: [B, D] - normalized sketch features
+        photo_feat: [B, D] - normalized photo features
+        mcc_sk: target mean similarity for sketch-to-sketch (default: 0.1)
+        mcc_ph: target mean similarity for photo-to-photo (default: 0.0)
+    Returns:
+        loss_sk: scalar - sketch intra-modal loss
+        loss_ph: scalar - photo intra-modal loss
+    
+    Reference: Zero-Shot Sketch based Image Retrieval via Modality Capacity Guidance
+    GitHub: https://github.com/YHdian0716/ZS-SBIR-MCC
+    """
+    # Normalize features (important for similarity computation)
+    sketch_feat = F.normalize(sketch_feat, dim=-1)
+    photo_feat = F.normalize(photo_feat, dim=-1)
+    
+    # Compute intra-modal similarity matrices [B, B]
+    sk2sk_sim = sketch_feat @ sketch_feat.t()  # Self-similarity for sketches
+    ph2ph_sim = photo_feat @ photo_feat.t()    # Self-similarity for photos
+    
+    # Target centers
+    device = sketch_feat.device
+    mcc_sk_target = torch.tensor([mcc_sk], device=device)
+    mcc_ph_target = torch.tensor([mcc_ph], device=device)
+    
+    # L1 loss between mean similarity and target
+    loss_sk = F.l1_loss(sk2sk_sim.mean(), mcc_sk_target)
+    loss_ph = F.l1_loss(ph2ph_sim.mean(), mcc_ph_target)
+    
+    return loss_sk, loss_ph
+
+
 def loss_fn_hicropl(args, features):
     """
     Combined Loss Function for HiCroPL-SBIR.
@@ -41,6 +83,7 @@ def loss_fn_hicropl(args, features):
     L3: InfoNCE Loss (sketch - sketch_aug) + (photo - photo_aug) - Consistency regularization
     L4: Cross-Entropy Loss (text - photo) + (text - sketch) - Classification
     L5: Cross-Entropy Loss (text - photo_aug) + (text - sketch_aug) - Augmented Classification
+    L6: MCC Loss (sketch intra-modal + photo intra-modal) - Feature diversity regularization
     """
     (
         photo_feat, logits_photo,
@@ -60,6 +103,10 @@ def loss_fn_hicropl(args, features):
     lambda_consistency = getattr(args, 'lambda_consistency', 1.0)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
     lambda_ce_aug = getattr(args, 'lambda_ce_aug', 1.0)
+    lambda_mcc_sk = getattr(args, 'lambda_mcc_sk', 0.1)
+    lambda_mcc_ph = getattr(args, 'lambda_mcc_ph', 0.1)
+    mcc_sk = getattr(args, 'mcc_sk', 0.1)
+    mcc_ph = getattr(args, 'mcc_ph', 0.0)
     triplet_margin = getattr(args, 'triplet_margin', 0.3)
 
     # --- L1: Triplet Loss (sketch, positive_photo, negative_photo) ---
@@ -87,8 +134,12 @@ def loss_fn_hicropl(args, features):
     loss_ce_photo_aug = F.cross_entropy(logits_photo_aug, label)
     loss_ce_sketch_aug = F.cross_entropy(logits_sketch_aug, label)
     loss_ce_aug = lambda_ce_aug * (loss_ce_photo_aug + loss_ce_sketch_aug)
+    
+    # --- L6: MCC Loss (Intra-modal Similarity Regularization) ---
+    loss_mcc_sk, loss_mcc_ph = mcc_loss(sketch_feat, photo_feat, mcc_sk=mcc_sk, mcc_ph=mcc_ph)
+    loss_mcc = lambda_mcc_sk * loss_mcc_sk + lambda_mcc_ph * loss_mcc_ph
 
     # Total loss
-    total_loss = loss_cross_modal + loss_consistency + loss_ce + loss_ce_aug
+    total_loss = (loss_cross_modal + loss_consistency + loss_ce + loss_ce_aug)
 
     return total_loss
