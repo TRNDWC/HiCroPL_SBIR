@@ -1,3 +1,4 @@
+import copy
 import numpy as np
 import torch
 import torch.nn as nn
@@ -35,23 +36,26 @@ class CustomCLIP(nn.Module):
     
     Contains:
     - 2x CrossModalPromptLearner (one for Photo, one for Sketch)
-    - 1x TextEncoder (shared, with deep prompt injection)
-    - 1x VisualEncoder (shared, with deep prompt injection)
+    - 2x TextEncoder (Photo/Sketch, with deep prompt injection)
+    - 2x VisualEncoder (Photo/Sketch, with deep prompt injection)
     - 1x Frozen CLIP (for consistency loss reference features)
     """
 
     def __init__(self, cfg, clip_model, clip_model_frozen):
         super().__init__()
         self.cfg = cfg
-        self.clip_model = clip_model
+
+        # Build independent CLIP backbones for photo/sketch branches.
+        self.clip_model_photo = copy.deepcopy(clip_model)
+        self.clip_model_sketch = copy.deepcopy(clip_model)
         self.clip_model_frozen = clip_model_frozen
         
         # Freeze the base CLIP models (except LayerNorm which will be trainable)
-        self.clip_model.apply(freeze_all_but_bn)
+        self.clip_model_photo.apply(freeze_all_but_bn)
+        self.clip_model_sketch.apply(freeze_all_but_bn)
         self.clip_model_frozen.apply(freeze_model)  # Frozen model stays completely frozen
         
-        self.dtype = clip_model.dtype
-        self.logit_scale = clip_model.logit_scale
+        self.dtype = self.clip_model_photo.dtype
         
         # --- 1. Dual Prompt Learners ---
         n_ctx = getattr(cfg, 'n_ctx', 4)
@@ -62,7 +66,7 @@ class CustomCLIP(nn.Module):
         
         print("Initializing Photo Prompt Learner...")
         self.prompt_learner_photo = CrossModalPromptLearner(
-            clip_model=clip_model,
+            clip_model=self.clip_model_photo,
             n_ctx=n_ctx,
             prompt_depth=prompt_depth,
             cross_layer=cross_layer,
@@ -72,7 +76,7 @@ class CustomCLIP(nn.Module):
         
         print("Initializing Sketch Prompt Learner...")
         self.prompt_learner_sketch = CrossModalPromptLearner(
-            clip_model=clip_model,
+            clip_model=self.clip_model_sketch,
             n_ctx=n_ctx,
             prompt_depth=prompt_depth,
             cross_layer=cross_layer,
@@ -80,16 +84,26 @@ class CustomCLIP(nn.Module):
             use_fp16=True if self.dtype == torch.float16 else False
         )
 
-        # --- 2. Encoders with Deep Injection ---
-        self.text_encoder = TextEncoder(clip_model)
-        self.visual_encoder = VisualEncoder(clip_model)
+        # --- 2. Encoders with Deep Injection (Photo/Sketch separate instances) ---
+        self.text_encoder_photo = TextEncoder(self.clip_model_photo)
+        self.text_encoder_sketch = TextEncoder(self.clip_model_sketch)
+        self.visual_encoder_photo = VisualEncoder(self.clip_model_photo)
+        self.visual_encoder_sketch = VisualEncoder(self.clip_model_sketch)
         
         # Unfreeze LayerNorm in encoders for training (following HiCroPL practice)
-        for name, param in self.text_encoder.named_parameters():
+        for name, param in self.text_encoder_photo.named_parameters():
+            if 'ln' in name.lower() or 'layernorm' in name.lower():
+                param.requires_grad_(True)
+
+        for name, param in self.text_encoder_sketch.named_parameters():
             if 'ln' in name.lower() or 'layernorm' in name.lower():
                 param.requires_grad_(True)
         
-        for name, param in self.visual_encoder.named_parameters():
+        for name, param in self.visual_encoder_photo.named_parameters():
+            if 'ln' in name.lower() or 'layernorm' in name.lower():
+                param.requires_grad_(True)
+
+        for name, param in self.visual_encoder_sketch.named_parameters():
             if 'ln' in name.lower() or 'layernorm' in name.lower():
                 param.requires_grad_(True)
         
@@ -113,43 +127,44 @@ class CustomCLIP(nn.Module):
             text_input_s, tok_s, first_v_s, deep_t_s, deep_v_s
         ) = self.prompt_learner_sketch(classnames)
         
-        # 2. Extract Text Features Once
-        text_feat_photo = self.text_encoder(text_input_p, tok_p, deep_t_p)
+        # 2. Extract Text Features (separate encoders)
+        text_feat_photo = self.text_encoder_photo(text_input_p, tok_p, deep_t_p)
         text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
         
-        text_feat_sketch = self.text_encoder(text_input_s, tok_s, deep_t_s)
+        text_feat_sketch = self.text_encoder_sketch(text_input_s, tok_s, deep_t_s)
         text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
         
-        # 3. Extract Visual Features with Prompts (Trainable Branch)
+        # 3. Extract Visual Features with Prompts (separate encoders)
         # - Photo
-        photo_feat = self.visual_encoder(photo_tensor, first_v_p, deep_v_p)
+        photo_feat = self.visual_encoder_photo(photo_tensor, first_v_p, deep_v_p)
         photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
         
         # - Sketch
-        sketch_feat = self.visual_encoder(sk_tensor, first_v_s, deep_v_s)
+        sketch_feat = self.visual_encoder_sketch(sk_tensor, first_v_s, deep_v_s)
         sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
         
         # - Negative Photo (Uses Photo Prompts)
-        neg_feat = self.visual_encoder(neg_tensor, first_v_p, deep_v_p)
+        neg_feat = self.visual_encoder_photo(neg_tensor, first_v_p, deep_v_p)
         neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
         
         # 4. Extract Augmented Visual Features WITHOUT Learnable Prompts
         # Use encoder with NO prompts (like frozen CLIP) for augmented images
         # This provides pure visual features without bidirectional knowledge flow
-        photo_aug_feat = self.visual_encoder(photo_aug_tensor, None, None)
+        photo_aug_feat = self.visual_encoder_photo(photo_aug_tensor, None, None)
         photo_aug_feat = photo_aug_feat / photo_aug_feat.norm(dim=-1, keepdim=True)
         
-        sketch_aug_feat = self.visual_encoder(sk_aug_tensor, None, None)
+        sketch_aug_feat = self.visual_encoder_sketch(sk_aug_tensor, None, None)
         sketch_aug_feat = sketch_aug_feat / sketch_aug_feat.norm(dim=-1, keepdim=True)
             
         # 5. Compute Logits
-        logit_scale = self.logit_scale.exp()
-        logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
-        logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
+        logit_scale_photo = self.clip_model_photo.logit_scale.exp()
+        logit_scale_sketch = self.clip_model_sketch.logit_scale.exp()
+        logits_photo = logit_scale_photo * photo_feat @ text_feat_photo.t()
+        logits_sketch = logit_scale_sketch * sketch_feat @ text_feat_sketch.t()
         
         # 6. Compute Logits for Augmented Images
-        logits_photo_aug = logit_scale * photo_aug_feat @ text_feat_photo.t()
-        logits_sketch_aug = logit_scale * sketch_aug_feat @ text_feat_sketch.t()
+        logits_photo_aug = logit_scale_photo * photo_aug_feat @ text_feat_photo.t()
+        logits_sketch_aug = logit_scale_sketch * sketch_aug_feat @ text_feat_sketch.t()
         
         return (
             photo_feat, logits_photo,
@@ -199,7 +214,8 @@ class HiCroPL_SBIR(pl.LightningModule):
     def on_train_epoch_start(self):
         # Ensure that clip models are in fully eval mode during training
         self.model.clip_model_frozen.eval()
-        self.model.clip_model.eval()
+        self.model.clip_model_photo.eval()
+        self.model.clip_model_sketch.eval()
 
     def configure_optimizers(self):
         clip_ln_params = []
@@ -263,8 +279,12 @@ class HiCroPL_SBIR(pl.LightningModule):
         """Extract normalized visual features dùng CACHED prompts (không re-compute learner)."""
         cached = self._cached_photo_prompts if modality == 'photo' else self._cached_sketch_prompts
         first_visual_prompt, deeper_visual_prompts = cached
+        visual_encoder = (
+            self.model.visual_encoder_photo if modality == 'photo'
+            else self.model.visual_encoder_sketch
+        )
         with torch.no_grad():
-            visual_features = self.model.visual_encoder(tensor, first_visual_prompt, deeper_visual_prompts)
+            visual_features = visual_encoder(tensor, first_visual_prompt, deeper_visual_prompts)
             visual_features_norm = visual_features / visual_features.norm(dim=-1, keepdim=True)
         return visual_features_norm
 
