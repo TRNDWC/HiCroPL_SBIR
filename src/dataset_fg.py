@@ -61,7 +61,7 @@ def aumented_transform():
         transforms.RandomHorizontalFlip(0.8),
         transforms.ColorJitter(
             brightness=0.15, contrast=0.15, saturation=0.15),
-        transforms.RandomRotation(70),
+        transforms.RandomRotation(15),
         transforms.ToTensor(),
         transforms.RandomErasing(p=0.5, scale=(
             0.02, 0.33), ratio=(0.3, 3.3), value=0),

@@ -29,30 +29,54 @@ def set_ln_to_train(m):
         m.train()
 
 
+class Adapter(nn.Module):
+    """CoPrompt-style bottleneck adapter for feature refinement."""
+
+    def __init__(self, c_in, reduction=4):
+        super().__init__()
+        hidden_dim = max(1, c_in // reduction)
+        self.fc = nn.Sequential(
+            nn.Linear(c_in, hidden_dim, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, c_in, bias=False),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.fc(x)
+
+
 
 class CustomCLIP(nn.Module):
     """
     HiCroPL-SBIR Architecture Wrapper.
     
-    Contains:
-    - 2x CrossModalPromptLearner (one for Photo, one for Sketch)
-    - 2x TextEncoder (Photo/Sketch, with deep prompt injection)
-    - 2x VisualEncoder (Photo/Sketch, with deep prompt injection)
-    - 1x Frozen CLIP (for consistency loss reference features)
+        Contains:
+        - 2x CrossModalPromptLearner (one for Photo, one for Sketch)
+        - 2x TextEncoder (Photo/Sketch, with deep prompt injection)
+        - 4x VisualEncoder:
+            * prompted photo/sketch encoders
+            * no-prompt photo_aug/sketch_aug encoders
+        - 2x Shared Feature Adapter (image/text) following CoPrompt
+        - 1x Frozen CLIP (for consistency loss reference features)
     """
 
     def __init__(self, cfg, clip_model, clip_model_frozen):
         super().__init__()
         self.cfg = cfg
 
-        # Build independent CLIP backbones for photo/sketch branches.
+        # Build independent CLIP backbones for each branch.
         self.clip_model_photo = copy.deepcopy(clip_model)
         self.clip_model_sketch = copy.deepcopy(clip_model)
+        self.clip_model_photo_aug = copy.deepcopy(clip_model)
+        self.clip_model_sketch_aug = copy.deepcopy(clip_model)
         self.clip_model_frozen = clip_model_frozen
         
         # Freeze the base CLIP models (except LayerNorm which will be trainable)
         self.clip_model_photo.apply(freeze_all_but_bn)
         self.clip_model_sketch.apply(freeze_all_but_bn)
+        self.clip_model_photo_aug.apply(freeze_all_but_bn)
+        self.clip_model_sketch_aug.apply(freeze_all_but_bn)
         self.clip_model_frozen.apply(freeze_model)  # Frozen model stays completely frozen
         
         self.dtype = self.clip_model_photo.dtype
@@ -84,11 +108,28 @@ class CustomCLIP(nn.Module):
             use_fp16=True if self.dtype == torch.float16 else False
         )
 
-        # --- 2. Encoders with Deep Injection (Photo/Sketch separate instances) ---
+        # --- 2. Encoders with Deep Injection (6 logical instances) ---
         self.text_encoder_photo = TextEncoder(self.clip_model_photo)
         self.text_encoder_sketch = TextEncoder(self.clip_model_sketch)
         self.visual_encoder_photo = VisualEncoder(self.clip_model_photo)
         self.visual_encoder_sketch = VisualEncoder(self.clip_model_sketch)
+        self.visual_encoder_photo_aug = VisualEncoder(self.clip_model_photo_aug)
+        self.visual_encoder_sketch_aug = VisualEncoder(self.clip_model_sketch_aug)
+
+        # --- 2.1 CoPrompt-style shared adapters (1 image + 1 text) ---
+        adapter_reduction = getattr(cfg, 'adapter_reduction', 4)
+        self.image_adapter_m = getattr(
+            cfg,
+            'image_adapter_m',
+            getattr(cfg, 'visual_adapter_m', 0.1),
+        )
+        self.text_adapter_m = getattr(cfg, 'text_adapter_m', 0.1)
+        # Backward compatibility for existing references in this project.
+        self.visual_adapter_m = self.image_adapter_m
+        embed_dim = int(self.clip_model_photo.text_projection.shape[1])
+
+        self.adapter_photo = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
+        self.adapter_text = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
         
         # Unfreeze LayerNorm in encoders for training (following HiCroPL practice)
         for name, param in self.text_encoder_photo.named_parameters():
@@ -106,9 +147,22 @@ class CustomCLIP(nn.Module):
         for name, param in self.visual_encoder_sketch.named_parameters():
             if 'ln' in name.lower() or 'layernorm' in name.lower():
                 param.requires_grad_(True)
+
+        for name, param in self.visual_encoder_photo_aug.named_parameters():
+            if 'ln' in name.lower() or 'layernorm' in name.lower():
+                param.requires_grad_(True)
+
+        for name, param in self.visual_encoder_sketch_aug.named_parameters():
+            if 'ln' in name.lower() or 'layernorm' in name.lower():
+                param.requires_grad_(True)
         
         # --- 3. Frozen Reference Model ---
         self.frozen_visual_encoder = clip_model_frozen.visual
+
+    @staticmethod
+    def _mix_adapter(features, adapter, mix_ratio):
+        adapted = adapter(features)
+        return mix_ratio * adapted + (1.0 - mix_ratio) * features
 
     def forward(self, x, classnames):
         """
@@ -127,33 +181,39 @@ class CustomCLIP(nn.Module):
             text_input_s, tok_s, first_v_s, deep_t_s, deep_v_s
         ) = self.prompt_learner_sketch(classnames)
         
-        # 2. Extract Text Features (separate encoders)
+        # 2. Extract Text Features then apply shared text adapter
         text_feat_photo = self.text_encoder_photo(text_input_p, tok_p, deep_t_p)
+        text_feat_photo = self._mix_adapter(text_feat_photo, self.adapter_text, self.text_adapter_m)
         text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
         
         text_feat_sketch = self.text_encoder_sketch(text_input_s, tok_s, deep_t_s)
+        text_feat_sketch = self._mix_adapter(text_feat_sketch, self.adapter_text, self.text_adapter_m)
         text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
         
-        # 3. Extract Visual Features with Prompts (separate encoders)
+        # 3. Extract Visual Features then apply shared image adapter
         # - Photo
         photo_feat = self.visual_encoder_photo(photo_tensor, first_v_p, deep_v_p)
+        photo_feat = self._mix_adapter(photo_feat, self.adapter_photo, self.image_adapter_m)
         photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
         
         # - Sketch
         sketch_feat = self.visual_encoder_sketch(sk_tensor, first_v_s, deep_v_s)
+        sketch_feat = self._mix_adapter(sketch_feat, self.adapter_photo, self.image_adapter_m)
         sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
         
         # - Negative Photo (Uses Photo Prompts)
         neg_feat = self.visual_encoder_photo(neg_tensor, first_v_p, deep_v_p)
+        neg_feat = self._mix_adapter(neg_feat, self.adapter_photo, self.image_adapter_m)
         neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
         
         # 4. Extract Augmented Visual Features WITHOUT Learnable Prompts
-        # Use encoder with NO prompts (like frozen CLIP) for augmented images
-        # This provides pure visual features without bidirectional knowledge flow
-        photo_aug_feat = self.visual_encoder_photo(photo_aug_tensor, None, None)
+        # Use dedicated aug encoders (E/F) with NO prompts and the same shared image adapter.
+        photo_aug_feat = self.visual_encoder_photo_aug(photo_aug_tensor, None, None)
+        photo_aug_feat = self._mix_adapter(photo_aug_feat, self.adapter_photo, self.image_adapter_m)
         photo_aug_feat = photo_aug_feat / photo_aug_feat.norm(dim=-1, keepdim=True)
         
-        sketch_aug_feat = self.visual_encoder_sketch(sk_aug_tensor, None, None)
+        sketch_aug_feat = self.visual_encoder_sketch_aug(sk_aug_tensor, None, None)
+        sketch_aug_feat = self._mix_adapter(sketch_aug_feat, self.adapter_photo, self.image_adapter_m)
         sketch_aug_feat = sketch_aug_feat / sketch_aug_feat.norm(dim=-1, keepdim=True)
             
         # 5. Compute Logits
@@ -216,6 +276,8 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.model.clip_model_frozen.eval()
         self.model.clip_model_photo.eval()
         self.model.clip_model_sketch.eval()
+        self.model.clip_model_photo_aug.eval()
+        self.model.clip_model_sketch_aug.eval()
 
     def configure_optimizers(self):
         clip_ln_params = []
@@ -231,7 +293,7 @@ class HiCroPL_SBIR(pl.LightningModule):
                     clip_ln_params.append(p)
         
         self.print(f"Number of trainable prompt params: {sum(p.numel() for p in prompt_params):,}")
-        self.print(f"Number of trainable LayerNorm params: {sum(p.numel() for p in clip_ln_params):,}")
+        self.print(f"Number of trainable non-prompt params (LayerNorm + Adapter): {sum(p.numel() for p in clip_ln_params):,}")
         
         prompt_lr = getattr(self.cfg, 'prompt_lr', 1e-5)
         clip_ln_lr = getattr(self.cfg, 'clip_LN_lr', 1e-5)
@@ -279,12 +341,16 @@ class HiCroPL_SBIR(pl.LightningModule):
         """Extract normalized visual features dùng CACHED prompts (không re-compute learner)."""
         cached = self._cached_photo_prompts if modality == 'photo' else self._cached_sketch_prompts
         first_visual_prompt, deeper_visual_prompts = cached
-        visual_encoder = (
-            self.model.visual_encoder_photo if modality == 'photo'
-            else self.model.visual_encoder_sketch
-        )
+        if modality == 'photo':
+            visual_encoder = self.model.visual_encoder_photo
+        else:
+            visual_encoder = self.model.visual_encoder_sketch
+        visual_adapter = self.model.adapter_photo
         with torch.no_grad():
             visual_features = visual_encoder(tensor, first_visual_prompt, deeper_visual_prompts)
+            visual_features = self.model._mix_adapter(
+                visual_features, visual_adapter, self.model.image_adapter_m
+            )
             visual_features_norm = visual_features / visual_features.norm(dim=-1, keepdim=True)
         return visual_features_norm
 

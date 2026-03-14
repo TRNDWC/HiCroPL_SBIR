@@ -53,5 +53,9 @@ parser.add_argument('--mcc_sk', type=float, default=0.1, help='Target mean simil
 parser.add_argument('--mcc_ph', type=float, default=0.0, help='Target mean similarity for photo-to-photo (MCC center)')
 parser.add_argument('--triplet_margin', type=float, default=0.3, help='Margin for Triplet Loss')
 parser.add_argument('--temperature', type=float, default=0.07, help='Temperature for InfoNCE Loss')
+parser.add_argument('--adapter_reduction', type=int, default=4, help='Bottleneck reduction ratio for CoPrompt-style adapters')
+parser.add_argument('--image_adapter_m', type=float, default=0.1, help='Residual mixing weight m for CoPrompt image adapter')
+parser.add_argument('--visual_adapter_m', type=float, default=0.1, help='Deprecated alias for image_adapter_m (kept for backward compatibility)')
+parser.add_argument('--text_adapter_m', type=float, default=0.1, help='Residual mixing weight m for CoPrompt text adapter')
 
 opts = parser.parse_args()
