@@ -48,6 +48,7 @@ parser.add_argument('--lambda_cross_modal', type=float, default=1.0, help='Weigh
 parser.add_argument('--lambda_consistency', type=float, default=1.0, help='Weight for L3: InfoNCE (augmentation consistency)')
 parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for L4: Cross-Entropy Loss')
 parser.add_argument('--lambda_ce_aug', type=float, default=0.0, help='Weight for L5: Cross-Entropy Loss (augmented), disabled by default for CoPrompt-style flow')
+parser.add_argument('--lambda_text_align', type=float, default=0.1, help='Weight for text-branch alignment InfoNCE between photo/sketch text features')
 parser.add_argument('--lambda_mcc_sk', type=float, default=0.0, help='Weight for L6: MCC Loss (sketch intra-modal), disabled by default for CoPrompt-style flow')
 parser.add_argument('--lambda_mcc_ph', type=float, default=0.0, help='Weight for L6: MCC Loss (photo intra-modal), disabled by default for CoPrompt-style flow')
 parser.add_argument('--mcc_sk', type=float, default=0.1, help='Target mean similarity for sketch-to-sketch (MCC center)')

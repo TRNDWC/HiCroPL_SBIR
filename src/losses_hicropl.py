@@ -41,6 +41,8 @@ def loss_fn_hicropl(args, features):
             L4: Consistency InfoNCE (visual only, separate branches)
                     InfoNCE(photo, photo_aug)
                       + InfoNCE(sketch, sketch_aug)
+                L5: Text alignment InfoNCE
+                    InfoNCE(text_photo, text_sketch)
     """
     (
         photo_feat, logits_photo,
@@ -48,6 +50,7 @@ def loss_fn_hicropl(args, features):
         _neg_feat, label,
         photo_aug_feat, sketch_aug_feat,
         logits_photo_aug, logits_sketch_aug,
+        text_feat_photo, text_feat_sketch,
         *_
     ) = features
 
@@ -60,6 +63,7 @@ def loss_fn_hicropl(args, features):
     lambda_consistency = getattr(args, 'lambda_consistency', 1.0)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
     lambda_ce_aug = getattr(args, 'lambda_ce_aug', 0.0)
+    lambda_text_align = getattr(args, 'lambda_text_align', 0.1)
 
     # --- L1: InfoNCE(sketch, positive photo) ---
     loss_cross_modal = 1 * cross_loss(sketch_feat, photo_feat, temperature)
@@ -77,14 +81,18 @@ def loss_fn_hicropl(args, features):
     # --- L4: Consistency InfoNCE (visual only, separate photo/sketch) ---
     loss_consistency_photo = cross_loss(photo_feat, photo_aug_feat, temperature)
     loss_consistency_sketch = cross_loss(sketch_feat, sketch_aug_feat, temperature)
-    loss_consistency = lambda_consistency * (loss_consistency_photo + loss_consistency_sketch)
+    loss_consistency = 1 * (loss_consistency_photo + loss_consistency_sketch)
 
-    # Total loss = L1 + L2 + L3 + L4.
+    # --- L5: Text alignment InfoNCE (photo-text vs sketch-text) ---
+    loss_text_align = 1 * cross_loss(text_feat_photo, text_feat_sketch, temperature)
+
+    # Total loss = L1 + L2 + L3 + L4 + L5.
     total_loss = (
         loss_cross_modal
         + loss_ce
         + loss_ce_aug
         + loss_consistency
+        + loss_text_align
     )
 
     return total_loss
