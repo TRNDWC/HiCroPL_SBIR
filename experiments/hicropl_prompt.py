@@ -31,6 +31,7 @@ if __name__ == '__main__':
 
     g = torch.Generator()
     g.manual_seed(SEED)
+    print(f"[CONFIG] use_adapter={opts.use_adapter}, adapter_reduction={opts.adapter_reduction}")
 
     # 1. Prepare Datasets
     dataset_transforms = Sketchy.data_transform(opts)

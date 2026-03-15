@@ -63,7 +63,7 @@ class CustomCLIP(nn.Module):
         - 4x VisualEncoder:
             * prompted photo/sketch encoders
             * no-prompt photo_aug/sketch_aug encoders
-        - 2x Shared Feature Adapter (image/text) on branches A/B/C/D only
+        - Optional shared feature adapter (disabled by default for ablation)
         - 1x Frozen CLIP teacher for distillation targets
     """
 
@@ -123,12 +123,22 @@ class CustomCLIP(nn.Module):
         # E/F aug branches use clip_model_photo_aug/sketch_aug .visual directly
         # (standard VisionTransformer, no HiCroPL prompts, LN trainable)
 
-        # --- 2.1 CoPrompt-style shared adapters (1 image + 1 text) ---
-        adapter_reduction = getattr(cfg, 'adapter_reduction', 4)
-        embed_dim = int(self.clip_model_photo.text_projection.shape[1])
-
-        self.adapter_photo = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
-        self.adapter_text = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
+        # --- 2.1 Optional shared adapters (disabled by default for no-adapter runs) ---
+        self.use_adapter = bool(getattr(cfg, 'use_adapter', False))
+        if self.use_adapter:
+            adapter_reduction = getattr(cfg, 'adapter_reduction', 4)
+            embed_dim = int(self.clip_model_photo.text_projection.shape[1])
+            self.adapter_photo = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
+            self.adapter_text = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
+        else:
+            # Keep adapter callsites unchanged while bypassing adapter logic.
+            self.adapter_photo = nn.Identity()
+            self.adapter_text = nn.Identity()
+        adapter_param_count = (
+            sum(p.numel() for p in self.adapter_photo.parameters() if p.requires_grad)
+            + sum(p.numel() for p in self.adapter_text.parameters() if p.requires_grad)
+        )
+        print(f"Adapter enabled: {self.use_adapter} | trainable adapter params: {adapter_param_count:,}")
         
         # Re-enable LayerNorm parameters for A/B/C/D encoders (CoPrompt-style policy).
         unfreeze_layernorm_params(self.text_encoder_photo)
@@ -273,28 +283,56 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.model.clip_model_sketch_aug.eval()
 
     def configure_optimizers(self):
-        clip_ln_params = []
-        prompt_params = []
+        def add_unique_params(candidates, out_list, seen_ids):
+            for p in candidates:
+                if p.requires_grad and id(p) not in seen_ids:
+                    seen_ids.add(id(p))
+                    out_list.append(p)
+
         seen_ids = set()
-        
-        for name, p in self.model.named_parameters():
+
+        prompt_params = []
+        add_unique_params(self.model.prompt_learner_photo.parameters(), prompt_params, seen_ids)
+        add_unique_params(self.model.prompt_learner_sketch.parameters(), prompt_params, seen_ids)
+
+        ln_params = []
+        ln_backbones = [
+            self.model.clip_model_photo,
+            self.model.clip_model_sketch,
+            self.model.clip_model_photo_aug,
+            self.model.clip_model_sketch_aug,
+        ]
+        for backbone in ln_backbones:
+            for module in backbone.modules():
+                if isinstance(module, torch.nn.LayerNorm):
+                    add_unique_params(module.parameters(recurse=False), ln_params, seen_ids)
+
+        adapter_params = []
+        add_unique_params(self.model.adapter_photo.parameters(), adapter_params, seen_ids)
+        add_unique_params(self.model.adapter_text.parameters(), adapter_params, seen_ids)
+
+        extra_trainable_params = []
+        for _, p in self.model.named_parameters():
             if p.requires_grad and id(p) not in seen_ids:
                 seen_ids.add(id(p))
-                if 'prompt_learner' in name:
-                    prompt_params.append(p)
-                else:
-                    clip_ln_params.append(p)
-        
+                extra_trainable_params.append(p)
+
+        non_prompt_params = ln_params + adapter_params + extra_trainable_params
+
         self.print(f"Number of trainable prompt params: {sum(p.numel() for p in prompt_params):,}")
-        self.print(f"Number of trainable non-prompt params (LayerNorm + Adapter): {sum(p.numel() for p in clip_ln_params):,}")
+        self.print(f"Number of trainable LayerNorm params: {sum(p.numel() for p in ln_params):,}")
+        self.print(f"Number of trainable adapter params: {sum(p.numel() for p in adapter_params):,}")
+        if extra_trainable_params:
+            self.print(f"Warning: Found {len(extra_trainable_params)} unexpected trainable tensors outside prompt/LN/adapter; including them in optimizer.")
+        self.print(f"Total trainable non-prompt params: {sum(p.numel() for p in non_prompt_params):,}")
         
         prompt_lr = getattr(self.cfg, 'prompt_lr', 1e-5)
         clip_ln_lr = getattr(self.cfg, 'clip_LN_lr', 1e-5)
         weight_decay = getattr(self.cfg, 'weight_decay', 1e-4)
 
         param_groups = [{'params': prompt_params, 'lr': prompt_lr}]
-        if clip_ln_params:
-            param_groups.append({'params': clip_ln_params, 'lr': clip_ln_lr})
+        if non_prompt_params:
+            param_groups.append({'params': non_prompt_params, 'lr': clip_ln_lr})
 
         optimizer = torch.optim.Adam(param_groups, weight_decay=weight_decay)
         
