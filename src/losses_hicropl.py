@@ -38,7 +38,9 @@ def loss_fn_hicropl(args, features):
     L1: InfoNCE(sketch, positive photo)
     L2: CE(photo/sketch adapted prompted feature, text adapted prompted feature)
     L3: CE(photo/sketch augmentation feature, text adapted prompted feature)
-    L4: InfoNCE(sketch/photo adapted prompted feature, positive sketch/photo augmentation feature)
+        L4: Consistency regularization
+                2 - cos(photo_aug + photo_prompted, photo_prompted)
+                    - cos(sketch_aug + sketch_prompted, sketch_prompted)
     """
     (
         photo_feat, logits_photo,
@@ -72,10 +74,10 @@ def loss_fn_hicropl(args, features):
     loss_ce_sketch_aug = F.cross_entropy(logits_sketch_aug, label)
     loss_ce_aug = lambda_ce_aug * (loss_ce_photo_aug + loss_ce_sketch_aug)
 
-    # --- L4: InfoNCE(base adapted prompted feature, positive augmentation feature) ---
-    loss_consistency_sketch = cross_loss(sketch_feat, sketch_aug_feat, temperature)
-    loss_consistency_photo = cross_loss(photo_feat, photo_aug_feat, temperature)
-    loss_consistency = lambda_consistency * (loss_consistency_sketch + loss_consistency_photo)
+    # --- L4: Consistency regularization (augmentation vs prompted-adapted features) ---
+    photo_cos = F.cosine_similarity(photo_aug_feat + photo_feat, photo_feat, dim=-1).mean()
+    sketch_cos = F.cosine_similarity(sketch_aug_feat + sketch_feat, sketch_feat, dim=-1).mean()
+    loss_consistency = lambda_consistency * (2.0 - photo_cos - sketch_cos)
 
     # Total loss = L1 + L2 + L3 + L4.
     total_loss = (
