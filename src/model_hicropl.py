@@ -191,16 +191,16 @@ class CustomCLIP(nn.Module):
         # - Photo (C): replace old fixed-teacher fusion with augmentation fusion
         photo_feat = self.visual_encoder_photo(photo_tensor, first_v_p, deep_v_p)
         photo_feat = self.adapter_photo(photo_feat)
-        photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
-        photo_feat = photo_feat + photo_aug_feat
-        photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
+        # photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
+        # photo_feat = photo_feat + photo_aug_feat
+        # photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
         
         # - Sketch (D): replace old fixed-teacher fusion with augmentation fusion
         sketch_feat = self.visual_encoder_sketch(sk_tensor, first_v_s, deep_v_s)
         sketch_feat = self.adapter_photo(sketch_feat)
-        sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
-        sketch_feat = sketch_feat + sketch_aug_feat
-        sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
+        # sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
+        # sketch_feat = sketch_feat + sketch_aug_feat
+        # sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
         
         # - Negative Photo (Uses Photo Prompts)
         neg_feat = self.visual_encoder_photo(neg_tensor, first_v_p, deep_v_p)
