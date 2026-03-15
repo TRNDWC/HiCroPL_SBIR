@@ -155,18 +155,27 @@ class Sketchy(torch.utils.data.Dataset):
 
 def augmented_transform():
     """Strong augmentation for consistency regularization (CoPrompt-style)"""
-    transform_list = [
+    # Keep full augmentation definitions here, but activate only crop+flip.
+    crop_flip_ops = [
         transforms.RandomResizedCrop(224, scale=(0.85, 1.0)),
         transforms.RandomHorizontalFlip(0.8),
-        transforms.ColorJitter(
-            brightness=0.15, contrast=0.15, saturation=0.15),
-        transforms.RandomRotation(15),
-        transforms.ToTensor(),
-        transforms.RandomErasing(p=0.5, scale=(
-            0.02, 0.33), ratio=(0.3, 3.3), value=0),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
-                             0.229, 0.224, 0.225])
     ]
+
+    optional_extra_ops = [
+        transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.15),
+        transforms.RandomRotation(15),
+        transforms.RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0),
+    ]
+
+    use_optional_extra_ops = False
+    transform_list = list(crop_flip_ops)
+    if use_optional_extra_ops:
+        transform_list.extend(optional_extra_ops)
+
+    transform_list.extend([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
     return transforms.Compose(transform_list)
 
 def normal_transform():
