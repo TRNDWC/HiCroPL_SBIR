@@ -14,7 +14,6 @@ import copy
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import torch.utils.checkpoint as checkpoint
 from collections import OrderedDict
 
 
@@ -129,10 +128,11 @@ class CrossPromptAttention(nn.Module):
 # =============================================================================
 
 class TextEncoder(nn.Module):
-    """Wraps CLIP text transformer to support deep prompt injection.
-    
-    Iterates through transformer blocks manually, replacing prompt tokens
-    at each layer with the corresponding deep prompt.
+    """Wraps CLIP text transformer to support per-layer deep prompt injection.
+
+    Uses the upstream HiCroPL list contract: passes [x, deep_prompts_text] to
+    the nn.Sequential of ResidualAttentionBlock_HiCroPL blocks, which replace
+    context tokens internally at each layer (using self.i-1 indexing).
     """
 
     def __init__(self, clip_model):
@@ -156,25 +156,12 @@ class TextEncoder(nn.Module):
         x = prompts + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND [77, n_cls, ctx_dim]
 
-        n_ctx = deep_prompts_text[0].shape[0] if len(deep_prompts_text) > 0 else 0
-
-        for i, block in enumerate(self.transformer_resblocks):
-            if i > 0 and i <= len(deep_prompts_text):
-                # Replace prompt tokens with this layer's deep prompt
-                prefix = x[:1, :, :]                    # SOS [1, n_cls, dim]
-                suffix = x[1 + n_ctx:, :, :]            # class+EOS [*, n_cls, dim]
-                textual_ctx = deep_prompts_text[i - 1]  # [n_ctx, dim]
-                textual_ctx = (
-                    textual_ctx.unsqueeze(1)
-                    .expand(-1, x.shape[1], -1)
-                    .to(x.dtype)
-                )  # [n_ctx, n_cls, dim]
-                x = torch.cat([prefix, textual_ctx, suffix], dim=0)
-            
-            if x.requires_grad:
-                x = checkpoint.checkpoint(block, x, use_reentrant=False)
-            else:
-                x = block(x)
+        # Use upstream list contract: pass [x, deep_prompts_text] through nn.Sequential.
+        # Each ResidualAttentionBlock_HiCroPL receives this list and replaces context
+        # tokens internally at the correct layer (using self.i-1 index), then returns
+        # [x_updated, deep_prompts_text] for the next block.
+        result = self.transformer_resblocks([x, deep_prompts_text])
+        x = result[0]
 
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
@@ -190,84 +177,29 @@ class TextEncoder(nn.Module):
 # =============================================================================
 
 class VisualEncoder(nn.Module):
-    """Wraps CLIP ViT to support deep prompt injection.
+    """Wraps CLIP VisionTransformer_HiCroPL for deep prompt injection.
     
-    Iterates through transformer blocks manually, replacing visual prompt 
-    tokens at each layer with the corresponding deep prompt.
+    Delegates directly to VisionTransformer_HiCroPL.forward(x, img_prompts,
+    cross_prompts_visual_deeper), which passes [x, cross_prompts] as a list to
+    the transformer so each ResidualAttentionBlock_HiCroPL can replace visual
+    prompt tokens internally — the correct upstream CLIP-level contract.
     """
 
     def __init__(self, clip_model):
         super().__init__()
-        vit = clip_model.visual
-        self.conv1 = vit.conv1
-        self.class_embedding = vit.class_embedding
-        self.positional_embedding = vit.positional_embedding
-        self.ln_pre = vit.ln_pre
-        self.transformer_resblocks = vit.transformer.resblocks
-        self.ln_post = vit.ln_post
-        self.proj = vit.proj
+        self.vit = clip_model.visual  # VisionTransformer_HiCroPL
         self.dtype = clip_model.dtype
 
-    def forward(self, image, first_visual_prompt=None, deeper_visual_prompts=None):
+    def forward(self, image, first_visual_prompt, deeper_visual_prompts):
         """
         Args:
-            image: [B, 3, 224, 224] - input image
-            first_visual_prompt: [n_ctx, v_dim] - prompt for first layer (None = no prompts)
-            deeper_visual_prompts: list of L-1 tensors [n_ctx, v_dim] for layers 1..L-1 (None = no prompts)
+            image: [B, 3, 224, 224]
+            first_visual_prompt: [n_ctx, v_dim] - shallow prompt for layer 0
+            deeper_visual_prompts: list of L-1 tensors [n_ctx, v_dim] for layers 1..L-1
         Returns:
-            [B, embed_dim] - image features (e.g. [B, 512])
+            [B, embed_dim] - image features
         """
-        # Patch embedding
-        x = self.conv1(image.type(self.dtype))        # [B, width, grid, grid]
-        x = x.reshape(x.shape[0], x.shape[1], -1)    # [B, width, grid^2]
-        x = x.permute(0, 2, 1)                        # [B, grid^2, width]
-
-        # Prepend CLS token
-        cls_token = self.class_embedding.to(x.dtype) + torch.zeros(
-            x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device
-        )
-        x = torch.cat([cls_token, x], dim=1)  # [B, grid^2+1, width]
-        x = x + self.positional_embedding.to(x.dtype)
-
-        # Attach first layer visual prompt (after positional embedding) - if provided
-        n_ctx = 0
-        if first_visual_prompt is not None:
-            n_ctx = first_visual_prompt.shape[0]
-            visual_ctx = (
-                first_visual_prompt.unsqueeze(0)
-                .expand(x.shape[0], -1, -1)
-                .to(x.dtype)
-            )  # [B, n_ctx, width]
-            x = torch.cat([x, visual_ctx], dim=1)  # [B, grid^2+1+n_ctx, width]
-
-        x = self.ln_pre(x)
-        x = x.permute(1, 0, 2)  # NLD -> LND
-
-        for i, block in enumerate(self.transformer_resblocks):
-            # Replace prompts at deeper layers - if provided
-            if n_ctx > 0 and deeper_visual_prompts is not None and i > 0 and i <= len(deeper_visual_prompts):
-                # Remove previous layer's prompt tokens and attach new ones
-                prefix = x[: x.shape[0] - n_ctx, :, :]  # all tokens except prompts
-                visual_ctx = deeper_visual_prompts[i - 1]  # [n_ctx, width]
-                visual_ctx = (
-                    visual_ctx.unsqueeze(1)
-                    .expand(-1, x.shape[1], -1)
-                    .to(x.dtype)
-                )  # [n_ctx, B, width]
-                x = torch.cat([prefix, visual_ctx], dim=0)
-            
-            if x.requires_grad:
-                x = checkpoint.checkpoint(block, x, use_reentrant=False)
-            else:
-                x = block(x)
-
-        x = x.permute(1, 0, 2)  # LND -> NLD
-        x = self.ln_post(x[:, 0, :])  # CLS token only
-
-        if self.proj is not None:
-            x = x @ self.proj
-
-        return x
+        return self.vit(image.type(self.dtype), first_visual_prompt, deeper_visual_prompts)
 
 
 # =============================================================================
