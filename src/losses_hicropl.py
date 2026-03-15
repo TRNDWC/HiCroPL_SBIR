@@ -84,7 +84,7 @@ def loss_fn_hicropl(args, features):
     loss_consistency = 1 * (loss_consistency_photo + loss_consistency_sketch)
 
     # --- L5: Text alignment InfoNCE (photo-text vs sketch-text) ---
-    loss_text_align = 1 * cross_loss(text_feat_photo, text_feat_sketch, temperature)
+    loss_text_align = 0 * cross_loss(text_feat_photo, text_feat_sketch, temperature)
 
     # Total loss = L1 + L2 + L3 + L4 + L5.
     total_loss = (
