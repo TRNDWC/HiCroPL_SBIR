@@ -175,42 +175,36 @@ class CustomCLIP(nn.Module):
         text_feat_photo = self.text_encoder_photo(text_input_p, tok_p, deep_t_p)
         text_feat_photo = self.adapter_text(text_feat_photo)
         text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
-        text_feat_photo = text_feat_photo + text_feat_fixed_photo
-        text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
         
         text_feat_sketch = self.text_encoder_sketch(text_input_s, tok_s, deep_t_s)
         text_feat_sketch = self.adapter_text(text_feat_sketch)
         text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
-        text_feat_sketch = text_feat_sketch + text_feat_fixed_sketch
-        text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
         
-        # 3. Extract Visual Features then apply shared image adapter (C/D only)
-        # - Photo (C)
-        photo_feat = self.visual_encoder_photo(photo_tensor, first_v_p, deep_v_p)
-        photo_feat = self.adapter_photo(photo_feat)
-        photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
-        photo_feat = photo_feat + photo_feat_fixed
-        photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
-        
-        # - Sketch (D)
-        sketch_feat = self.visual_encoder_sketch(sk_tensor, first_v_s, deep_v_s)
-        sketch_feat = self.adapter_photo(sketch_feat)
-        sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
-        sketch_feat = sketch_feat + sketch_feat_fixed
-        sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
-        
-        # - Negative Photo (Uses Photo Prompts)
-        neg_feat = self.visual_encoder_photo(neg_tensor, first_v_p, deep_v_p)
-        neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
-        
-        # 4. Aug Visual Features (E/F): standard ViT with LN trainable, no HiCroPL prompts.
-        # Gradients flow through LayerNorm only; L4 InfoNCE pushes adapted A/B/C/D features
-        # toward these augmented views for consistency regularization.
+        # 3. Aug Visual Features (E/F): standard ViT with LN trainable, no HiCroPL prompts.
         photo_aug_feat = self.clip_model_photo_aug.visual(photo_aug_tensor.type(self.dtype))
         photo_aug_feat = photo_aug_feat / photo_aug_feat.norm(dim=-1, keepdim=True)
 
         sketch_aug_feat = self.clip_model_sketch_aug.visual(sk_aug_tensor.type(self.dtype))
         sketch_aug_feat = sketch_aug_feat / sketch_aug_feat.norm(dim=-1, keepdim=True)
+
+        # 4. Extract Visual Features then apply shared image adapter (C/D only)
+        # - Photo (C): replace old fixed-teacher fusion with augmentation fusion
+        photo_feat = self.visual_encoder_photo(photo_tensor, first_v_p, deep_v_p)
+        photo_feat = self.adapter_photo(photo_feat)
+        photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
+        photo_feat = photo_feat + photo_aug_feat
+        photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
+        
+        # - Sketch (D): replace old fixed-teacher fusion with augmentation fusion
+        sketch_feat = self.visual_encoder_sketch(sk_tensor, first_v_s, deep_v_s)
+        sketch_feat = self.adapter_photo(sketch_feat)
+        sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
+        sketch_feat = sketch_feat + sketch_aug_feat
+        sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
+        
+        # - Negative Photo (Uses Photo Prompts)
+        neg_feat = self.visual_encoder_photo(neg_tensor, first_v_p, deep_v_p)
+        neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
             
         # 5. Compute Logits
         logit_scale_photo = self.clip_model_photo.logit_scale.exp()
