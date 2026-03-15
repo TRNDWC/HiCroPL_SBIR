@@ -62,22 +62,22 @@ def loss_fn_hicropl(args, features):
     lambda_ce_aug = getattr(args, 'lambda_ce_aug', 0.0)
 
     # --- L1: InfoNCE(sketch, positive photo) ---
-    loss_cross_modal = lambda_cross_modal * cross_loss(sketch_feat, photo_feat, temperature)
+    loss_cross_modal = 1 * cross_loss(sketch_feat, photo_feat, temperature)
 
     # --- L2: CE(main adapted prompted image features, adapted prompted text features) ---
     loss_ce_photo = F.cross_entropy(logits_photo, label)
     loss_ce_sketch = F.cross_entropy(logits_sketch, label)
-    loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
+    loss_ce = 1 * (loss_ce_photo + loss_ce_sketch)
 
     # --- L3: CE(augmentation image features, adapted prompted text features) ---
     loss_ce_photo_aug = F.cross_entropy(logits_photo_aug, label)
     loss_ce_sketch_aug = F.cross_entropy(logits_sketch_aug, label)
-    loss_ce_aug = lambda_ce_aug * (loss_ce_photo_aug + loss_ce_sketch_aug)
+    loss_ce_aug = 1 * (loss_ce_photo_aug + loss_ce_sketch_aug)
 
     # --- L4: Consistency regularization (augmentation vs prompted-adapted features) ---
     photo_cos = F.cosine_similarity(photo_aug_feat + photo_feat, photo_feat, dim=-1).mean()
     sketch_cos = F.cosine_similarity(sketch_aug_feat + sketch_feat, sketch_feat, dim=-1).mean()
-    loss_consistency = lambda_consistency * (2.0 - photo_cos - sketch_cos)
+    loss_consistency = 1 * (2.0 - photo_cos - sketch_cos)
 
     # Total loss = L1 + L2 + L3 + L4.
     total_loss = (
