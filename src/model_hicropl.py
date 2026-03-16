@@ -17,11 +17,11 @@ def freeze_model(m):
     m.requires_grad_(False)
 
 def freeze_all_but_bn(m):
-    if isinstance(m, torch.nn.LayerNorm):
-        return
-    # Freeze only the parameters owned by this module to avoid repeatedly touching children.
-    for p in m.parameters(recurse=False):
-        p.requires_grad_(False)
+    if not isinstance(m, torch.nn.LayerNorm):
+        if hasattr(m, 'weight') and m.weight is not None:
+            m.weight.requires_grad_(False)
+        if hasattr(m, 'bias') and m.bias is not None:
+            m.bias.requires_grad_(False)
 
 def unfreeze_layernorm_params(module):
     for child in module.modules():
@@ -125,6 +125,8 @@ class CustomCLIP(nn.Module):
 
         # --- 2.1 Optional shared adapters (disabled by default for no-adapter runs) ---
         self.use_adapter = bool(getattr(cfg, 'use_adapter', False))
+        self.image_adapter_m = float(getattr(cfg, 'image_adapter_m', getattr(cfg, 'visual_adapter_m', 0.1)))
+        self.text_adapter_m = float(getattr(cfg, 'text_adapter_m', 0.1))
         if self.use_adapter:
             adapter_reduction = getattr(cfg, 'adapter_reduction', 4)
             embed_dim = int(self.clip_model_photo.text_projection.shape[1])
@@ -139,6 +141,7 @@ class CustomCLIP(nn.Module):
             + sum(p.numel() for p in self.adapter_text.parameters() if p.requires_grad)
         )
         print(f"Adapter enabled: {self.use_adapter} | trainable adapter params: {adapter_param_count:,}")
+        print(f"Adapter mix ratio | image_adapter_m: {self.image_adapter_m:.3f}, text_adapter_m: {self.text_adapter_m:.3f}")
         
         # Re-enable LayerNorm parameters for A/B/C/D encoders (CoPrompt-style policy).
         unfreeze_layernorm_params(self.text_encoder_photo)
@@ -181,13 +184,17 @@ class CustomCLIP(nn.Module):
             sketch_feat_fixed = self.frozen_visual_encoder(sk_tensor.type(self.dtype))
             sketch_feat_fixed = sketch_feat_fixed / sketch_feat_fixed.norm(dim=-1, keepdim=True)
 
-        # 2. Extract Text Features then apply shared text adapter (A/B only)
+        # 2. Extract text features and optionally apply adapter residual mixing (A/B only).
         text_feat_photo = self.text_encoder_photo(text_input_p, tok_p, deep_t_p)
-        text_feat_photo = self.adapter_text(text_feat_photo)
+        if self.use_adapter:
+            x_b = self.adapter_text(text_feat_photo)
+            text_feat_photo = self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_photo
         text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
         
         text_feat_sketch = self.text_encoder_sketch(text_input_s, tok_s, deep_t_s)
-        text_feat_sketch = self.adapter_text(text_feat_sketch)
+        if self.use_adapter:
+            x_b = self.adapter_text(text_feat_sketch)
+            text_feat_sketch = self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_sketch
         text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
         
         # 3. Aug Visual Features (E/F): standard ViT with LN trainable, no HiCroPL prompts.
@@ -197,20 +204,20 @@ class CustomCLIP(nn.Module):
         sketch_aug_feat = self.clip_model_sketch_aug.visual(sk_aug_tensor.type(self.dtype))
         sketch_aug_feat = sketch_aug_feat / sketch_aug_feat.norm(dim=-1, keepdim=True)
 
-        # 4. Extract Visual Features then apply shared image adapter (C/D only)
-        # - Photo (C): replace old fixed-teacher fusion with augmentation fusion
+        # 4. Extract visual features and optionally apply adapter residual mixing (C/D only).
+        # - Photo (C)
         photo_feat = self.visual_encoder_photo(photo_tensor, first_v_p, deep_v_p)
-        photo_feat = self.adapter_photo(photo_feat)
-        # photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
-        # photo_feat = photo_feat + photo_aug_feat
-        # photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
+        if self.use_adapter:
+            x_a = self.adapter_photo(photo_feat)
+            photo_feat = self.image_adapter_m * x_a + (1 - self.image_adapter_m) * photo_feat
+        photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
         
-        # - Sketch (D): replace old fixed-teacher fusion with augmentation fusion
+        # - Sketch (D)
         sketch_feat = self.visual_encoder_sketch(sk_tensor, first_v_s, deep_v_s)
-        sketch_feat = self.adapter_photo(sketch_feat)
-        # sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
-        # sketch_feat = sketch_feat + sketch_aug_feat
-        # sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
+        if self.use_adapter:
+            x_a = self.adapter_photo(sketch_feat)
+            sketch_feat = self.image_adapter_m * x_a + (1 - self.image_adapter_m) * sketch_feat
+        sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
         
         # - Negative Photo (Uses Photo Prompts)
         neg_feat = self.visual_encoder_photo(neg_tensor, first_v_p, deep_v_p)
@@ -376,10 +383,11 @@ class HiCroPL_SBIR(pl.LightningModule):
             visual_encoder = self.model.visual_encoder_photo
         else:
             visual_encoder = self.model.visual_encoder_sketch
-        visual_adapter = self.model.adapter_photo
         with torch.no_grad():
             visual_features = visual_encoder(tensor, first_visual_prompt, deeper_visual_prompts)
-            visual_features = visual_adapter(visual_features)
+            if self.model.use_adapter:
+                x_a = self.model.adapter_photo(visual_features)
+                visual_features = self.model.image_adapter_m * x_a + (1 - self.model.image_adapter_m) * visual_features
             visual_features_norm = visual_features / visual_features.norm(dim=-1, keepdim=True)
         return visual_features_norm
 

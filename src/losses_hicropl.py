@@ -7,8 +7,6 @@ def cross_loss(feature_1, feature_2, temperature):
     labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
     labels = labels.to(device)
 
-    feature_1 = F.normalize(feature_1, dim=1)
-    feature_2 = F.normalize(feature_2, dim=1)
     features = torch.cat((feature_1, feature_2), dim=0)  # (2*B, Feat_dim)
 
     similarity_matrix = torch.matmul(features, features.T)  # (2*B, 2*B)
