@@ -82,8 +82,8 @@ if __name__ == '__main__':
         "maple_length": opts.n_ctx,
     }
 
-    # Distillation/reference branch follows CoPrompt style: plain CLIP without prompt routing.
-    frozen_design_details = {
+    # Augmentation branch uses a plain CLIP visual backbone without prompt routing.
+    aug_design_details = {
         "trainer": "CoOp",
         "vision_depth": 0,
         "language_depth": 0,
@@ -95,9 +95,9 @@ if __name__ == '__main__':
     clip_model, _ = clip.load(opts.backbone, device=device, design_details=design_details)
     clip_model.float() # Training prompt in fp32
     
-    clip_model_frozen, _ = clip.load(opts.backbone, device=device, design_details=frozen_design_details)
-    clip_model_frozen.float()
-    clip_model_frozen.eval()
+    clip_model_aug, _ = clip.load(opts.backbone, device=device, design_details=aug_design_details)
+    clip_model_aug.float()
+    clip_model_aug.eval()
     
     # Extract classnames for Context Learner initialization
     classnames = list(train_dataset.all_categories)
@@ -135,13 +135,13 @@ if __name__ == '__main__':
 
     # 6. Initialize Model
     if ckpt_path is None:
-        custom_clip = CustomCLIP(opts, clip_model, clip_model_frozen)
+        custom_clip = CustomCLIP(opts, clip_model, clip_model_aug)
         model = HiCroPL_SBIR(cfg=opts, args=opts, classnames=classnames, model=custom_clip)
     else:
         print ('resuming training from %s'%ckpt_path)
         # Note: Depending on Lightning version, PyTorch Lightning may require the architecture 
         # to be instantiated before load_from_checkpoint or handle it directly if args are passed correctly.
-        custom_clip = CustomCLIP(opts, clip_model, clip_model_frozen)
+        custom_clip = CustomCLIP(opts, clip_model, clip_model_aug)
         model = HiCroPL_SBIR.load_from_checkpoint(ckpt_path, cfg=opts, args=opts, classnames=classnames, model=custom_clip)
 
     print ('\nBeginning training HiCroPL-SBIR... Good luck!')

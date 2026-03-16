@@ -35,22 +35,23 @@ def loss_fn_hicropl(args, features):
     Loss terms:
     L1: InfoNCE(sketch, positive photo)
     L2: CE(photo/sketch adapted prompted feature, text adapted prompted feature)
-        L3: CE(photo/sketch augmentation feature, text adapted prompted feature)
-            L4: Consistency InfoNCE (visual only, separate branches)
-                    InfoNCE(photo, photo_aug)
-                      + InfoNCE(sketch, sketch_aug)
-                L5: Text alignment InfoNCE
-                    InfoNCE(text_photo, text_sketch)
+    L3: CE(photo/sketch augmentation feature, text adapted prompted feature)
+    L4: Consistency InfoNCE (visual only, separate branches)
+            InfoNCE(photo, photo_aug)
+              + InfoNCE(sketch, sketch_aug)
     """
-    (
-        photo_feat, logits_photo,
-        sketch_feat, logits_sketch,
-        _neg_feat, label,
-        photo_aug_feat, sketch_aug_feat,
-        logits_photo_aug, logits_sketch_aug,
-        text_feat_photo, text_feat_sketch,
-        *_
-    ) = features
+    photo_outputs = features['photo']
+    sketch_outputs = features['sketch']
+    label = features['label']
+
+    photo_feat = photo_outputs['feature']
+    sketch_feat = sketch_outputs['feature']
+    logits_photo = photo_outputs['logits']
+    logits_sketch = sketch_outputs['logits']
+    photo_aug_feat = photo_outputs['augment_feature']
+    sketch_aug_feat = sketch_outputs['augment_feature']
+    logits_photo_aug = photo_outputs['augment_logits']
+    logits_sketch_aug = sketch_outputs['augment_logits']
 
     device = logits_photo.device
     label = label.to(device)
@@ -60,37 +61,32 @@ def loss_fn_hicropl(args, features):
     lambda_cross_modal = getattr(args, 'lambda_cross_modal', 1.0)
     lambda_consistency = getattr(args, 'lambda_consistency', 1.0)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
-    lambda_ce_aug = getattr(args, 'lambda_ce_aug', 0.0)
-    lambda_text_align = getattr(args, 'lambda_text_align', 0.1)
+    lambda_ce_aug = getattr(args, 'lambda_ce_aug', 1.0)
 
     # --- L1: InfoNCE(sketch, positive photo) ---
-    loss_cross_modal = 1 * cross_loss(sketch_feat, photo_feat, temperature)
+    loss_cross_modal = lambda_cross_modal * cross_loss(sketch_feat, photo_feat, temperature)
 
     # --- L2: CE(main adapted prompted image features, adapted prompted text features) ---
     loss_ce_photo = F.cross_entropy(logits_photo, label)
     loss_ce_sketch = F.cross_entropy(logits_sketch, label)
-    loss_ce = 1 * (loss_ce_photo + loss_ce_sketch)
+    loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
     # --- L3: CE(augmentation image features, adapted prompted text features) ---
     loss_ce_photo_aug = F.cross_entropy(logits_photo_aug, label)
     loss_ce_sketch_aug = F.cross_entropy(logits_sketch_aug, label)
-    loss_ce_aug = 1 * (loss_ce_photo_aug + loss_ce_sketch_aug)
+    loss_ce_aug = lambda_ce_aug * (loss_ce_photo_aug + loss_ce_sketch_aug)
 
     # --- L4: Consistency InfoNCE (visual only, separate photo/sketch) ---
     loss_consistency_photo = cross_loss(photo_feat, photo_aug_feat, temperature)
     loss_consistency_sketch = cross_loss(sketch_feat, sketch_aug_feat, temperature)
-    loss_consistency = 1 * (loss_consistency_photo + loss_consistency_sketch)
+    loss_consistency = lambda_consistency * (loss_consistency_photo + loss_consistency_sketch)
 
-    # --- L5: Text alignment InfoNCE (photo-text vs sketch-text) ---
-    loss_text_align = 0 * cross_loss(text_feat_photo, text_feat_sketch, temperature)
-
-    # Total loss = L1 + L2 + L3 + L4 + L5.
+    # Total loss = L1 + L2 + L3 + L4.
     total_loss = (
         loss_cross_modal
         + loss_ce
         + loss_ce_aug
         + loss_consistency
-        + loss_text_align
     )
 
     return total_loss

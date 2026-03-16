@@ -1,23 +1,26 @@
-"""
-Unit tests for HiCroPL-SBIR Architecture (CustomCLIP) based on specifications.
-"""
+"""Unit tests for the refactored HiCroPL CustomCLIP core blocks."""
 
 import sys
 import unittest
+from unittest.mock import patch
+
 import torch
 import torch.nn as nn
-from unittest.mock import MagicMock
 
-# Mock out src.clip before importing CustomCLIP
+
 class MockModule:
     pass
+
+
 mock_clip_pkg = MockModule()
 mock_clip_module = MockModule()
+
 
 def mock_tokenize(texts):
     if isinstance(texts, str):
         return torch.zeros(1, 77, dtype=torch.long)
     return torch.zeros(len(texts), 77, dtype=torch.long)
+
 
 mock_clip_module.tokenize = mock_tokenize
 mock_clip_pkg.clip = mock_clip_module
@@ -25,20 +28,27 @@ mock_clip_pkg.clip = mock_clip_module
 sys.modules['src.clip'] = mock_clip_pkg
 sys.modules['src.clip.clip'] = mock_clip_module
 
-# Mock out pytorch_lightning before importing CustomCLIP
+
 class MockPL:
     class LightningModule(nn.Module):
         pass
+
+
 sys.modules['pytorch_lightning'] = MockPL()
 
-# Mock out torchmetrics
+
 class MockMetrics:
     pass
+
+
 class MockFunctional:
     pass
+
+
 class MockRetrieval:
     retrieval_average_precision = lambda *args, **kwargs: 0.0
     retrieval_precision = lambda *args, **kwargs: 0.0
+
 
 mock_metrics = MockMetrics()
 mock_functional = MockFunctional()
@@ -50,157 +60,152 @@ sys.modules['torchmetrics'] = mock_metrics
 sys.modules['torchmetrics.functional'] = mock_functional
 sys.modules['torchmetrics.functional.retrieval'] = mock_retrieval
 
-# Mock out src.utils
-class MockUtils:
-    @staticmethod
-    def freeze_all_but_bn(m):
-        pass
-sys.modules['src.utils'] = MockUtils()
 
-from src.model_hicropl import CustomCLIP
+import src.model_hicropl as model_hicropl_module
 
-class DummyCfgTrainer:
-    class TrainerConfig:
-        N_CTX = 4
-        PROMPT_DEPTH = 3
-        CROSS_LAYER = 2
-        CTX_INIT = "a photo of a"
-    COPROMPT = TrainerConfig()
-    HICROPL = TrainerConfig()
 
 class DummyCfg:
-    TRAINER = DummyCfgTrainer()
+    n_ctx = 4
+    prompt_depth = 3
+    cross_layer = 2
+    ctx_init = "a photo of a"
+    ctx_init_sketch = "a sketch of a"
+    use_adapter = False
+    adapter_reduction = 4
+    image_adapter_m = 0.5
+    text_adapter_m = 0.5
 
-class MockTokenEmbedding(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.weight = nn.Parameter(torch.randn(49408, 512))
-        
-    def forward(self, x):
-        return torch.randn(x.shape[0], x.shape[1], 512)
-
-class MockTransformer(nn.Module):
-    def __init__(self, dim=512):
-        super().__init__()
-        # 3 layers matching PROMPT_DEPTH
-        self.resblocks = nn.ModuleList([nn.Linear(dim, dim) for _ in range(3)])
 
 class MockViT(nn.Module):
     def __init__(self):
         super().__init__()
-        class MockConv:
-            weight = torch.randn(768, 3, 32, 32)
-            def __call__(self, x):
-                return torch.randn(x.shape[0], 768, 7, 7) # B, width, grid, grid
-        self.conv1 = MockConv()
-        self.class_embedding = nn.Parameter(torch.randn(768))
-        self.positional_embedding = nn.Parameter(torch.randn(50, 768)) # grid^2 + 1
-        self.ln_pre = nn.LayerNorm(768)
-        self.transformer = MockTransformer(dim=768)
-        self.ln_post = nn.LayerNorm(768)
-        self.proj = nn.Parameter(torch.randn(768, 512))
+        self.conv1 = nn.Conv2d(3, 768, kernel_size=1, bias=False)
 
-    def forward(self, x):
-        # Only used by frozen reference encoder, must return [B, 512]
-        return torch.randn(x.shape[0], 512)
+    def forward(self, image):
+        pooled = image.mean(dim=(2, 3))
+        return pooled.repeat(1, 171)[:, :512]
+
 
 class MockCLIP(nn.Module):
     def __init__(self):
         super().__init__()
         self.dtype = torch.float32
-        self.logit_scale = nn.Parameter(torch.tensor(2.6592)) # ln(1/0.07)
-        self.token_embedding = MockTokenEmbedding()
-        self.visual = MockViT()
-        self.transformer = MockTransformer()
-        self.positional_embedding = nn.Parameter(torch.randn(77, 512))
-        self.ln_final = nn.LayerNorm(512)
+        self.logit_scale = nn.Parameter(torch.tensor(2.6592))
         self.text_projection = nn.Parameter(torch.randn(512, 512))
+        self.visual = MockViT()
+        self.ln_final = nn.LayerNorm(512)
 
-class TestCustomCLIPSpecification(unittest.TestCase):
+
+class DummyPromptLearner(nn.Module):
+    def __init__(self, clip_model, n_ctx=4, prompt_depth=3, cross_layer=2, ctx_init="", use_fp16=False):
+        super().__init__()
+        self.n_ctx = n_ctx
+        self.prompt_depth = prompt_depth
+
+    def forward(self, classnames):
+        n_cls = len(classnames)
+        text_input = torch.zeros(n_cls, 77, 512)
+        tokenized = torch.zeros(n_cls, 77, dtype=torch.long)
+        tokenized[:, 1] = 1
+        first_visual_prompt = torch.zeros(self.n_ctx, 768)
+        deep_text = [torch.zeros(self.n_ctx, 512) for _ in range(self.prompt_depth - 1)]
+        deep_visual = [torch.zeros(self.n_ctx, 768) for _ in range(self.prompt_depth - 1)]
+        return text_input, tokenized, first_visual_prompt, deep_text, deep_visual
+
+
+class DummyTextEncoder(nn.Module):
+    def __init__(self, clip_model):
+        super().__init__()
+
+    def forward(self, prompts, tokenized_prompts, deep_prompts_text):
+        n_cls = prompts.shape[0]
+        base = torch.linspace(0.1, 1.0, 512, dtype=prompts.dtype, device=prompts.device)
+        offsets = torch.arange(n_cls, dtype=prompts.dtype, device=prompts.device).unsqueeze(1)
+        return base.unsqueeze(0).repeat(n_cls, 1) + offsets
+
+
+class DummyVisualEncoder(nn.Module):
+    def __init__(self, clip_model):
+        super().__init__()
+
+    def forward(self, image, first_visual_prompt, deeper_visual_prompts):
+        pooled = image.mean(dim=(2, 3))
+        return pooled.repeat(1, 171)[:, :512]
+
+
+class TestCustomCLIPCoreBlocks(unittest.TestCase):
     def setUp(self):
+        self.prompt_patcher = patch.object(model_hicropl_module, 'CrossModalPromptLearner', DummyPromptLearner)
+        self.text_patcher = patch.object(model_hicropl_module, 'TextEncoder', DummyTextEncoder)
+        self.visual_patcher = patch.object(model_hicropl_module, 'VisualEncoder', DummyVisualEncoder)
+        self.prompt_patcher.start()
+        self.text_patcher.start()
+        self.visual_patcher.start()
+
         self.cfg = DummyCfg()
-        self.clip_model = MockCLIP()
-        self.clip_frozen = MockCLIP()
+        self.model = model_hicropl_module.CustomCLIP(self.cfg, MockCLIP(), MockCLIP())
 
-        # Initialize the model being tested
-        self.model = CustomCLIP(self.cfg, self.clip_model, self.clip_frozen)
-
-        # Dummy inputs for testing
         self.batch_size = 2
-        self.classnames = ["cat", "dog", "car"] # 3 classes
-        self.photo_img = torch.randn(self.batch_size, 3, 224, 224)
-        self.sk_img = torch.randn(self.batch_size, 3, 224, 224)
-        self.neg_img = torch.randn(self.batch_size, 3, 224, 224)
-        
-        self.x = [
-            self.sk_img, self.photo_img,
-            self.neg_img,
-            torch.randint(0, 3, (self.batch_size,)) # labels
+        self.classnames = ["cat", "dog", "car"]
+        self.batch = [
+            torch.randn(self.batch_size, 3, 224, 224),
+            torch.randn(self.batch_size, 3, 224, 224),
+            torch.randn(self.batch_size, 3, 224, 224),
+            torch.randn(self.batch_size, 3, 224, 224),
+            torch.randn(self.batch_size, 3, 224, 224),
+            torch.randint(0, len(self.classnames), (self.batch_size,)),
         ]
 
-    def test_forward_output_signature(self):
-        """
-        Specification:
-            forward(x, classnames) should return 8 outputs:
-            (photo_feat, frozen_photo_feat, logits_photo,
-             sketch_feat, frozen_sketch_feat, logits_sketch,
-             neg_feat, label)
-        """
-        output = self.model(self.x, self.classnames)
-        
-        self.assertEqual(len(output), 8, "Model backward signature does not match expected size of 8")
+    def tearDown(self):
+        self.prompt_patcher.stop()
+        self.text_patcher.stop()
+        self.visual_patcher.stop()
 
-        # Check types
-        for i, item in enumerate(output):
-            self.assertIsInstance(item, torch.Tensor, f"Output item {i} is not a Tensor")
+    def test_forward_returns_branch_dict(self):
+        output = self.model(self.batch, self.classnames)
 
-    def test_dimensions(self):
-        """
-        Specification:
-            Photo/Sketch/Neg features should be [Batch, 512]
-            Frozen references should be [Batch, 512]
-            Logits should be [Batch, N_Classes]
-        """
-        (
-            photo_feat, frozen_photo_feat, logits_photo,
-            sketch_feat, frozen_sketch_feat, logits_sketch,
-            neg_feat, label
-        ) = self.model(self.x, self.classnames)
-        
-        B = self.batch_size
-        D = 512
-        N_cls = len(self.classnames)
-        
-        self.assertEqual(photo_feat.shape, (B, D))
-        self.assertEqual(frozen_photo_feat.shape, (B, D))
-        self.assertEqual(logits_photo.shape, (B, N_cls))
-        
-        self.assertEqual(sketch_feat.shape, (B, D))
-        self.assertEqual(frozen_sketch_feat.shape, (B, D))
-        self.assertEqual(logits_sketch.shape, (B, N_cls))
-        
-        self.assertEqual(neg_feat.shape, (B, D))
-        
-        self.assertEqual(label.shape, (B,))
+        self.assertEqual(set(output.keys()), {'photo', 'sketch', 'label'})
+        self.assertEqual(output['label'].shape, (self.batch_size,))
 
-    def test_normality(self):
-        """
-        Specification:
-            All features returned from forward (photo_feat, frozen_photo, sketch_feat, frozen_sk, neg_feat)
-            MUST be L2 normalized across the embedding dimension to compute valid triplet margins and logits.
-        """
-        (
-            photo_feat, frozen_photo_feat, _,
-            sketch_feat, frozen_sketch_feat, _,
-            neg_feat, _
-        ) = self.model(self.x, self.classnames)
+        for branch_name in ('photo', 'sketch'):
+            branch = output[branch_name]
+            self.assertEqual(
+                set(branch.keys()),
+                {'feature', 'augment_feature', 'text_feature', 'logits', 'augment_logits'},
+            )
 
-        # Check norms are approximately 1.0
-        self.assertTrue(torch.allclose(torch.norm(photo_feat, p=2, dim=-1), torch.ones(self.batch_size), atol=1e-5))
-        self.assertTrue(torch.allclose(torch.norm(frozen_photo_feat, p=2, dim=-1), torch.ones(self.batch_size), atol=1e-5))
-        self.assertTrue(torch.allclose(torch.norm(sketch_feat, p=2, dim=-1), torch.ones(self.batch_size), atol=1e-5))
-        self.assertTrue(torch.allclose(torch.norm(frozen_sketch_feat, p=2, dim=-1), torch.ones(self.batch_size), atol=1e-5))
-        self.assertTrue(torch.allclose(torch.norm(neg_feat, p=2, dim=-1), torch.ones(self.batch_size), atol=1e-5))
+    def test_branch_dimensions_and_normalization(self):
+        output = self.model(self.batch, self.classnames)
+
+        for branch_name in ('photo', 'sketch'):
+            branch = output[branch_name]
+            self.assertEqual(branch['feature'].shape, (self.batch_size, 512))
+            self.assertEqual(branch['augment_feature'].shape, (self.batch_size, 512))
+            self.assertEqual(branch['text_feature'].shape, (len(self.classnames), 512))
+            self.assertEqual(branch['logits'].shape, (self.batch_size, len(self.classnames)))
+            self.assertEqual(branch['augment_logits'].shape, (self.batch_size, len(self.classnames)))
+
+            self.assertTrue(
+                torch.allclose(
+                    torch.norm(branch['feature'], p=2, dim=-1),
+                    torch.ones(self.batch_size),
+                    atol=1e-5,
+                )
+            )
+            self.assertTrue(
+                torch.allclose(
+                    torch.norm(branch['augment_feature'], p=2, dim=-1),
+                    torch.ones(self.batch_size),
+                    atol=1e-5,
+                )
+            )
+            self.assertTrue(
+                torch.allclose(
+                    torch.norm(branch['text_feature'], p=2, dim=-1),
+                    torch.ones(len(self.classnames)),
+                    atol=1e-5,
+                )
+            )
 
 
 if __name__ == "__main__":
