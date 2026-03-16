@@ -142,6 +142,7 @@ class CustomCLIP(nn.Module):
         )
         print(f"Adapter enabled: {self.use_adapter} | trainable adapter params: {adapter_param_count:,}")
         print(f"Adapter mix ratio | image_adapter_m: {self.image_adapter_m:.3f}, text_adapter_m: {self.text_adapter_m:.3f}")
+        self._adapter_debug_printed = False
         
         # Re-enable LayerNorm parameters for A/B/C/D encoders (CoPrompt-style policy).
         unfreeze_layernorm_params(self.text_encoder_photo)
@@ -184,17 +185,25 @@ class CustomCLIP(nn.Module):
             sketch_feat_fixed = self.frozen_visual_encoder(sk_tensor.type(self.dtype))
             sketch_feat_fixed = sketch_feat_fixed / sketch_feat_fixed.norm(dim=-1, keepdim=True)
 
+        adapter_debug = {}
+
         # 2. Extract text features and optionally apply adapter residual mixing (A/B only).
         text_feat_photo = self.text_encoder_photo(text_input_p, tok_p, deep_t_p)
         if self.use_adapter:
             x_b = self.adapter_text(text_feat_photo)
-            text_feat_photo = self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_photo
+            text_feat_photo_mixed = self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_photo
+            if not self._adapter_debug_printed:
+                adapter_debug['text_photo_delta'] = (text_feat_photo_mixed - text_feat_photo).abs().mean().item()
+            text_feat_photo = text_feat_photo_mixed
         text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
         
         text_feat_sketch = self.text_encoder_sketch(text_input_s, tok_s, deep_t_s)
         if self.use_adapter:
             x_b = self.adapter_text(text_feat_sketch)
-            text_feat_sketch = self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_sketch
+            text_feat_sketch_mixed = self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_sketch
+            if not self._adapter_debug_printed:
+                adapter_debug['text_sketch_delta'] = (text_feat_sketch_mixed - text_feat_sketch).abs().mean().item()
+            text_feat_sketch = text_feat_sketch_mixed
         text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
         
         # 3. Aug Visual Features (E/F): standard ViT with LN trainable, no HiCroPL prompts.
@@ -209,15 +218,26 @@ class CustomCLIP(nn.Module):
         photo_feat = self.visual_encoder_photo(photo_tensor, first_v_p, deep_v_p)
         if self.use_adapter:
             x_a = self.adapter_photo(photo_feat)
-            photo_feat = self.image_adapter_m * x_a + (1 - self.image_adapter_m) * photo_feat
+            photo_feat_mixed = self.image_adapter_m * x_a + (1 - self.image_adapter_m) * photo_feat
+            if not self._adapter_debug_printed:
+                adapter_debug['photo_delta'] = (photo_feat_mixed - photo_feat).abs().mean().item()
+            photo_feat = photo_feat_mixed
         photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
         
         # - Sketch (D)
         sketch_feat = self.visual_encoder_sketch(sk_tensor, first_v_s, deep_v_s)
         if self.use_adapter:
             x_a = self.adapter_photo(sketch_feat)
-            sketch_feat = self.image_adapter_m * x_a + (1 - self.image_adapter_m) * sketch_feat
+            sketch_feat_mixed = self.image_adapter_m * x_a + (1 - self.image_adapter_m) * sketch_feat
+            if not self._adapter_debug_printed:
+                adapter_debug['sketch_delta'] = (sketch_feat_mixed - sketch_feat).abs().mean().item()
+            sketch_feat = sketch_feat_mixed
         sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
+
+        if self.use_adapter and (not self._adapter_debug_printed):
+            self._adapter_debug_printed = True
+            debug_msg = ", ".join(f"{k}={v:.6f}" for k, v in adapter_debug.items())
+            print(f"Adapter debug (pre-norm mean|delta|): {debug_msg}")
         
         # - Negative Photo (Uses Photo Prompts)
         neg_feat = self.visual_encoder_photo(neg_tensor, first_v_p, deep_v_p)
@@ -317,6 +337,9 @@ class HiCroPL_SBIR(pl.LightningModule):
         adapter_params = []
         add_unique_params(self.model.adapter_photo.parameters(), adapter_params, seen_ids)
         add_unique_params(self.model.adapter_text.parameters(), adapter_params, seen_ids)
+        adapter_param_total = sum(p.numel() for p in adapter_params)
+        if self.model.use_adapter and adapter_param_total == 0:
+            raise RuntimeError("use_adapter=True but no adapter parameters were collected by optimizer")
 
         extra_trainable_params = []
         for _, p in self.model.named_parameters():
@@ -328,7 +351,7 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         self.print(f"Number of trainable prompt params: {sum(p.numel() for p in prompt_params):,}")
         self.print(f"Number of trainable LayerNorm params: {sum(p.numel() for p in ln_params):,}")
-        self.print(f"Number of trainable adapter params: {sum(p.numel() for p in adapter_params):,}")
+        self.print(f"Number of trainable adapter params: {adapter_param_total:,}")
         if extra_trainable_params:
             self.print(f"Warning: Found {len(extra_trainable_params)} unexpected trainable tensors outside prompt/LN/adapter; including them in optimizer.")
         self.print(f"Total trainable non-prompt params: {sum(p.numel() for p in non_prompt_params):,}")
