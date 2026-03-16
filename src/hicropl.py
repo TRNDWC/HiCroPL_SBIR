@@ -236,6 +236,7 @@ class CrossModalPromptLearner(nn.Module):
         cross_layer=4,
         ctx_init="a photo of a",
         use_fp16=True,
+        shared_text_source=None,
     ):
         """
         Args:
@@ -245,6 +246,8 @@ class CrossModalPromptLearner(nn.Module):
             cross_layer: layer index where flow switches from T->V to V->T (k)
             ctx_init: initial text for first layer prompt (max n_ctx words)
             use_fp16: whether to use fp16 for mapper/LKP networks
+            shared_text_source: optional CrossModalPromptLearner that owns the
+                shared text prompts for multi-branch text sharing experiments
         """
         super().__init__()
         self.dtype = clip_model.dtype
@@ -257,30 +260,32 @@ class CrossModalPromptLearner(nn.Module):
         self.ctx_dim = ctx_dim
         self.v_dim = v_dim
         self.ctx_init_text = ctx_init
+        self.shared_text_source = shared_text_source
 
         # Reference to token_embedding (frozen, not trained)
         self.token_embedding = clip_model.token_embedding
 
         # ---- Text Prompts: L layers x [n_ctx, ctx_dim] ----
-        if ctx_init and n_ctx <= 4:
-            from src.clip import clip as _clip
-            prompt = _clip.tokenize(ctx_init).to(clip_model.token_embedding.weight.device)
-            with torch.no_grad():
-                embedding = clip_model.token_embedding(prompt).type(self.dtype)
-            ctx_vectors = embedding[0, 1 : 1 + n_ctx, :]
-        else:
-            ctx_vectors = torch.empty(n_ctx, ctx_dim, dtype=self.dtype)
-            nn.init.normal_(ctx_vectors, std=0.02)
+        if self.shared_text_source is None:
+            if ctx_init and n_ctx <= 4:
+                from src.clip import clip as _clip
+                prompt = _clip.tokenize(ctx_init).to(clip_model.token_embedding.weight.device)
+                with torch.no_grad():
+                    embedding = clip_model.token_embedding(prompt).type(self.dtype)
+                ctx_vectors = embedding[0, 1 : 1 + n_ctx, :]
+            else:
+                ctx_vectors = torch.empty(n_ctx, ctx_dim, dtype=self.dtype)
+                nn.init.normal_(ctx_vectors, std=0.02)
 
-        self.cross_prompts_text = nn.ParameterList(
-            [nn.Parameter(ctx_vectors)]
-            + [
-                nn.Parameter(torch.empty(n_ctx, ctx_dim, dtype=self.dtype))
-                for _ in range(prompt_depth - 1)
-            ]
-        )
-        for p in self.cross_prompts_text[1:]:
-            nn.init.normal_(p, std=0.02)
+            self.cross_prompts_text = nn.ParameterList(
+                [nn.Parameter(ctx_vectors)]
+                + [
+                    nn.Parameter(torch.empty(n_ctx, ctx_dim, dtype=self.dtype))
+                    for _ in range(prompt_depth - 1)
+                ]
+            )
+            for p in self.cross_prompts_text[1:]:
+                nn.init.normal_(p, std=0.02)
 
         # ---- Visual Prompts: L layers x [n_ctx, v_dim] ----
         self.cross_prompts_visual = nn.ParameterList(
@@ -336,15 +341,66 @@ class CrossModalPromptLearner(nn.Module):
         """Build text input: [SOS, ctx_tokens, class_name_tokens..., EOS, padding]."""
         return torch.cat([prefix, ctx, suffix], dim=1)
 
+    def _text_owner(self):
+        return self.shared_text_source if self.shared_text_source is not None else self
+
+    def _get_text_prompt_list(self):
+        return self._text_owner().cross_prompts_text
+
+    def _build_text_input(self, classnames):
+        n_cls = len(classnames)
+        text_owner = self._text_owner()
+        text_prompts = self._get_text_prompt_list()
+        device = text_prompts[0].device
+
+        from src.clip import clip as _clip
+        classnames_clean = [name.replace("_", " ") for name in classnames]
+        raw_prompts = [
+            text_owner.ctx_init_text + " " + name + "." for name in classnames_clean
+        ]
+        tokenized_prompts = torch.cat([_clip.tokenize(p) for p in raw_prompts]).to(device)
+
+        with torch.no_grad():
+            embedding = text_owner.token_embedding(tokenized_prompts).type(self.dtype)
+
+        prefix = embedding[:, :1, :]
+        suffix = embedding[:, 1 + self.n_ctx :, :]
+
+        ctx = text_prompts[0]
+        if ctx.dim() == 2:
+            ctx = ctx.unsqueeze(0).expand(n_cls, -1, -1)
+
+        text_input = self.construct_prompts(ctx, prefix, suffix)
+        return text_input, tokenized_prompts
+
+    def export_prompt_state(self, classnames):
+        text_input, tokenized_prompts = self._build_text_input(classnames)
+        text_prompts = self._get_text_prompt_list()
+        deeper_text_prompts = [
+            text_prompts[i] for i in range(1, self.prompt_depth)
+        ]
+        deeper_visual_prompts = [
+            self.cross_prompts_visual[i] for i in range(1, self.prompt_depth)
+        ]
+        return (
+            text_input,
+            tokenized_prompts,
+            self.cross_prompts_visual[0],
+            deeper_text_prompts,
+            deeper_visual_prompts,
+        )
+
     def _text_to_visual_flow(self):
         """Early layers (0..cross_layer-1): Text semantics -> Visual prompts."""
+        text_prompts = self._get_text_prompt_list()
+
         # LKP: compress each early-layer text prompt into a proxy token
         proxy_text_tokens = []
         for i in range(self.cross_layer):
             proxy = self.attn_pooling_text_nets[i](
                 token_query=self.text_proxy_tokens[i],
-                sequence_key=self.cross_prompts_text[i],
-                sequence_value=self.cross_prompts_text[i],
+                sequence_key=text_prompts[i],
+                sequence_value=text_prompts[i],
             )
             proxy_text_tokens.append(proxy)
         proxy_text = torch.cat(proxy_text_tokens, dim=0)  # [cross_layer, ctx_dim]
@@ -364,11 +420,11 @@ class CrossModalPromptLearner(nn.Module):
         for i in range(self.cross_layer):
             self.cross_prompts_visual[i].data.copy_(updated_visual[i])
 
-    def _visual_to_text_flow(self):
-        """Later layers (cross_layer..prompt_depth-1): Visual info -> Text prompts."""
+    def compute_visual_to_text_update(self):
+        """Return the later-layer text prompt update induced by this learner's visual branch."""
         n_later = self.prompt_depth - self.cross_layer
+        text_prompts = self._get_text_prompt_list()
 
-        # LKP: compress each later-layer visual prompt into a proxy token
         proxy_visual_tokens = []
         for i in range(self.cross_layer, self.prompt_depth):
             idx = i - self.cross_layer
@@ -380,23 +436,29 @@ class CrossModalPromptLearner(nn.Module):
             proxy_visual_tokens.append(proxy)
         proxy_visual = torch.cat(proxy_visual_tokens, dim=0)  # [n_later, v_dim]
 
-        # Flatten text prompts for later layers
         text_flat = torch.cat(
             [
-                self.cross_prompts_text[i].unsqueeze(0)
+                text_prompts[i].unsqueeze(0)
                 for i in range(self.cross_layer, self.prompt_depth)
             ],
             dim=0,
-        ).view(-1, self.ctx_dim)  # [n_later * n_ctx, ctx_dim]
-        proxy_visual_flat = proxy_visual.view(-1, self.v_dim)  # [n_later, v_dim]
+        ).view(-1, self.ctx_dim)
+        proxy_visual_flat = proxy_visual.view(-1, self.v_dim)
 
-        # Knowledge Mapper: inject visual info into text prompts
         updated_text = self.visual2text_net(text_flat, proxy_visual_flat, proxy_visual_flat)
         updated_text = updated_text.view(n_later, self.n_ctx, self.ctx_dim)
+        return updated_text
 
-        # Update text prompts (detached, following original HiCroPL)
+    def apply_visual_to_text_update(self, updated_text):
+        """Write a later-layer text prompt update into the owned/shared text prompt bank."""
+        text_prompts = self._get_text_prompt_list()
         for i in range(self.cross_layer, self.prompt_depth):
-            self.cross_prompts_text[i].data.copy_(updated_text[i - self.cross_layer])
+            text_prompts[i].data.copy_(updated_text[i - self.cross_layer])
+
+    def _visual_to_text_flow(self):
+        """Later layers (cross_layer..prompt_depth-1): Visual info -> Text prompts."""
+        updated_text = self.compute_visual_to_text_update()
+        self.apply_visual_to_text_update(updated_text)
 
     def forward(self, classnames):
         """Perform bidirectional knowledge flow and return all prompts.
@@ -410,46 +472,7 @@ class CrossModalPromptLearner(nn.Module):
             deeper_text_prompts: list of L-1 tensors [n_ctx, ctx_dim]
             deeper_visual_prompts: list of L-1 tensors [n_ctx, v_dim]
         """
-        n_cls = len(classnames)
-        device = self.cross_prompts_text[0].device
-
-        # ---- Construct text input for first layer ----
-        from src.clip import clip as _clip
-        classnames_clean = [name.replace("_", " ") for name in classnames]
-        raw_prompts = [
-            self.ctx_init_text + " " + name + "." for name in classnames_clean
-        ]
-        tokenized_prompts = torch.cat([_clip.tokenize(p) for p in raw_prompts])
-        tokenized_prompts = tokenized_prompts.to(device)
-
-        with torch.no_grad():
-            embedding = self.token_embedding(tokenized_prompts).type(self.dtype)
-
-        prefix = embedding[:, :1, :]               # SOS
-        suffix = embedding[:, 1 + self.n_ctx :, :]  # class + EOS + padding
-
-        ctx = self.cross_prompts_text[0]
-        if ctx.dim() == 2:
-            ctx = ctx.unsqueeze(0).expand(n_cls, -1, -1)
-
-        text_input = self.construct_prompts(ctx, prefix, suffix)
-
         # ---- Bidirectional Knowledge Flow ----
         self._text_to_visual_flow()   # T -> V (early layers)
         self._visual_to_text_flow()   # V -> T (later layers)
-
-        # ---- Collect deeper prompts (layers 1..L-1) ----
-        deeper_text_prompts = [
-            self.cross_prompts_text[i] for i in range(1, self.prompt_depth)
-        ]
-        deeper_visual_prompts = [
-            self.cross_prompts_visual[i] for i in range(1, self.prompt_depth)
-        ]
-
-        return (
-            text_input,
-            tokenized_prompts,
-            self.cross_prompts_visual[0],
-            deeper_text_prompts,
-            deeper_visual_prompts,
-        )
+        return self.export_prompt_state(classnames)

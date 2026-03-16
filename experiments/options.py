@@ -55,6 +55,7 @@ parser.add_argument('--mcc_sk', type=float, default=0.1, help='Target mean simil
 parser.add_argument('--mcc_ph', type=float, default=0.0, help='Target mean similarity for photo-to-photo (MCC center)')
 parser.add_argument('--triplet_margin', type=float, default=0.3, help='Margin for Triplet Loss')
 parser.add_argument('--temperature', type=float, default=0.07, help='Temperature for InfoNCE Loss')
+parser.add_argument('--shared_text_merge_mode', type=str, default='mean', choices=['mean', 'sum', 'photo_then_sketch', 'sketch_then_photo'], help='How to merge photo and sketch visual-to-text updates into the single shared text branch')
 parser.add_argument('--use_adapter', action='store_true', default=False, help='Enable CoPrompt-style feature adapters (disabled by default for no-adapter ablation)')
 parser.add_argument('--adapter_reduction', type=int, default=4, help='Bottleneck reduction ratio when --use_adapter is enabled')
 parser.add_argument('--image_adapter_m', type=float, default=0.5, help='Residual mixing ratio for image adapter output (used when --use_adapter is enabled)')

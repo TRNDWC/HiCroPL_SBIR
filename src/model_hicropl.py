@@ -59,7 +59,7 @@ class CustomCLIP(nn.Module):
     
         Contains:
         - 2x CrossModalPromptLearner (one for Photo, one for Sketch)
-        - 2x TextEncoder (Photo/Sketch, with deep prompt injection)
+        - 1x or 2x TextEncoder depending on shared-text experiment mode
         - 4x VisualEncoder:
             * prompted photo/sketch encoders
             * no-prompt photo_aug/sketch_aug encoders
@@ -87,6 +87,7 @@ class CustomCLIP(nn.Module):
         self.clip_model_frozen.apply(freeze_model)  # Frozen model stays completely frozen
         
         self.dtype = self.clip_model_photo.dtype
+        self.shared_text_merge_mode = getattr(cfg, 'shared_text_merge_mode', 'mean')
         
         # --- 1. Dual Prompt Learners ---
         n_ctx = getattr(cfg, 'n_ctx', 4)
@@ -94,6 +95,8 @@ class CustomCLIP(nn.Module):
         cross_layer = getattr(cfg, 'cross_layer', 4)
         ctx_init_photo = getattr(cfg, 'ctx_init', "a photo or a sketch of a")
         ctx_init_sketch = getattr(cfg, 'ctx_init_sketch', "a photo or a sketch of a")
+        if ctx_init_photo != ctx_init_sketch:
+            print("Shared text branch uses photo ctx_init as the shared text template; ctx_init_sketch is ignored.")
         
         print("Initializing Photo Prompt Learner...")
         self.prompt_learner_photo = CrossModalPromptLearner(
@@ -112,12 +115,14 @@ class CustomCLIP(nn.Module):
             prompt_depth=prompt_depth,
             cross_layer=cross_layer,
             ctx_init=ctx_init_sketch,
-            use_fp16=True if self.dtype == torch.float16 else False
+            use_fp16=True if self.dtype == torch.float16 else False,
+            shared_text_source=self.prompt_learner_photo,
         )
 
         # --- 2. Encoders with Deep Injection (A/B/C/D prompted branches) ---
-        self.text_encoder_photo = TextEncoder(self.clip_model_photo)
-        self.text_encoder_sketch = TextEncoder(self.clip_model_sketch)
+        # Always use a single shared text encoder; merge mode controls how photo/sketch V->T flows combine.
+        self.text_encoder_shared = TextEncoder(self.clip_model_photo)
+        print(f"Shared text branch | merge mode: {self.shared_text_merge_mode}")
         self.visual_encoder_photo = VisualEncoder(self.clip_model_photo)
         self.visual_encoder_sketch = VisualEncoder(self.clip_model_sketch)
         # E/F aug branches use clip_model_photo_aug/sketch_aug .visual directly
@@ -145,14 +150,70 @@ class CustomCLIP(nn.Module):
         self._adapter_debug_printed = False
         
         # Re-enable LayerNorm parameters for A/B/C/D encoders (CoPrompt-style policy).
-        unfreeze_layernorm_params(self.text_encoder_photo)
-        unfreeze_layernorm_params(self.text_encoder_sketch)
+        unfreeze_layernorm_params(self.text_encoder_shared)
         unfreeze_layernorm_params(self.visual_encoder_photo)
         unfreeze_layernorm_params(self.visual_encoder_sketch)
         # E/F: freeze_all_but_bn already keeps LN trainable on clip_model_photo/sketch_aug
         
         # --- 3. Frozen Reference Model ---
         self.frozen_visual_encoder = clip_model_frozen.visual
+
+    def _apply_shared_text_update(self):
+        if self.shared_text_merge_mode == 'mean':
+            photo_update = self.prompt_learner_photo.compute_visual_to_text_update()
+            sketch_update = self.prompt_learner_sketch.compute_visual_to_text_update()
+            merged_update = 0.5 * (photo_update + sketch_update)
+            self.prompt_learner_photo.apply_visual_to_text_update(merged_update)
+            return
+
+        if self.shared_text_merge_mode == 'sum':
+            photo_update = self.prompt_learner_photo.compute_visual_to_text_update()
+            sketch_update = self.prompt_learner_sketch.compute_visual_to_text_update()
+            merged_update = photo_update + sketch_update
+            self.prompt_learner_photo.apply_visual_to_text_update(merged_update)
+            return
+
+        if self.shared_text_merge_mode == 'photo_then_sketch':
+            photo_update = self.prompt_learner_photo.compute_visual_to_text_update()
+            self.prompt_learner_photo.apply_visual_to_text_update(photo_update)
+            sketch_update = self.prompt_learner_sketch.compute_visual_to_text_update()
+            self.prompt_learner_photo.apply_visual_to_text_update(sketch_update)
+            return
+
+        if self.shared_text_merge_mode == 'sketch_then_photo':
+            sketch_update = self.prompt_learner_sketch.compute_visual_to_text_update()
+            self.prompt_learner_photo.apply_visual_to_text_update(sketch_update)
+            photo_update = self.prompt_learner_photo.compute_visual_to_text_update()
+            self.prompt_learner_photo.apply_visual_to_text_update(photo_update)
+            return
+
+        raise ValueError(f"Unsupported shared_text_merge_mode: {self.shared_text_merge_mode}")
+
+    def prepare_prompt_states(self, classnames):
+        self.prompt_learner_photo._text_to_visual_flow()
+        self.prompt_learner_sketch._text_to_visual_flow()
+        self._apply_shared_text_update()
+
+        photo_state = self.prompt_learner_photo.export_prompt_state(classnames)
+        sketch_state = self.prompt_learner_sketch.export_prompt_state(classnames)
+
+        shared_text_input, shared_tok, _, shared_deep_t, _ = photo_state
+        return {
+            'photo': (
+                shared_text_input,
+                shared_tok,
+                photo_state[2],
+                shared_deep_t,
+                photo_state[4],
+            ),
+            'sketch': (
+                shared_text_input,
+                shared_tok,
+                sketch_state[2],
+                shared_deep_t,
+                sketch_state[4],
+            ),
+        }
 
     def forward(self, x, classnames):
         """
@@ -162,22 +223,17 @@ class CustomCLIP(nn.Module):
         """
         sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
         
-        # 1. Evaluate Prompt Learners Once
-        (
-            text_input_p, tok_p, first_v_p, deep_t_p, deep_v_p
-        ) = self.prompt_learner_photo(classnames)
-        
-        (
-            text_input_s, tok_s, first_v_s, deep_t_s, deep_v_s
-        ) = self.prompt_learner_sketch(classnames)
+        # 1. Evaluate prompt learners once and prepare prompt states.
+        prompt_states = self.prepare_prompt_states(classnames)
+        text_input_p, tok_p, first_v_p, deep_t_p, deep_v_p = prompt_states['photo']
+        text_input_s, tok_s, first_v_s, deep_t_s, deep_v_s = prompt_states['sketch']
 
         # 1.1 Frozen teacher targets (no gradients)
         with torch.no_grad():
-            text_feat_fixed_photo = self.clip_model_frozen.encode_text(tok_p)
-            text_feat_fixed_photo = text_feat_fixed_photo / text_feat_fixed_photo.norm(dim=-1, keepdim=True)
-
-            text_feat_fixed_sketch = self.clip_model_frozen.encode_text(tok_s)
-            text_feat_fixed_sketch = text_feat_fixed_sketch / text_feat_fixed_sketch.norm(dim=-1, keepdim=True)
+            text_feat_fixed_shared = self.clip_model_frozen.encode_text(tok_p)
+            text_feat_fixed_shared = text_feat_fixed_shared / text_feat_fixed_shared.norm(dim=-1, keepdim=True)
+            text_feat_fixed_photo = text_feat_fixed_shared
+            text_feat_fixed_sketch = text_feat_fixed_shared
 
             photo_feat_fixed = self.frozen_visual_encoder(photo_tensor.type(self.dtype))
             photo_feat_fixed = photo_feat_fixed / photo_feat_fixed.norm(dim=-1, keepdim=True)
@@ -187,24 +243,17 @@ class CustomCLIP(nn.Module):
 
         adapter_debug = {}
 
-        # 2. Extract text features and optionally apply adapter residual mixing (A/B only).
-        text_feat_photo = self.text_encoder_photo(text_input_p, tok_p, deep_t_p)
+        # 2. Extract text features from the single shared text encoder (A/B).
+        text_feat_shared = self.text_encoder_shared(text_input_p, tok_p, deep_t_p)
         if self.use_adapter:
-            x_b = self.adapter_text(text_feat_photo)
-            text_feat_photo_mixed = self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_photo
+            x_b = self.adapter_text(text_feat_shared)
+            text_feat_shared_mixed = self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_shared
             if not self._adapter_debug_printed:
-                adapter_debug['text_photo_delta'] = (text_feat_photo_mixed - text_feat_photo).abs().mean().item()
-            text_feat_photo = text_feat_photo_mixed
-        text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
-        
-        text_feat_sketch = self.text_encoder_sketch(text_input_s, tok_s, deep_t_s)
-        if self.use_adapter:
-            x_b = self.adapter_text(text_feat_sketch)
-            text_feat_sketch_mixed = self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_sketch
-            if not self._adapter_debug_printed:
-                adapter_debug['text_sketch_delta'] = (text_feat_sketch_mixed - text_feat_sketch).abs().mean().item()
-            text_feat_sketch = text_feat_sketch_mixed
-        text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
+                adapter_debug['text_shared_delta'] = (text_feat_shared_mixed - text_feat_shared).abs().mean().item()
+            text_feat_shared = text_feat_shared_mixed
+        text_feat_shared = text_feat_shared / text_feat_shared.norm(dim=-1, keepdim=True)
+        text_feat_photo = text_feat_shared
+        text_feat_sketch = text_feat_shared
         
         # 3. Aug Visual Features (E/F): standard ViT with LN trainable, no HiCroPL prompts.
         photo_aug_feat = self.clip_model_photo_aug.visual(photo_aug_tensor.type(self.dtype))
@@ -323,14 +372,16 @@ class HiCroPL_SBIR(pl.LightningModule):
         add_unique_params(self.model.prompt_learner_sketch.parameters(), prompt_params, seen_ids)
 
         ln_params = []
-        ln_backbones = [
-            self.model.clip_model_photo,
-            self.model.clip_model_sketch,
-            self.model.clip_model_photo_aug,
-            self.model.clip_model_sketch_aug,
+        ln_sources = [
+            self.model.visual_encoder_photo,
+            self.model.visual_encoder_sketch,
+            self.model.clip_model_photo_aug.visual,
+            self.model.clip_model_sketch_aug.visual,
         ]
-        for backbone in ln_backbones:
-            for module in backbone.modules():
+        ln_sources.append(self.model.text_encoder_shared)
+
+        for source in ln_sources:
+            for module in source.modules():
                 if isinstance(module, torch.nn.LayerNorm):
                     add_unique_params(module.parameters(recurse=False), ln_params, seen_ids)
 
@@ -387,12 +438,13 @@ class HiCroPL_SBIR(pl.LightningModule):
     def on_validation_epoch_start(self):
         """Cache prompt outputs ONE TIME trước toàn bộ validation loop (giống GitHub CoPrompt)."""
         with torch.no_grad():
-            _, _, first_v_p, _, deep_v_p = self.model.prompt_learner_photo(self.classnames)
+            prompt_states = self.model.prepare_prompt_states(self.classnames)
+            _, _, first_v_p, _, deep_v_p = prompt_states['photo']
             self._cached_photo_prompts = (
                 first_v_p.detach() if first_v_p is not None else None,
                 [p.detach() for p in deep_v_p] if deep_v_p is not None else None,
             )
-            _, _, first_v_s, _, deep_v_s = self.model.prompt_learner_sketch(self.classnames)
+            _, _, first_v_s, _, deep_v_s = prompt_states['sketch']
             self._cached_sketch_prompts = (
                 first_v_s.detach() if first_v_s is not None else None,
                 [p.detach() for p in deep_v_s] if deep_v_s is not None else None,
