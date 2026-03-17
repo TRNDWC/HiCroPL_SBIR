@@ -21,6 +21,11 @@ if __name__ == '__main__':
     # Set seed for reproducibility — bao gồm Python, NumPy, PyTorch, CUDA
     pl.seed_everything(SEED, workers=True)
 
+    # Force a single backbone across all branches for stable comparisons.
+    if opts.backbone != 'ViT-B/32':
+        print(f"[WARN] Overriding backbone {opts.backbone} -> ViT-B/32")
+    opts.backbone = 'ViT-B/32'
+
     def seed_worker(worker_id):
         """Seed numpy và random trong mỗi DataLoader worker (fix np.random.choice non-determinism)."""
         worker_seed = torch.initial_seed() % 2**32
