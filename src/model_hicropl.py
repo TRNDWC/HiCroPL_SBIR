@@ -6,15 +6,11 @@ from torch.nn import functional as F
 import pytorch_lightning as pl
 from torchmetrics.functional.retrieval import retrieval_average_precision, retrieval_precision
 
-from src.clip import clip
 from src.hicropl import (
     CrossModalPromptLearner,
     TextEncoder,
     VisualEncoder,
 )
-
-def freeze_model(m):
-    m.requires_grad_(False)
 
 def freeze_all_but_bn(m):
     if not isinstance(m, torch.nn.LayerNorm):
@@ -22,17 +18,6 @@ def freeze_all_but_bn(m):
             m.weight.requires_grad_(False)
         if hasattr(m, 'bias') and m.bias is not None:
             m.bias.requires_grad_(False)
-
-def unfreeze_layernorm_params(module):
-    for child in module.modules():
-        if isinstance(child, torch.nn.LayerNorm):
-            for p in child.parameters(recurse=False):
-                p.requires_grad_(True)
-
-def set_ln_to_train(m):
-    """Set LayerNorm modules to train mode while keeping others in eval"""
-    if isinstance(m, torch.nn.LayerNorm):
-        m.train()
 
 
 class Adapter(nn.Module):
@@ -60,31 +45,25 @@ class CustomCLIP(nn.Module):
         Contains:
         - 2x CrossModalPromptLearner (one for Photo, one for Sketch)
         - 2x TextEncoder (Photo/Sketch, with deep prompt injection)
-        - 4x VisualEncoder:
-            * prompted photo/sketch encoders
-            * no-prompt photo_aug/sketch_aug encoders
+        - 2x prompted visual encoders (photo/sketch)
+        - 1x shared distill visual branch for augmentation views
         - Optional shared feature adapter (disabled by default for ablation)
-        - 1x Frozen CLIP teacher for distillation targets
+        - Distill CLIP branch with LayerNorm trainable
     """
 
     def __init__(self, cfg, clip_model, clip_model_frozen):
         super().__init__()
         self.cfg = cfg
 
-        # Build independent CLIP backbones for each branch.
+        # Build prompted backbones and one shared distill branch (CoPrompt-style).
         self.clip_model_photo = copy.deepcopy(clip_model)
         self.clip_model_sketch = copy.deepcopy(clip_model)
-        # E/F aug branches: standard ViT (CoOp design), LN trainable, no prompt injection
-        self.clip_model_photo_aug = copy.deepcopy(clip_model_frozen)
-        self.clip_model_sketch_aug = copy.deepcopy(clip_model_frozen)
-        self.clip_model_frozen = clip_model_frozen
+        self.clip_model_distill = clip_model_frozen
         
-        # Freeze weights, keeping LayerNorm trainable for A/B/C/D and E/F
+        # Freeze non-LN params and keep LayerNorm trainable across all encoder branches.
         self.clip_model_photo.apply(freeze_all_but_bn)
         self.clip_model_sketch.apply(freeze_all_but_bn)
-        self.clip_model_photo_aug.apply(freeze_all_but_bn)
-        self.clip_model_sketch_aug.apply(freeze_all_but_bn)
-        self.clip_model_frozen.apply(freeze_model)  # Frozen model stays completely frozen
+        self.clip_model_distill.apply(freeze_all_but_bn)
         
         self.dtype = self.clip_model_photo.dtype
         
@@ -120,39 +99,28 @@ class CustomCLIP(nn.Module):
         self.text_encoder_sketch = TextEncoder(self.clip_model_sketch)
         self.visual_encoder_photo = VisualEncoder(self.clip_model_photo)
         self.visual_encoder_sketch = VisualEncoder(self.clip_model_sketch)
-        # E/F aug branches use clip_model_photo_aug/sketch_aug .visual directly
-        # (standard VisionTransformer, no HiCroPL prompts, LN trainable)
+        # Aug views use shared distill visual encoder (no HiCroPL prompts).
 
-        # --- 2.1 Optional shared adapters (disabled by default for no-adapter runs) ---
-        self.use_adapter = bool(getattr(cfg, 'use_adapter', False))
+        # --- 2.1 Shared adapters (CoPrompt-style, always-on) ---
+        adapter_reduction = getattr(cfg, 'adapter_reduction', 4)
+        embed_dim = int(self.clip_model_photo.text_projection.shape[1])
+        self.adapter_photo = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
+        self.adapter_text = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
+        
         self.image_adapter_m = float(getattr(cfg, 'image_adapter_m', getattr(cfg, 'visual_adapter_m', 0.1)))
         self.text_adapter_m = float(getattr(cfg, 'text_adapter_m', 0.1))
-        if self.use_adapter:
-            adapter_reduction = getattr(cfg, 'adapter_reduction', 4)
-            embed_dim = int(self.clip_model_photo.text_projection.shape[1])
-            self.adapter_photo = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
-            self.adapter_text = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
-        else:
-            # Keep adapter callsites unchanged while bypassing adapter logic.
-            self.adapter_photo = nn.Identity()
-            self.adapter_text = nn.Identity()
+        
         adapter_param_count = (
             sum(p.numel() for p in self.adapter_photo.parameters() if p.requires_grad)
             + sum(p.numel() for p in self.adapter_text.parameters() if p.requires_grad)
         )
-        print(f"Adapter enabled: {self.use_adapter} | trainable adapter params: {adapter_param_count:,}")
+        print(f"Adapters ALWAYS enabled | trainable adapter params: {adapter_param_count:,}")
         print(f"Adapter mix ratio | image_adapter_m: {self.image_adapter_m:.3f}, text_adapter_m: {self.text_adapter_m:.3f}")
-        self._adapter_debug_printed = False
         
-        # Re-enable LayerNorm parameters for A/B/C/D encoders (CoPrompt-style policy).
-        unfreeze_layernorm_params(self.text_encoder_photo)
-        unfreeze_layernorm_params(self.text_encoder_sketch)
-        unfreeze_layernorm_params(self.visual_encoder_photo)
-        unfreeze_layernorm_params(self.visual_encoder_sketch)
-        # E/F: freeze_all_but_bn already keeps LN trainable on clip_model_photo/sketch_aug
+        # LN remains trainable on prompted and distill branches via freeze_all_but_bn.
         
-        # --- 3. Frozen Reference Model ---
-        self.frozen_visual_encoder = clip_model_frozen.visual
+        # --- 3. Shared Distill Visual Branch ---
+        self.distill_visual_encoder = self.clip_model_distill.visual
 
     def forward(self, x, classnames):
         """
@@ -171,73 +139,50 @@ class CustomCLIP(nn.Module):
             text_input_s, tok_s, first_v_s, deep_t_s, deep_v_s
         ) = self.prompt_learner_sketch(classnames)
 
-        # 1.1 Frozen teacher targets (no gradients)
+        # 1.1 Distill reference targets (no gradients)
         with torch.no_grad():
-            text_feat_fixed_photo = self.clip_model_frozen.encode_text(tok_p)
+            text_feat_fixed_photo = self.clip_model_distill.encode_text(tok_p)
             text_feat_fixed_photo = text_feat_fixed_photo / text_feat_fixed_photo.norm(dim=-1, keepdim=True)
 
-            text_feat_fixed_sketch = self.clip_model_frozen.encode_text(tok_s)
+            text_feat_fixed_sketch = self.clip_model_distill.encode_text(tok_s)
             text_feat_fixed_sketch = text_feat_fixed_sketch / text_feat_fixed_sketch.norm(dim=-1, keepdim=True)
 
-            photo_feat_fixed = self.frozen_visual_encoder(photo_tensor.type(self.dtype))
+            photo_feat_fixed = self.distill_visual_encoder(photo_tensor.type(self.dtype))
             photo_feat_fixed = photo_feat_fixed / photo_feat_fixed.norm(dim=-1, keepdim=True)
 
-            sketch_feat_fixed = self.frozen_visual_encoder(sk_tensor.type(self.dtype))
+            sketch_feat_fixed = self.distill_visual_encoder(sk_tensor.type(self.dtype))
             sketch_feat_fixed = sketch_feat_fixed / sketch_feat_fixed.norm(dim=-1, keepdim=True)
 
-        adapter_debug = {}
-
-        # 2. Extract text features and optionally apply adapter residual mixing (A/B only).
+        # 2. Extract text features and apply adapter residual mixing (A/B).
         text_feat_photo = self.text_encoder_photo(text_input_p, tok_p, deep_t_p)
-        if self.use_adapter:
-            x_b = self.adapter_text(text_feat_photo)
-            text_feat_photo_mixed = self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_photo
-            if not self._adapter_debug_printed:
-                adapter_debug['text_photo_delta'] = (text_feat_photo_mixed - text_feat_photo).abs().mean().item()
-            text_feat_photo = text_feat_photo_mixed
+        x_b = self.adapter_text(text_feat_photo)
+        text_feat_photo = self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_photo
         text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
         
         text_feat_sketch = self.text_encoder_sketch(text_input_s, tok_s, deep_t_s)
-        if self.use_adapter:
-            x_b = self.adapter_text(text_feat_sketch)
-            text_feat_sketch_mixed = self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_sketch
-            if not self._adapter_debug_printed:
-                adapter_debug['text_sketch_delta'] = (text_feat_sketch_mixed - text_feat_sketch).abs().mean().item()
-            text_feat_sketch = text_feat_sketch_mixed
+        x_b = self.adapter_text(text_feat_sketch)
+        text_feat_sketch = self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_sketch
         text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
         
-        # 3. Aug Visual Features (E/F): standard ViT with LN trainable, no HiCroPL prompts.
-        photo_aug_feat = self.clip_model_photo_aug.visual(photo_aug_tensor.type(self.dtype))
+        # 3. Aug Visual Features: shared distill branch with LN trainable, no HiCroPL prompts.
+        photo_aug_feat = self.distill_visual_encoder(photo_aug_tensor.type(self.dtype))
         photo_aug_feat = photo_aug_feat / photo_aug_feat.norm(dim=-1, keepdim=True)
 
-        sketch_aug_feat = self.clip_model_sketch_aug.visual(sk_aug_tensor.type(self.dtype))
+        sketch_aug_feat = self.distill_visual_encoder(sk_aug_tensor.type(self.dtype))
         sketch_aug_feat = sketch_aug_feat / sketch_aug_feat.norm(dim=-1, keepdim=True)
 
-        # 4. Extract visual features and optionally apply adapter residual mixing (C/D only).
+        # 4. Extract visual features and apply adapter residual mixing (C/D).
         # - Photo (C)
-        photo_feat = self.visual_encoder_photo(photo_tensor, first_v_p, deep_v_p)
-        if self.use_adapter:
-            x_a = self.adapter_photo(photo_feat)
-            photo_feat_mixed = self.image_adapter_m * x_a + (1 - self.image_adapter_m) * photo_feat
-            if not self._adapter_debug_printed:
-                adapter_debug['photo_delta'] = (photo_feat_mixed - photo_feat).abs().mean().item()
-            photo_feat = photo_feat_mixed
+        photo_feat = self.visual_encoder_photo(photo_tensor.type(self.dtype), first_v_p, deep_v_p)
+        x_a = self.adapter_photo(photo_feat)
+        photo_feat = self.image_adapter_m * x_a + (1 - self.image_adapter_m) * photo_feat
         photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
         
         # - Sketch (D)
         sketch_feat = self.visual_encoder_sketch(sk_tensor, first_v_s, deep_v_s)
-        if self.use_adapter:
-            x_a = self.adapter_photo(sketch_feat)
-            sketch_feat_mixed = self.image_adapter_m * x_a + (1 - self.image_adapter_m) * sketch_feat
-            if not self._adapter_debug_printed:
-                adapter_debug['sketch_delta'] = (sketch_feat_mixed - sketch_feat).abs().mean().item()
-            sketch_feat = sketch_feat_mixed
+        x_a = self.adapter_photo(sketch_feat)
+        sketch_feat = self.image_adapter_m * x_a + (1 - self.image_adapter_m) * sketch_feat
         sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
-
-        if self.use_adapter and (not self._adapter_debug_printed):
-            self._adapter_debug_printed = True
-            debug_msg = ", ".join(f"{k}={v:.6f}" for k, v in adapter_debug.items())
-            print(f"Adapter debug (pre-norm mean|delta|): {debug_msg}")
         
         # - Negative Photo (Uses Photo Prompts)
         neg_feat = self.visual_encoder_photo(neg_tensor, first_v_p, deep_v_p)
@@ -303,11 +248,9 @@ class HiCroPL_SBIR(pl.LightningModule):
 
     def on_train_epoch_start(self):
         # Ensure that clip models are in fully eval mode during training
-        self.model.clip_model_frozen.eval()
         self.model.clip_model_photo.eval()
         self.model.clip_model_sketch.eval()
-        self.model.clip_model_photo_aug.eval()
-        self.model.clip_model_sketch_aug.eval()
+        self.model.clip_model_distill.eval()
 
     def configure_optimizers(self):
         def add_unique_params(candidates, out_list, seen_ids):
@@ -326,8 +269,7 @@ class HiCroPL_SBIR(pl.LightningModule):
         ln_backbones = [
             self.model.clip_model_photo,
             self.model.clip_model_sketch,
-            self.model.clip_model_photo_aug,
-            self.model.clip_model_sketch_aug,
+            self.model.clip_model_distill,
         ]
         for backbone in ln_backbones:
             for module in backbone.modules():
@@ -338,8 +280,8 @@ class HiCroPL_SBIR(pl.LightningModule):
         add_unique_params(self.model.adapter_photo.parameters(), adapter_params, seen_ids)
         add_unique_params(self.model.adapter_text.parameters(), adapter_params, seen_ids)
         adapter_param_total = sum(p.numel() for p in adapter_params)
-        if self.model.use_adapter and adapter_param_total == 0:
-            raise RuntimeError("use_adapter=True but no adapter parameters were collected by optimizer")
+        if adapter_param_total == 0:
+            raise RuntimeError("Adapters always-on but no adapter parameters were collected by optimizer")
 
         extra_trainable_params = []
         for _, p in self.model.named_parameters():
@@ -408,9 +350,8 @@ class HiCroPL_SBIR(pl.LightningModule):
             visual_encoder = self.model.visual_encoder_sketch
         with torch.no_grad():
             visual_features = visual_encoder(tensor, first_visual_prompt, deeper_visual_prompts)
-            if self.model.use_adapter:
-                x_a = self.model.adapter_photo(visual_features)
-                visual_features = self.model.image_adapter_m * x_a + (1 - self.model.image_adapter_m) * visual_features
+            x_a = self.model.adapter_photo(visual_features)
+            visual_features = self.model.image_adapter_m * x_a + (1 - self.model.image_adapter_m) * visual_features
             visual_features_norm = visual_features / visual_features.norm(dim=-1, keepdim=True)
         return visual_features_norm
 
