@@ -55,38 +55,46 @@ class CustomCLIP(nn.Module):
         super().__init__()
         self.cfg = cfg
 
-        # Build prompted backbones and one shared distill branch (CoPrompt-style).
-        self.clip_model_photo = copy.deepcopy(clip_model)
-        self.clip_model_sketch = copy.deepcopy(clip_model)
+        # 1. Distill branch (vanilla CLIP)
         self.clip_model_distill = clip_model_frozen
-        
-        # Freeze non-LN params and keep LayerNorm trainable across all encoder branches.
-        self.clip_model_photo.apply(freeze_all_but_bn)
-        self.clip_model_sketch.apply(freeze_all_but_bn)
         self.clip_model_distill.apply(freeze_all_but_bn)
-        
-        self.dtype = self.clip_model_photo.dtype
-        
-        # --- 1. Dual Prompt Learners ---
+        self.distill_visual_encoder = self.clip_model_distill.visual
+
+        # 2. Shared Logit Scale
+        # Following CoPrompt: one shared learnable logit scale for all branches.
+        self.logit_scale = clip_model.logit_scale
+
+        # 3. Prompted Branches (HiCroPL)
+        # We use deepcopies of the visual/text encoders to allow modality-specific 
+        # LayerNorm adaptation if trainable, but they start from the same shared backbone.
+        clip_model.apply(freeze_all_but_bn)
+        self.dtype = clip_model.dtype
+
+        # Local deepcopies for per-modality branches (photo/sketch)
+        # This aligns with CoPrompt's pattern: self.ph_encoder = copy.deepcopy(clip_model.visual)
+        clip_photo = copy.deepcopy(clip_model)
+        clip_sketch = copy.deepcopy(clip_model)
+
+        # -- Prompt Learners --
         n_ctx = getattr(cfg, 'n_ctx', 4)
         prompt_depth = getattr(cfg, 'prompt_depth', 9)
         cross_layer = getattr(cfg, 'cross_layer', 4)
         ctx_init_photo = getattr(cfg, 'ctx_init', "a photo or a sketch of a")
         ctx_init_sketch = getattr(cfg, 'ctx_init_sketch', "a photo or a sketch of a")
-        
+
         print("Initializing Photo Prompt Learner...")
         self.prompt_learner_photo = CrossModalPromptLearner(
-            clip_model=self.clip_model_photo,
+            clip_model=clip_photo,
             n_ctx=n_ctx,
             prompt_depth=prompt_depth,
             cross_layer=cross_layer,
             ctx_init=ctx_init_photo,
             use_fp16=True if self.dtype == torch.float16 else False
         )
-        
+
         print("Initializing Sketch Prompt Learner...")
         self.prompt_learner_sketch = CrossModalPromptLearner(
-            clip_model=self.clip_model_sketch,
+            clip_model=clip_sketch,
             n_ctx=n_ctx,
             prompt_depth=prompt_depth,
             cross_layer=cross_layer,
@@ -94,16 +102,15 @@ class CustomCLIP(nn.Module):
             use_fp16=True if self.dtype == torch.float16 else False
         )
 
-        # --- 2. Encoders with Deep Injection (A/B/C/D prompted branches) ---
-        self.text_encoder_photo = TextEncoder(self.clip_model_photo)
-        self.text_encoder_sketch = TextEncoder(self.clip_model_sketch)
-        self.visual_encoder_photo = VisualEncoder(self.clip_model_photo)
-        self.visual_encoder_sketch = VisualEncoder(self.clip_model_sketch)
-        # Aug views use shared distill visual encoder (no HiCroPL prompts).
+        # -- Encoders (each wraps its own copy of the backbone components) --
+        self.text_encoder_photo = TextEncoder(clip_photo)
+        self.text_encoder_sketch = TextEncoder(clip_sketch)
+        self.visual_encoder_photo = VisualEncoder(clip_photo)
+        self.visual_encoder_sketch = VisualEncoder(clip_sketch)
 
-        # --- 2.1 Shared adapters (CoPrompt-style, always-on) ---
+        # --- 4. Shared Adapters ---
         adapter_reduction = getattr(cfg, 'adapter_reduction', 4)
-        embed_dim = int(self.clip_model_photo.text_projection.shape[1])
+        embed_dim = int(clip_photo.text_projection.shape[1])
         self.adapter_photo = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
         self.adapter_text = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
         
@@ -116,11 +123,6 @@ class CustomCLIP(nn.Module):
         )
         print(f"Adapters ALWAYS enabled | trainable adapter params: {adapter_param_count:,}")
         print(f"Adapter mix ratio | image_adapter_m: {self.image_adapter_m:.3f}, text_adapter_m: {self.text_adapter_m:.3f}")
-        
-        # LN remains trainable on prompted and distill branches via freeze_all_but_bn.
-        
-        # --- 3. Shared Distill Visual Branch ---
-        self.distill_visual_encoder = self.clip_model_distill.visual
 
     def forward(self, x, classnames):
         """
@@ -189,14 +191,13 @@ class CustomCLIP(nn.Module):
         neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
             
         # 5. Compute Logits
-        logit_scale_photo = self.clip_model_photo.logit_scale.exp()
-        logit_scale_sketch = self.clip_model_sketch.logit_scale.exp()
-        logits_photo = logit_scale_photo * photo_feat @ text_feat_photo.t()
-        logits_sketch = logit_scale_sketch * sketch_feat @ text_feat_sketch.t()
+        logit_scale = self.logit_scale.exp()
+        logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
+        logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
         
         # 6. Compute Logits for Augmented Images
-        logits_photo_aug = logit_scale_photo * photo_aug_feat @ text_feat_photo.t()
-        logits_sketch_aug = logit_scale_sketch * sketch_aug_feat @ text_feat_sketch.t()
+        logits_photo_aug = logit_scale * photo_aug_feat @ text_feat_photo.t()
+        logits_sketch_aug = logit_scale * sketch_aug_feat @ text_feat_sketch.t()
         
         return (
             photo_feat, logits_photo,
@@ -247,9 +248,12 @@ class HiCroPL_SBIR(pl.LightningModule):
         self._cached_sketch_prompts = None
 
     def on_train_epoch_start(self):
-        # Ensure that clip models are in fully eval mode during training
-        self.model.clip_model_photo.eval()
-        self.model.clip_model_sketch.eval()
+        # After refactor, clip_model_photo/sketch are not stored as top-level attrs.
+        # Put each encoder branch + distill branch into eval mode via their wrappers.
+        self.model.visual_encoder_photo.vit.eval()
+        self.model.visual_encoder_sketch.vit.eval()
+        self.model.text_encoder_photo.transformer_resblocks.eval()
+        self.model.text_encoder_sketch.transformer_resblocks.eval()
         self.model.clip_model_distill.eval()
 
     def configure_optimizers(self):
@@ -261,28 +265,23 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         seen_ids = set()
 
+        # 1. Prompt parameters
         prompt_params = []
         add_unique_params(self.model.prompt_learner_photo.parameters(), prompt_params, seen_ids)
         add_unique_params(self.model.prompt_learner_sketch.parameters(), prompt_params, seen_ids)
 
+        # 2. LayerNorm parameters (from all branches)
         ln_params = []
-        ln_backbones = [
-            self.model.clip_model_photo,
-            self.model.clip_model_sketch,
-            self.model.clip_model_distill,
-        ]
-        for backbone in ln_backbones:
-            for module in backbone.modules():
-                if isinstance(module, torch.nn.LayerNorm):
-                    add_unique_params(module.parameters(recurse=False), ln_params, seen_ids)
+        for module in self.model.modules():
+            if isinstance(module, torch.nn.LayerNorm):
+                add_unique_params(module.parameters(recurse=False), ln_params, seen_ids)
 
+        # 3. Adapter parameters
         adapter_params = []
         add_unique_params(self.model.adapter_photo.parameters(), adapter_params, seen_ids)
         add_unique_params(self.model.adapter_text.parameters(), adapter_params, seen_ids)
-        adapter_param_total = sum(p.numel() for p in adapter_params)
-        if adapter_param_total == 0:
-            raise RuntimeError("Adapters always-on but no adapter parameters were collected by optimizer")
 
+        # 4. Extra params (logit_scale, etc.)
         extra_trainable_params = []
         for _, p in self.model.named_parameters():
             if p.requires_grad and id(p) not in seen_ids:
@@ -292,12 +291,8 @@ class HiCroPL_SBIR(pl.LightningModule):
         non_prompt_params = ln_params + adapter_params + extra_trainable_params
 
         self.print(f"Number of trainable prompt params: {sum(p.numel() for p in prompt_params):,}")
-        self.print(f"Number of trainable LayerNorm params: {sum(p.numel() for p in ln_params):,}")
-        self.print(f"Number of trainable adapter params: {adapter_param_total:,}")
-        if extra_trainable_params:
-            self.print(f"Warning: Found {len(extra_trainable_params)} unexpected trainable tensors outside prompt/LN/adapter; including them in optimizer.")
-        self.print(f"Total trainable non-prompt params: {sum(p.numel() for p in non_prompt_params):,}")
-        
+        self.print(f"Number of trainable non-prompt params: {sum(p.numel() for p in non_prompt_params):,}")
+
         prompt_lr = getattr(self.cfg, 'prompt_lr', 1e-5)
         clip_ln_lr = getattr(self.cfg, 'clip_LN_lr', 1e-5)
         weight_decay = getattr(self.cfg, 'weight_decay', 1e-4)
@@ -306,9 +301,7 @@ class HiCroPL_SBIR(pl.LightningModule):
         if non_prompt_params:
             param_groups.append({'params': non_prompt_params, 'lr': clip_ln_lr})
 
-        optimizer = torch.optim.Adam(param_groups, weight_decay=weight_decay)
-        
-        return optimizer
+        return torch.optim.Adam(param_groups, weight_decay=weight_decay)
 
     def training_step(self, batch, batch_idx):
         from src.losses_hicropl import loss_fn_hicropl
