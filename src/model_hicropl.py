@@ -11,6 +11,8 @@ from src.hicropl import (
     TextEncoder,
     VisualEncoder,
 )
+from src.hicropl_extractor import HiCroPLFeatureExtractor
+
 
 def freeze_all_but_bn(m):
     if not isinstance(m, torch.nn.LayerNorm):
@@ -37,18 +39,10 @@ class Adapter(nn.Module):
         return self.fc(x)
 
 
-
 class CustomCLIP(nn.Module):
     """
     HiCroPL-SBIR Architecture Wrapper.
-    
-        Contains:
-        - 2x CrossModalPromptLearner (one for Photo, one for Sketch)
-        - 2x TextEncoder (Photo/Sketch, with deep prompt injection)
-        - 2x prompted visual encoders (photo/sketch)
-        - 1x shared distill visual branch for augmentation views
-        - Optional shared feature adapter (disabled by default for ablation)
-        - Distill CLIP branch with LayerNorm trainable
+    Sử dụng HiCroPLFeatureExtractor làm nòng cốt.
     """
 
     def __init__(self, cfg, clip_model, clip_model_frozen):
@@ -61,52 +55,52 @@ class CustomCLIP(nn.Module):
         self.distill_visual_encoder = self.clip_model_distill.visual
 
         # 2. Shared Logit Scale
-        # Following CoPrompt: one shared learnable logit scale for all branches.
         self.logit_scale = clip_model.logit_scale
 
         # 3. Prompted Branches (HiCroPL)
-        # We use deepcopies of the visual/text encoders to allow modality-specific 
-        # LayerNorm adaptation if trainable, but they start from the same shared backbone.
         clip_model.apply(freeze_all_but_bn)
         self.dtype = clip_model.dtype
 
         # Local deepcopies for per-modality branches (photo/sketch)
-        # This aligns with CoPrompt's pattern: self.ph_encoder = copy.deepcopy(clip_model.visual)
         clip_photo = copy.deepcopy(clip_model)
         clip_sketch = copy.deepcopy(clip_model)
 
         # -- Prompt Learners --
-        n_ctx = getattr(cfg, 'n_ctx', 4)
-        prompt_depth = getattr(cfg, 'prompt_depth', 9)
-        cross_layer = getattr(cfg, 'cross_layer', 4)
-        ctx_init_photo = getattr(cfg, 'ctx_init', "a photo or a sketch of a")
-        ctx_init_sketch = getattr(cfg, 'ctx_init_sketch', "a photo or a sketch of a")
-
         print("Initializing Photo Prompt Learner...")
         self.prompt_learner_photo = CrossModalPromptLearner(
+            cfg=cfg,
             clip_model=clip_photo,
-            n_ctx=n_ctx,
-            prompt_depth=prompt_depth,
-            cross_layer=cross_layer,
-            ctx_init=ctx_init_photo,
-            use_fp16=True if self.dtype == torch.float16 else False
+            clip_model_distill=self.clip_model_distill
         )
 
         print("Initializing Sketch Prompt Learner...")
         self.prompt_learner_sketch = CrossModalPromptLearner(
+            cfg=cfg,
             clip_model=clip_sketch,
-            n_ctx=n_ctx,
-            prompt_depth=prompt_depth,
-            cross_layer=cross_layer,
-            ctx_init=ctx_init_sketch,
-            use_fp16=True if self.dtype == torch.float16 else False
+            clip_model_distill=self.clip_model_distill
         )
 
-        # -- Encoders (each wraps its own copy of the backbone components) --
+        # -- Encoders --
         self.text_encoder_photo = TextEncoder(clip_photo)
         self.text_encoder_sketch = TextEncoder(clip_sketch)
         self.visual_encoder_photo = VisualEncoder(clip_photo)
         self.visual_encoder_sketch = VisualEncoder(clip_sketch)
+        
+        # -- Khởi tạo Feature Extractors --
+        self.extractor_photo = HiCroPLFeatureExtractor(
+            prompt_learner=self.prompt_learner_photo,
+            text_encoder=self.text_encoder_photo,
+            image_encoder=self.visual_encoder_photo,
+            logit_scale=self.logit_scale,
+            dtype=self.dtype
+        )
+        self.extractor_sketch = HiCroPLFeatureExtractor(
+            prompt_learner=self.prompt_learner_sketch,
+            text_encoder=self.text_encoder_sketch,
+            image_encoder=self.visual_encoder_sketch,
+            logit_scale=self.logit_scale,
+            dtype=self.dtype
+        )
 
         # --- 4. Shared Adapters ---
         adapter_reduction = getattr(cfg, 'adapter_reduction', 4)
@@ -114,7 +108,7 @@ class CustomCLIP(nn.Module):
         self.adapter_photo = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
         self.adapter_text = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
         
-        self.image_adapter_m = float(getattr(cfg, 'image_adapter_m', getattr(cfg, 'visual_adapter_m', 0.1)))
+        self.image_adapter_m = float(getattr(cfg, 'image_adapter_m', 0.1))
         self.text_adapter_m = float(getattr(cfg, 'text_adapter_m', 0.1))
         
         adapter_param_count = (
@@ -124,6 +118,12 @@ class CustomCLIP(nn.Module):
         print(f"Adapters ALWAYS enabled | trainable adapter params: {adapter_param_count:,}")
         print(f"Adapter mix ratio | image_adapter_m: {self.image_adapter_m:.3f}, text_adapter_m: {self.text_adapter_m:.3f}")
 
+    def apply_adapter_residual(self, feat, adapter, mix_ratio):
+        x_a = adapter(feat)
+        feat = mix_ratio * x_a + (1 - mix_ratio) * feat
+        feat = feat / feat.norm(dim=-1, keepdim=True)
+        return feat
+
     def forward(self, x, classnames):
         """
         Forward pass for training with augmentation support.
@@ -132,70 +132,40 @@ class CustomCLIP(nn.Module):
         """
         sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
         
-        # 1. Evaluate Prompt Learners Once
-        (
-            text_input_p, tok_p, first_v_p, deep_t_p, deep_v_p
-        ) = self.prompt_learner_photo(classnames)
+        # 1. Trích xuất Feature Cốt lõi thông qua Extractor
+        out_p = self.extractor_photo(photo_tensor, classnames)
+        out_s = self.extractor_sketch(sk_tensor, classnames)
         
-        (
-            text_input_s, tok_s, first_v_s, deep_t_s, deep_v_s
-        ) = self.prompt_learner_sketch(classnames)
-
-        # 1.1 Distill reference targets (no gradients)
-        with torch.no_grad():
-            text_feat_fixed_photo = self.clip_model_distill.encode_text(tok_p)
-            text_feat_fixed_photo = text_feat_fixed_photo / text_feat_fixed_photo.norm(dim=-1, keepdim=True)
-
-            text_feat_fixed_sketch = self.clip_model_distill.encode_text(tok_s)
-            text_feat_fixed_sketch = text_feat_fixed_sketch / text_feat_fixed_sketch.norm(dim=-1, keepdim=True)
-
-            photo_feat_fixed = self.distill_visual_encoder(photo_tensor.type(self.dtype))
-            photo_feat_fixed = photo_feat_fixed / photo_feat_fixed.norm(dim=-1, keepdim=True)
-
-            sketch_feat_fixed = self.distill_visual_encoder(sk_tensor.type(self.dtype))
-            sketch_feat_fixed = sketch_feat_fixed / sketch_feat_fixed.norm(dim=-1, keepdim=True)
-
-        # 2. Extract text features and apply adapter residual mixing (A/B).
-        text_feat_photo = self.text_encoder_photo(text_input_p, tok_p, deep_t_p)
-        x_b = self.adapter_text(text_feat_photo)
-        text_feat_photo = self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_photo
-        text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
+        # Đặc trưng Negative lấy từ nhánh Photo
+        out_neg = self.extractor_photo(neg_tensor, classnames)
         
-        text_feat_sketch = self.text_encoder_sketch(text_input_s, tok_s, deep_t_s)
-        x_b = self.adapter_text(text_feat_sketch)
-        text_feat_sketch = self.text_adapter_m * x_b + (1 - self.text_adapter_m) * text_feat_sketch
-        text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
+        # 2. Áp dụng Adapter refinement (cho Photo, Sketch, Negative)
+        photo_feat = self.apply_adapter_residual(out_p["image_features"], self.adapter_photo, self.image_adapter_m)
+        sketch_feat = self.apply_adapter_residual(out_s["image_features"], self.adapter_photo, self.image_adapter_m)
+        neg_feat = self.apply_adapter_residual(out_neg["image_features"], self.adapter_photo, self.image_adapter_m)
         
-        # 3. Aug Visual Features: shared distill branch with LN trainable, no HiCroPL prompts.
+        text_feat_photo = self.apply_adapter_residual(out_p["text_features_all"], self.adapter_text, self.text_adapter_m)
+        text_feat_sketch = self.apply_adapter_residual(out_s["text_features_all"], self.adapter_text, self.text_adapter_m)
+
+        # Trích xuất Fixed reference targets
+        photo_feat_fixed = out_p["image_features_fixed"]
+        sketch_feat_fixed = out_s["image_features_fixed"]
+        text_feat_fixed_photo = out_p["text_features_fixed"]
+        text_feat_fixed_sketch = out_s["text_features_fixed"]
+
+        # 3. Aug Visual Features: shared distill branch (Không qua Adapter)
         photo_aug_feat = self.distill_visual_encoder(photo_aug_tensor.type(self.dtype))
         photo_aug_feat = photo_aug_feat / photo_aug_feat.norm(dim=-1, keepdim=True)
 
         sketch_aug_feat = self.distill_visual_encoder(sk_aug_tensor.type(self.dtype))
         sketch_aug_feat = sketch_aug_feat / sketch_aug_feat.norm(dim=-1, keepdim=True)
-
-        # 4. Extract visual features and apply adapter residual mixing (C/D).
-        # - Photo (C)
-        photo_feat = self.visual_encoder_photo(photo_tensor.type(self.dtype), first_v_p, deep_v_p)
-        x_a = self.adapter_photo(photo_feat)
-        photo_feat = self.image_adapter_m * x_a + (1 - self.image_adapter_m) * photo_feat
-        photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
-        
-        # - Sketch (D)
-        sketch_feat = self.visual_encoder_sketch(sk_tensor, first_v_s, deep_v_s)
-        x_a = self.adapter_photo(sketch_feat)
-        sketch_feat = self.image_adapter_m * x_a + (1 - self.image_adapter_m) * sketch_feat
-        sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
-        
-        # - Negative Photo (Uses Photo Prompts)
-        neg_feat = self.visual_encoder_photo(neg_tensor, first_v_p, deep_v_p)
-        neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
             
-        # 5. Compute Logits
-        logit_scale = self.logit_scale.exp()
+        # 4. Compute Logits
+        logit_scale = out_p["logit_scale"]
         logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
         logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
         
-        # 6. Compute Logits for Augmented Images
+        # 5. Compute Logits for Augmented Images
         logits_photo_aug = logit_scale * photo_aug_feat @ text_feat_photo.t()
         logits_sketch_aug = logit_scale * sketch_aug_feat @ text_feat_sketch.t()
         
@@ -221,21 +191,18 @@ class HiCroPL_SBIR(pl.LightningModule):
         
         self.best_metric = 1e-3
 
-        # ============ NEW: Eval mode flag ============
         self.eval_mode = getattr(args, 'eval_mode', 'category')
 
-        # Temporary buffer for metrics
         self.test_photo_features = []
         self.test_sketch_features = []
         self.test_photo_labels = []
         self.test_sketch_labels = []
 
-         # ============ NEW: Fine-grained buffers (per-category) ============
         from collections import defaultdict
         self.fg_sketch_buckets = defaultdict(lambda: {
-            'features': [],    # List of tensors
-            'filenames': [],   # List of filenames
-            'base_names': []   # List of base names
+            'features': [],
+            'filenames': [],
+            'base_names': []
         })
         self.fg_photo_buckets = defaultdict(lambda: {
             'features': [],
@@ -243,17 +210,11 @@ class HiCroPL_SBIR(pl.LightningModule):
             'base_names': []
         })
 
-        # Cache prompt outputs để tránh recompute mỗi validation batch
-        self._cached_photo_prompts = None
-        self._cached_sketch_prompts = None
-
     def on_train_epoch_start(self):
-        # After refactor, clip_model_photo/sketch are not stored as top-level attrs.
-        # Put each encoder branch + distill branch into eval mode via their wrappers.
-        self.model.visual_encoder_photo.vit.eval()
-        self.model.visual_encoder_sketch.vit.eval()
-        self.model.text_encoder_photo.transformer_resblocks.eval()
-        self.model.text_encoder_sketch.transformer_resblocks.eval()
+        self.model.visual_encoder_photo.eval()
+        self.model.visual_encoder_sketch.eval()
+        self.model.text_encoder_photo.eval()
+        self.model.text_encoder_sketch.eval()
         self.model.clip_model_distill.eval()
 
     def configure_optimizers(self):
@@ -265,23 +226,19 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         seen_ids = set()
 
-        # 1. Prompt parameters
         prompt_params = []
         add_unique_params(self.model.prompt_learner_photo.parameters(), prompt_params, seen_ids)
         add_unique_params(self.model.prompt_learner_sketch.parameters(), prompt_params, seen_ids)
 
-        # 2. LayerNorm parameters (from all branches)
         ln_params = []
         for module in self.model.modules():
             if isinstance(module, torch.nn.LayerNorm):
                 add_unique_params(module.parameters(recurse=False), ln_params, seen_ids)
 
-        # 3. Adapter parameters
         adapter_params = []
         add_unique_params(self.model.adapter_photo.parameters(), adapter_params, seen_ids)
         add_unique_params(self.model.adapter_text.parameters(), adapter_params, seen_ids)
 
-        # 4. Extra params (logit_scale, etc.)
         extra_trainable_params = []
         for _, p in self.model.named_parameters():
             if p.requires_grad and id(p) not in seen_ids:
@@ -306,46 +263,27 @@ class HiCroPL_SBIR(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         from src.losses_hicropl import loss_fn_hicropl
         
-        # Unpack batch and push to device happens in Lightning automatically, but we might need label explicitly
         features = self.model(batch, self.classnames)
-        
-        # Calculate custom loss
         loss = loss_fn_hicropl(self.args, features)
         
-        # Log to TensorBoard (both step and epoch) but NOT to progress bar
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
-        # Log to Progress Bar only the epoch average for cleaner output (set prog_bar=False as requested)
         self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False, logger=False)
         
         return loss
 
-    def on_validation_epoch_start(self):
-        """Cache prompt outputs ONE TIME trước toàn bộ validation loop (giống GitHub CoPrompt)."""
-        with torch.no_grad():
-            _, _, first_v_p, _, deep_v_p = self.model.prompt_learner_photo(self.classnames)
-            self._cached_photo_prompts = (
-                first_v_p.detach() if first_v_p is not None else None,
-                [p.detach() for p in deep_v_p] if deep_v_p is not None else None,
-            )
-            _, _, first_v_s, _, deep_v_s = self.model.prompt_learner_sketch(self.classnames)
-            self._cached_sketch_prompts = (
-                first_v_s.detach() if first_v_s is not None else None,
-                [p.detach() for p in deep_v_s] if deep_v_s is not None else None,
-            )
-
     def extract_eval_features(self, tensor, modality):
-        """Extract normalized visual features dùng CACHED prompts (không re-compute learner)."""
-        cached = self._cached_photo_prompts if modality == 'photo' else self._cached_sketch_prompts
-        first_visual_prompt, deeper_visual_prompts = cached
-        if modality == 'photo':
-            visual_encoder = self.model.visual_encoder_photo
-        else:
-            visual_encoder = self.model.visual_encoder_sketch
-        with torch.no_grad():
-            visual_features = visual_encoder(tensor, first_visual_prompt, deeper_visual_prompts)
-            x_a = self.model.adapter_photo(visual_features)
-            visual_features = self.model.image_adapter_m * x_a + (1 - self.model.image_adapter_m) * visual_features
-            visual_features_norm = visual_features / visual_features.norm(dim=-1, keepdim=True)
+        """Extract normalized visual features dùng CACHED prompts qua Feature Extractor"""
+        extractor = self.model.extractor_photo if modality == 'photo' else self.model.extractor_sketch
+        
+        # Trong eval ta cũng có thể gọi full forward extractor, vì Learner đã cache_classnames nên rất nhanh
+        out = extractor(tensor, self.classnames)
+        visual_features = out["image_features"]
+        
+        # Adapter Mix
+        x_a = self.model.adapter_photo(visual_features)
+        visual_features = self.model.image_adapter_m * x_a + (1 - self.model.image_adapter_m) * visual_features
+        visual_features_norm = visual_features / visual_features.norm(dim=-1, keepdim=True)
+        
         return visual_features_norm
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
@@ -355,8 +293,6 @@ class HiCroPL_SBIR(pl.LightningModule):
             return self._validation_step_category(batch, batch_idx, dataloader_idx)
 
     def _validation_step_category(self, batch, batch_idx, dataloader_idx=0):
-        # Depending on how ValidDataset yields, it's typically (image_tensor, label)
-        # We use dataloader_idx to determine modality: 0 for sketch, 1 for photo
         if len(batch) == 3:
             tensor, label, type_data = batch
         else:
@@ -365,11 +301,11 @@ class HiCroPL_SBIR(pl.LightningModule):
             
         if dataloader_idx == 0:
             sketch_feat = self.extract_eval_features(tensor, modality='sketch')
-            self.test_sketch_features.append(sketch_feat.detach()) # Keep on GPU
+            self.test_sketch_features.append(sketch_feat.detach()) 
             self.test_sketch_labels.append(label.detach())
         elif dataloader_idx == 1:
             photo_feat = self.extract_eval_features(tensor, modality='photo')
-            self.test_photo_features.append(photo_feat.detach())   # Keep on GPU
+            self.test_photo_features.append(photo_feat.detach())   
             self.test_photo_labels.append(label.detach())
 
     def _validation_step_fg(self, batch, batch_idx, dataloader_idx=0):
@@ -378,7 +314,6 @@ class HiCroPL_SBIR(pl.LightningModule):
         if dataloader_idx == 0:
             sketch_feat = self.extract_eval_features(tensor, modality='sketch')
             target_buckets = self.fg_sketch_buckets
-
         elif dataloader_idx == 1:
             photo_feat = self.extract_eval_features(tensor, modality='photo')
             target_buckets = self.fg_photo_buckets
@@ -388,11 +323,9 @@ class HiCroPL_SBIR(pl.LightningModule):
             feat = sketch_feat[i] if dataloader_idx == 0 else photo_feat[i]
             fname = filename[i]
             bname = base_name[i]
-            target_buckets[cat_idx]['features'].append(feat.detach())  # Keep on GPU
+            target_buckets[cat_idx]['features'].append(feat.detach())  
             target_buckets[cat_idx]['filenames'].append(fname)
             target_buckets[cat_idx]['base_names'].append(bname)
-
-
 
     def on_validation_epoch_end(self):
         if self.eval_mode == 'fine_grained':
@@ -405,18 +338,14 @@ class HiCroPL_SBIR(pl.LightningModule):
             self.print("Warning: Missing features for validation. Skipping metrics.")
             return
 
-        # Ghép features & labels
-        gallery_features = torch.cat(self.test_photo_features, dim=0)   # [N_g, d]
-        query_features   = torch.cat(self.test_sketch_features, dim=0)  # [N_q, d]
+        gallery_features = torch.cat(self.test_photo_features, dim=0)   
+        query_features   = torch.cat(self.test_sketch_features, dim=0)  
         
-        all_photo_category  = torch.cat(self.test_photo_labels, dim=0)  # [N_g]
-        all_sketch_category = torch.cat(self.test_sketch_labels, dim=0) # [N_q]
+        all_photo_category  = torch.cat(self.test_photo_labels, dim=0)  
+        all_sketch_category = torch.cat(self.test_sketch_labels, dim=0) 
 
-        # Tính toán ma trận tương quan trên GPU dùng Matrix Multiplication
-        # Vì features đã được normalize, sim = dot product
-        similarity_matrix = query_features @ gallery_features.t()       # [N_q, N_g]
+        similarity_matrix = query_features @ gallery_features.t()       
 
-        # Xác định top-k theo dataset
         dataset = getattr(self.args, 'dataset', 'sketchy')
         if dataset == "sketchy_2" or dataset == "sketchy_ext":
             map_k = 200
@@ -433,9 +362,7 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         for idx in range(len(query_features)):
             category = all_sketch_category[idx]
-            distance = similarity_matrix[idx] # Scores on GPU
-
-            # Target mask
+            distance = similarity_matrix[idx] 
             target = (all_photo_category == category)
 
             if map_k != 0:
@@ -449,23 +376,19 @@ class HiCroPL_SBIR(pl.LightningModule):
         mAP            = torch.mean(ap)
         mean_precision = torch.mean(precision)
 
-        # CoPrompt-compatible primary metric names
         self.log("mAP", mAP, on_step=False, on_epoch=True)
         self.log(f"P@{p_k}", mean_precision, on_step=False, on_epoch=True)
 
         self.log("val_mAP", mAP, on_step=False, on_epoch=True, prog_bar=False)
         self.log(f"val_P@{p_k}", mean_precision, on_step=False, on_epoch=True)
-        # Log best metric (internally) without cluttering the progress bar
         self.log("best_mAP", self.best_metric, on_step=False, on_epoch=True, prog_bar=False)
 
-        # Thêm alias key để ModelCheckpoint có thể monitor đúng tên
         if map_k != 0:
             self.log(f"val_map_{map_k}", mAP, on_step=False, on_epoch=True)
         else:
             self.log("val_map_all", mAP, on_step=False, on_epoch=True)
         self.log(f"val_p_{p_k}", mean_precision, on_step=False, on_epoch=True)
 
-        # Track best mAP (giống GitHub)
         if self.global_step > 0:
             self.best_metric = self.best_metric if (self.best_metric > mAP.item()) else mAP.item()
 
@@ -476,20 +399,16 @@ class HiCroPL_SBIR(pl.LightningModule):
             self.print('mAP@all: {:.4f}, P@{}: {:.4f}, Best mAP: {:.4f}'.format(
                 mAP.item(), p_k, mean_precision.item(), self.best_metric))
 
-        # In train_loss (giống GitHub)
         train_loss = self.trainer.callback_metrics.get("train_loss", None)
         if train_loss is not None:
             self.print(f"Train loss (epoch avg): {train_loss.item():.6f}")
 
-        # Clear buffers
         self.test_photo_features.clear()
         self.test_sketch_features.clear()
         self.test_photo_labels.clear()
         self.test_sketch_labels.clear()
 
-
     def _on_validation_epoch_end_fine_grained(self):
-        """Fine-grained evaluation - compute Acc@k."""
         from src_fg.utils_fg import compute_rank_based_accuracy
         
         if len(self.fg_sketch_buckets) == 0 or len(self.fg_photo_buckets) == 0:
@@ -497,8 +416,6 @@ class HiCroPL_SBIR(pl.LightningModule):
             return
         
         all_ranks = []
-        
-        # Process each category
         for category_idx in self.fg_sketch_buckets.keys():
             if category_idx not in self.fg_photo_buckets:
                 continue
@@ -509,92 +426,65 @@ class HiCroPL_SBIR(pl.LightningModule):
             if len(sketch_bucket['features']) == 0 or len(photo_bucket['features']) == 0:
                 continue
             
-            # Stack features
-            sketch_feats = torch.stack(sketch_bucket['features'])  # [N_sk, d]
-            photo_feats = torch.stack(photo_bucket['features'])    # [N_ph, d]
+            sketch_feats = torch.stack(sketch_bucket['features'])  
+            photo_feats = torch.stack(photo_bucket['features'])    
             
-            # Compute ranks for this category
             ranks = self._compute_per_category_rank(
                 sketch_feats,
                 sketch_bucket['base_names'],
                 photo_feats,
                 photo_bucket['base_names']
             )
-            
             all_ranks.append(ranks)
         
         if len(all_ranks) == 0:
             self.print("Warning: No valid categories for FG evaluation.")
             return
         
-        # Concatenate all ranks
-        all_ranks_tensor = torch.cat(all_ranks)  # [total_sketches]
-        
-        # Compute accuracies
+        all_ranks_tensor = torch.cat(all_ranks)  
         result = compute_rank_based_accuracy(all_ranks_tensor, top_k_list=[1, 5, 10])
         
         acc1 = result['acc@1']
         acc5 = result['acc@5']
         acc10 = result['acc@10']
 
-        # CoPrompt FG-style aliases
-        top1 = acc1
-        top5 = acc5
-        
-        # Log metrics
         self.log('fg_acc@1', acc1, on_epoch=True, prog_bar=True)
         self.log('fg_acc@5', acc5, on_epoch=True, prog_bar=True)
         self.log('fg_acc@10', acc10, on_epoch=True, prog_bar=True)
-        self.log('top1', top1, on_epoch=True, prog_bar=True)
-        self.log('top5', top5, on_epoch=True, prog_bar=True)
+        self.log('top1', acc1, on_epoch=True, prog_bar=True)
+        self.log('top5', acc5, on_epoch=True, prog_bar=True)
         
-        # Update best metric (track acc@1 as main metric)
         if self.global_step > 0:
             self.best_metric = max(self.best_metric, acc1)
         self.log('best_fg_acc@1', self.best_metric, on_epoch=True, prog_bar=False)
         
-        self.print(f'top1: {top1:.4f}, top5: {top5:.4f}, acc@10: {acc10:.4f}, Best: {self.best_metric:.4f}')
+        self.print(f'top1: {acc1:.4f}, top5: {acc5:.4f}, acc@10: {acc10:.4f}, Best: {self.best_metric:.4f}')
         
-        # Clear buckets
         self.fg_sketch_buckets.clear()
         self.fg_photo_buckets.clear()
 
-
     def _compute_per_category_rank(self, sketch_feats, sketch_base_names, photo_feats, photo_base_names):
-        """Compute rank of the correct photo for each sketch in a category."""
-        sim_matrix = sketch_feats @ photo_feats.t()  # [N_sk, N_ph]
-    
-        # Convert to distance (lower = better)
+        sim_matrix = sketch_feats @ photo_feats.t()  
         distance_matrix = 1.0 - sim_matrix
         
-        # Compute ranks
         N_sk = len(sketch_feats)
         ranks = torch.zeros(N_sk, device=sketch_feats.device)
         
         for i in range(N_sk):
             sketch_base = sketch_base_names[i]
-            
-            # Find ground-truth photo index
             try:
                 gt_idx = photo_base_names.index(sketch_base)
             except ValueError:
-                # No matching photo - assign worst rank
                 ranks[i] = len(photo_base_names) + 1
                 continue
             
-            # Get distances for this sketch
             distances = distance_matrix[i]
-            
-            # Ground-truth distance
             gt_distance = distances[gt_idx]
-            
-            # Rank = count of photos with distance <= gt_distance
             rank = (distances <= gt_distance).sum()
             ranks[i] = rank
         
         return ranks
 
-    # Reuse validation logic for testing
     def test_step(self, batch, batch_idx, dataloader_idx=0):
         return self.validation_step(batch, batch_idx, dataloader_idx)
 

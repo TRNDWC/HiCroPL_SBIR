@@ -64,12 +64,12 @@ def loss_fn_hicropl(args, features):
     triplet_margin = getattr(args, 'triplet_margin', 0.3)
 
     # --- L1: Triplet Loss (sketch, positive_photo, negative_photo) ---
-    distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
-    triplet = nn.TripletMarginWithDistanceLoss(
-        distance_function=distance_fn,
-        margin=triplet_margin
-    )
-    loss_triplet = lambda_triplet * triplet(sketch_feat, photo_feat, neg_feat)
+    # distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
+    # triplet = nn.TripletMarginWithDistanceLoss(
+    #     distance_function=distance_fn,
+    #     margin=triplet_margin
+    # )
+    # loss_triplet = lambda_triplet * triplet(sketch_feat, photo_feat, neg_feat)
 
     # --- L2: InfoNCE Loss (sketch - positive_photo) ---
     loss_cross_modal = lambda_cross_modal * cross_loss(sketch_feat, photo_feat, temperature)
@@ -85,9 +85,9 @@ def loss_fn_hicropl(args, features):
     loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
     # --- L5: Cross-Entropy Loss (text - photo_aug) + (text - sketch_aug) ---
-    loss_ce_photo_aug = F.cross_entropy(logits_photo_aug, label)
-    loss_ce_sketch_aug = F.cross_entropy(logits_sketch_aug, label)
-    loss_ce_aug = lambda_ce_aug * (loss_ce_photo_aug + loss_ce_sketch_aug)
+    # loss_ce_photo_aug = F.cross_entropy(logits_photo_aug, label)
+    # loss_ce_sketch_aug = F.cross_entropy(logits_sketch_aug, label)
+    # loss_ce_aug = lambda_ce_aug * (loss_ce_photo_aug + loss_ce_sketch_aug)
 
     # Total loss
     total_loss = loss_cross_modal + loss_consistency + loss_ce
