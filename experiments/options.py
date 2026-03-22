@@ -66,6 +66,8 @@ parser.add_argument('--adapter_reduction', type=int, default=4, help='Bottleneck
 parser.add_argument('--image_adapter_m', type=float, default=0.5, help='Residual mixing ratio for image adapter output (used when --use_adapter is enabled)')
 parser.add_argument('--visual_adapter_m', type=float, default=0.5, help='Alias fallback for image adapter mixing ratio')
 parser.add_argument('--text_adapter_m', type=float, default=0.5, help='Residual mixing ratio for text adapter output (used when --use_adapter is enabled)')
+parser.add_argument('--apply_prompt_flow_train', action='store_true', default=False, help='Enable in-place HiCroPL prompt flow updates during training (default: off for stable per-batch behavior)')
+parser.add_argument('--apply_prompt_flow_eval', action='store_true', default=False, help='Enable in-place HiCroPL prompt flow updates during evaluation (default: off; should usually match training)')
 parser.add_argument('--lambda_distill', type=float, default=1.0, help='Legacy option, currently unused in the active HiCroPL loss')
 
 # CLIP design_details (CoPrompt-style builder config)
