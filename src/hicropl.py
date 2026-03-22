@@ -283,14 +283,12 @@ class CrossModalPromptLearner(nn.Module):
             nn.init.normal_(p, std=0.02)
 
         # ---- Visual Prompts: L layers x [n_ctx, v_dim] ----
+        # Ablation path: initialize from one shared base tensor across depths.
+        visual_vectors = torch.empty(n_ctx, v_dim, dtype=self.dtype)
+        nn.init.normal_(visual_vectors, std=0.02)
         self.cross_prompts_visual = nn.ParameterList(
-            [
-                nn.Parameter(torch.empty(n_ctx, v_dim, dtype=self.dtype))
-                for _ in range(prompt_depth)
-            ]
+            [nn.Parameter(visual_vectors) for _ in range(prompt_depth)]
         )
-        for p in self.cross_prompts_visual:
-            nn.init.normal_(p, std=0.02)
 
         # ---- Knowledge Mapper Networks ----
         self.text2visual_net = CrossPromptAttention(

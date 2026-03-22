@@ -343,6 +343,14 @@ class HiCroPL_SBIR(pl.LightningModule):
             visual_encoder = self.model.visual_encoder_sketch
         with torch.no_grad():
             visual_features = visual_encoder(tensor, first_visual_prompt, deeper_visual_prompts)
+            visual_features = visual_features / visual_features.norm(dim=-1, keepdim=True)
+
+            fixed_features = self.model.distill_visual_encoder(tensor.type(self.model.dtype))
+            fixed_features = fixed_features / fixed_features.norm(dim=-1, keepdim=True)
+
+            visual_features = visual_features + fixed_features
+            visual_features = visual_features / visual_features.norm(dim=-1, keepdim=True)
+
             x_a = self.model.adapter_photo(visual_features)
             visual_features = self.model.image_adapter_m * x_a + (1 - self.model.image_adapter_m) * visual_features
             visual_features_norm = visual_features / visual_features.norm(dim=-1, keepdim=True)
