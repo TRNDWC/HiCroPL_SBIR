@@ -396,7 +396,7 @@ class CrossModalPromptLearner(nn.Module):
         for i in range(self.cross_layer, self.prompt_depth):
             self.cross_prompts_text[i].data.copy_(updated_text[i - self.cross_layer])
 
-    def forward(self, classnames, apply_knowledge_flow=True):
+    def forward(self, classnames):
         """Perform bidirectional knowledge flow and return all prompts.
         
         Args:
@@ -433,10 +433,8 @@ class CrossModalPromptLearner(nn.Module):
         text_input = self.construct_prompts(ctx, prefix, suffix)
 
         # ---- Bidirectional Knowledge Flow ----
-        # Allow disabling in-place prompt mutation to stabilize per-batch behavior.
-        if apply_knowledge_flow:
-            self._text_to_visual_flow()   # T -> V (early layers)
-            self._visual_to_text_flow()   # V -> T (later layers)
+        self._text_to_visual_flow()   # T -> V (early layers)
+        self._visual_to_text_flow()   # V -> T (later layers)
 
         # ---- Collect deeper prompts (layers 1..L-1) ----
         deeper_text_prompts = [

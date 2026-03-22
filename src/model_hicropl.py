@@ -116,10 +116,6 @@ class CustomCLIP(nn.Module):
         
         self.image_adapter_m = float(getattr(cfg, 'image_adapter_m', getattr(cfg, 'visual_adapter_m', 0.1)))
         self.text_adapter_m = float(getattr(cfg, 'text_adapter_m', 0.1))
-        self.apply_prompt_flow_train = bool(getattr(cfg, 'apply_prompt_flow_train', False))
-        self.apply_prompt_flow_eval = bool(
-            getattr(cfg, 'apply_prompt_flow_eval', self.apply_prompt_flow_train)
-        )
         
         adapter_param_count = (
             sum(p.numel() for p in self.adapter_photo.parameters() if p.requires_grad)
@@ -127,10 +123,6 @@ class CustomCLIP(nn.Module):
         )
         print(f"Adapters ALWAYS enabled | trainable adapter params: {adapter_param_count:,}")
         print(f"Adapter mix ratio | image_adapter_m: {self.image_adapter_m:.3f}, text_adapter_m: {self.text_adapter_m:.3f}")
-        print(
-            "Prompt flow policy | "
-            f"train: {self.apply_prompt_flow_train}, eval: {self.apply_prompt_flow_eval}"
-        )
 
     def forward(self, x, classnames):
         """
@@ -139,18 +131,15 @@ class CustomCLIP(nn.Module):
         Format: [sk_tensor, img_tensor, neg_tensor, sk_aug_tensor, img_aug_tensor, label, filename]
         """
         sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
-        apply_prompt_flow = (
-            self.apply_prompt_flow_train if self.training else self.apply_prompt_flow_eval
-        )
         
         # 1. Evaluate Prompt Learners Once
         (
             text_input_p, tok_p, first_v_p, deep_t_p, deep_v_p
-        ) = self.prompt_learner_photo(classnames, apply_knowledge_flow=apply_prompt_flow)
+        ) = self.prompt_learner_photo(classnames)
         
         (
             text_input_s, tok_s, first_v_s, deep_t_s, deep_v_s
-        ) = self.prompt_learner_sketch(classnames, apply_knowledge_flow=apply_prompt_flow)
+        ) = self.prompt_learner_sketch(classnames)
 
         # 1.1 Distill reference targets (no gradients)
         with torch.no_grad():
@@ -187,12 +176,21 @@ class CustomCLIP(nn.Module):
         # 4. Extract visual features and apply adapter residual mixing (C/D).
         # - Photo (C)
         photo_feat = self.visual_encoder_photo(photo_tensor.type(self.dtype), first_v_p, deep_v_p)
+        photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
+        photo_feat = photo_feat + photo_feat_fixed
+        photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
+
+
         x_a = self.adapter_photo(photo_feat)
         photo_feat = self.image_adapter_m * x_a + (1 - self.image_adapter_m) * photo_feat
         photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
         
         # - Sketch (D)
         sketch_feat = self.visual_encoder_sketch(sk_tensor, first_v_s, deep_v_s)
+        sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
+        sketch_feat = sketch_feat + sketch_feat_fixed
+        sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
+
         x_a = self.adapter_photo(sketch_feat)
         sketch_feat = self.image_adapter_m * x_a + (1 - self.image_adapter_m) * sketch_feat
         sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
@@ -253,6 +251,10 @@ class HiCroPL_SBIR(pl.LightningModule):
             'filenames': [],
             'base_names': []
         })
+
+        # Cache prompt outputs để tránh recompute mỗi validation batch
+        self._cached_photo_prompts = None
+        self._cached_sketch_prompts = None
 
     def on_train_epoch_start(self):
         # After refactor, clip_model_photo/sketch are not stored as top-level attrs.
@@ -327,22 +329,26 @@ class HiCroPL_SBIR(pl.LightningModule):
         return loss
 
     def on_validation_epoch_start(self):
-        """No-op: keep for Lightning hook compatibility."""
-        return
+        """Cache prompt outputs ONE TIME trước toàn bộ validation loop (giống GitHub CoPrompt)."""
+        with torch.no_grad():
+            _, _, first_v_p, _, deep_v_p = self.model.prompt_learner_photo(self.classnames)
+            self._cached_photo_prompts = (
+                first_v_p.detach() if first_v_p is not None else None,
+                [p.detach() for p in deep_v_p] if deep_v_p is not None else None,
+            )
+            _, _, first_v_s, _, deep_v_s = self.model.prompt_learner_sketch(self.classnames)
+            self._cached_sketch_prompts = (
+                first_v_s.detach() if first_v_s is not None else None,
+                [p.detach() for p in deep_v_s] if deep_v_s is not None else None,
+            )
 
     def extract_eval_features(self, tensor, modality):
-        """Extract normalized visual features with fresh prompts each validation batch."""
+        """Extract normalized visual features dùng CACHED prompts (không re-compute learner)."""
+        cached = self._cached_photo_prompts if modality == 'photo' else self._cached_sketch_prompts
+        first_visual_prompt, deeper_visual_prompts = cached
         if modality == 'photo':
-            _, _, first_visual_prompt, _, deeper_visual_prompts = self.model.prompt_learner_photo(
-                self.classnames,
-                apply_knowledge_flow=self.model.apply_prompt_flow_eval,
-            )
             visual_encoder = self.model.visual_encoder_photo
         else:
-            _, _, first_visual_prompt, _, deeper_visual_prompts = self.model.prompt_learner_sketch(
-                self.classnames,
-                apply_knowledge_flow=self.model.apply_prompt_flow_eval,
-            )
             visual_encoder = self.model.visual_encoder_sketch
         with torch.no_grad():
             visual_features = visual_encoder(tensor, first_visual_prompt, deeper_visual_prompts)
