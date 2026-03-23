@@ -134,9 +134,9 @@ class Sketchy(torch.utils.data.Dataset):
         neg_tensor = self.transform(neg_data)
         
         # Apply strong augmentation for consistency regularization
-        sk_aug_tensor = self.augmentation(sk_data)
-        # Sketch-only augmentation ablation: keep photo branch un-augmented.
-        img_aug_tensor = img_tensor
+        # Photo-only augmentation ablation: keep sketch branch un-augmented.
+        sk_aug_tensor = sk_tensor
+        img_aug_tensor = self.augmentation(img_data)
         
         if self.return_orig:
             return sk_tensor, img_tensor, neg_tensor, self.all_categories.index(category), filename, \
