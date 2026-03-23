@@ -119,9 +119,9 @@ class CustomCLIP(nn.Module):
         print(f"Adapter mix ratio | image_adapter_m: {self.image_adapter_m:.3f}, text_adapter_m: {self.text_adapter_m:.3f}")
 
     def apply_adapter_residual(self, feat, adapter, mix_ratio):
-        # x_a = adapter(feat)
-        # feat = mix_ratio * x_a + (1 - mix_ratio) * feat
-        # feat = feat / feat.norm(dim=-1, keepdim=True)
+        x_a = adapter(feat)
+        feat = mix_ratio * x_a + (1 - mix_ratio) * feat
+        feat = feat / feat.norm(dim=-1, keepdim=True)
         return feat
 
     def forward(self, x, classnames):
@@ -140,7 +140,7 @@ class CustomCLIP(nn.Module):
         out_neg = self.extractor_photo(neg_tensor, classnames)
         
         # 2. Áp dụng Adapter refinement (cho Photo, Sketch, Negative)
-        photo_feat = self.apply_adapter_residual(out_p["image_features"], self.adapter_photo, self.image_adapter_m)
+        photo_feat = out_p["image_features"]
         sketch_feat = self.apply_adapter_residual(out_s["image_features"], self.adapter_photo, self.image_adapter_m)
         neg_feat = self.apply_adapter_residual(out_neg["image_features"], self.adapter_photo, self.image_adapter_m)
         
