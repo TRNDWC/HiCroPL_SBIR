@@ -112,16 +112,16 @@ class CustomCLIP(nn.Module):
         self.image_adapter_m = float(getattr(cfg, 'image_adapter_m', 0.1))
         self.text_adapter_m = float(getattr(cfg, 'text_adapter_m', 0.1))
 
-        if not self.use_adapter:
-            for p in self.adapter_photo.parameters():
-                p.requires_grad_(False)
-
-        # Visual-only adapter ablation: text adapter is always disabled.
-        for p in self.adapter_text.parameters():
+        # Text-only adapter ablation: visual adapter is always disabled.
+        for p in self.adapter_photo.parameters():
             p.requires_grad_(False)
+
+        if not self.use_adapter:
+            for p in self.adapter_text.parameters():
+                p.requires_grad_(False)
         
-        adapter_param_count = sum(p.numel() for p in self.adapter_photo.parameters() if p.requires_grad)
-        print(f"Adapter enabled: {self.use_adapter} | visual-only adapter params: {adapter_param_count:,}")
+        adapter_param_count = sum(p.numel() for p in self.adapter_text.parameters() if p.requires_grad)
+        print(f"Adapter enabled: {self.use_adapter} | text-only adapter params: {adapter_param_count:,}")
         print(f"Adapter mix ratio | image_adapter_m: {self.image_adapter_m:.3f}, text_adapter_m: {self.text_adapter_m:.3f}")
 
     def apply_adapter_residual(self, feat, adapter, mix_ratio):
@@ -147,13 +147,13 @@ class CustomCLIP(nn.Module):
         # Đặc trưng Negative lấy từ nhánh Photo
         out_neg = self.extractor_photo(neg_tensor, classnames)
         
-        # 2. Áp dụng Adapter refinement (cho Photo, Sketch, Negative)
-        photo_feat = self.apply_adapter_residual(out_p["image_features"], self.adapter_photo, self.image_adapter_m)
-        sketch_feat = self.apply_adapter_residual(out_s["image_features"], self.adapter_photo, self.image_adapter_m)
-        neg_feat = self.apply_adapter_residual(out_neg["image_features"], self.adapter_photo, self.image_adapter_m)
+        # 2. Text-only adapter refinement.
+        photo_feat = out_p["image_features"] / out_p["image_features"].norm(dim=-1, keepdim=True)
+        sketch_feat = out_s["image_features"] / out_s["image_features"].norm(dim=-1, keepdim=True)
+        neg_feat = out_neg["image_features"] / out_neg["image_features"].norm(dim=-1, keepdim=True)
         
-        text_feat_photo = out_p["text_features"]
-        text_feat_sketch = out_s["text_features"]
+        text_feat_photo = self.apply_adapter_residual(out_p["text_features"], self.adapter_text, self.text_adapter_m)
+        text_feat_sketch = self.apply_adapter_residual(out_s["text_features"], self.adapter_text, self.text_adapter_m)
 
         # Trích xuất Fixed reference targets
         photo_feat_fixed = out_p["image_features_fixed"]
@@ -245,7 +245,7 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         adapter_params = []
         if getattr(self.model, 'use_adapter', False):
-            add_unique_params(self.model.adapter_photo.parameters(), adapter_params, seen_ids)
+            add_unique_params(self.model.adapter_text.parameters(), adapter_params, seen_ids)
 
         extra_trainable_params = []
         for _, p in self.model.named_parameters():
@@ -287,9 +287,6 @@ class HiCroPL_SBIR(pl.LightningModule):
         out = extractor(tensor, self.classnames)
         visual_features = out["image_features"]
         
-        if self.model.use_adapter:
-            x_a = self.model.adapter_photo(visual_features)
-            visual_features = self.model.image_adapter_m * x_a + (1 - self.model.image_adapter_m) * visual_features
         visual_features_norm = visual_features / visual_features.norm(dim=-1, keepdim=True)
         
         return visual_features_norm
