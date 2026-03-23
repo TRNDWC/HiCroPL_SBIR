@@ -115,14 +115,13 @@ class CustomCLIP(nn.Module):
         if not self.use_adapter:
             for p in self.adapter_photo.parameters():
                 p.requires_grad_(False)
-            for p in self.adapter_text.parameters():
-                p.requires_grad_(False)
+
+        # Visual-only adapter ablation: text adapter is always disabled.
+        for p in self.adapter_text.parameters():
+            p.requires_grad_(False)
         
-        adapter_param_count = (
-            sum(p.numel() for p in self.adapter_photo.parameters() if p.requires_grad)
-            + sum(p.numel() for p in self.adapter_text.parameters() if p.requires_grad)
-        )
-        print(f"Adapter enabled: {self.use_adapter} | trainable adapter params: {adapter_param_count:,}")
+        adapter_param_count = sum(p.numel() for p in self.adapter_photo.parameters() if p.requires_grad)
+        print(f"Adapter enabled: {self.use_adapter} | visual-only adapter params: {adapter_param_count:,}")
         print(f"Adapter mix ratio | image_adapter_m: {self.image_adapter_m:.3f}, text_adapter_m: {self.text_adapter_m:.3f}")
 
     def apply_adapter_residual(self, feat, adapter, mix_ratio):
@@ -247,7 +246,6 @@ class HiCroPL_SBIR(pl.LightningModule):
         adapter_params = []
         if getattr(self.model, 'use_adapter', False):
             add_unique_params(self.model.adapter_photo.parameters(), adapter_params, seen_ids)
-            add_unique_params(self.model.adapter_text.parameters(), adapter_params, seen_ids)
 
         extra_trainable_params = []
         for _, p in self.model.named_parameters():
