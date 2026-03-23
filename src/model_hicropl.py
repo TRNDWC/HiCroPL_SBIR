@@ -140,12 +140,12 @@ class CustomCLIP(nn.Module):
         out_neg = self.extractor_photo(neg_tensor, classnames)
         
         # 2. Áp dụng Adapter refinement (cho Photo, Sketch, Negative)
-        photo_feat = out_p["image_features"]
-        sketch_feat = out_s["image_features"]
-        neg_feat = out_neg["image_features"]
+        photo_feat = self.apply_adapter_residual(out_p["image_features"], self.adapter_photo, self.image_adapter_m)
+        sketch_feat = self.apply_adapter_residual(out_s["image_features"], self.adapter_photo, self.image_adapter_m)
+        neg_feat = self.apply_adapter_residual(out_neg["image_features"], self.adapter_photo, self.image_adapter_m)
         
-        text_feat_photo = self.apply_adapter_residual(out_p["text_features_all"], self.adapter_text, self.text_adapter_m)
-        text_feat_sketch = self.apply_adapter_residual(out_s["text_features_all"], self.adapter_text, self.text_adapter_m)
+        text_feat_photo = out_p["text_features"]
+        text_feat_sketch = out_s["text_features"]
 
         # Trích xuất Fixed reference targets
         photo_feat_fixed = out_p["image_features_fixed"]
