@@ -107,18 +107,27 @@ class CustomCLIP(nn.Module):
         embed_dim = int(clip_photo.text_projection.shape[1])
         self.adapter_photo = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
         self.adapter_text = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
+        self.use_adapter = bool(getattr(cfg, 'use_adapter', False))
         
         self.image_adapter_m = float(getattr(cfg, 'image_adapter_m', 0.1))
         self.text_adapter_m = float(getattr(cfg, 'text_adapter_m', 0.1))
+
+        if not self.use_adapter:
+            for p in self.adapter_photo.parameters():
+                p.requires_grad_(False)
+            for p in self.adapter_text.parameters():
+                p.requires_grad_(False)
         
         adapter_param_count = (
             sum(p.numel() for p in self.adapter_photo.parameters() if p.requires_grad)
             + sum(p.numel() for p in self.adapter_text.parameters() if p.requires_grad)
         )
-        print(f"Adapters ALWAYS enabled | trainable adapter params: {adapter_param_count:,}")
+        print(f"Adapter enabled: {self.use_adapter} | trainable adapter params: {adapter_param_count:,}")
         print(f"Adapter mix ratio | image_adapter_m: {self.image_adapter_m:.3f}, text_adapter_m: {self.text_adapter_m:.3f}")
 
     def apply_adapter_residual(self, feat, adapter, mix_ratio):
+        if not self.use_adapter:
+            return feat / feat.norm(dim=-1, keepdim=True)
         x_a = adapter(feat)
         feat = mix_ratio * x_a + (1 - mix_ratio) * feat
         feat = feat / feat.norm(dim=-1, keepdim=True)
@@ -236,8 +245,9 @@ class HiCroPL_SBIR(pl.LightningModule):
                 add_unique_params(module.parameters(recurse=False), ln_params, seen_ids)
 
         adapter_params = []
-        add_unique_params(self.model.adapter_photo.parameters(), adapter_params, seen_ids)
-        add_unique_params(self.model.adapter_text.parameters(), adapter_params, seen_ids)
+        if getattr(self.model, 'use_adapter', False):
+            add_unique_params(self.model.adapter_photo.parameters(), adapter_params, seen_ids)
+            add_unique_params(self.model.adapter_text.parameters(), adapter_params, seen_ids)
 
         extra_trainable_params = []
         for _, p in self.model.named_parameters():
@@ -279,9 +289,9 @@ class HiCroPL_SBIR(pl.LightningModule):
         out = extractor(tensor, self.classnames)
         visual_features = out["image_features"]
         
-        # Adapter Mix
-        x_a = self.model.adapter_photo(visual_features)
-        visual_features = self.model.image_adapter_m * x_a + (1 - self.model.image_adapter_m) * visual_features
+        if self.model.use_adapter:
+            x_a = self.model.adapter_photo(visual_features)
+            visual_features = self.model.image_adapter_m * x_a + (1 - self.model.image_adapter_m) * visual_features
         visual_features_norm = visual_features / visual_features.norm(dim=-1, keepdim=True)
         
         return visual_features_norm
