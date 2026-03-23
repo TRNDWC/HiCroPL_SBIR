@@ -74,9 +74,10 @@ def loss_fn_hicropl(args, features):
     # --- L2: InfoNCE Loss (sketch - positive_photo) ---
     loss_cross_modal = lambda_cross_modal * cross_loss(sketch_feat, photo_feat, temperature)
 
-    # --- L3: InfoNCE Loss (photo - photo_aug), photo-only augmentation ---
+    # --- L3: InfoNCE Loss (sketch - sketch_aug) + (photo - photo_aug) ---
+    loss_consistency_sketch = cross_loss(sketch_feat, sketch_aug_feat, temperature)
     loss_consistency_photo = cross_loss(photo_feat, photo_aug_feat, temperature)
-    loss_consistency = lambda_consistency * loss_consistency_photo
+    loss_consistency = lambda_consistency * (loss_consistency_sketch + loss_consistency_photo)
 
     # --- L4: Cross-Entropy Loss (text - photo) + (text - sketch) ---
     loss_ce_photo = F.cross_entropy(logits_photo, label)
