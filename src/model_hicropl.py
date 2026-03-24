@@ -125,13 +125,16 @@ class CustomCLIP(nn.Module):
         print(f"Adapter enabled: {self.use_adapter} | trainable adapter params: {adapter_param_count:,}")
         print(f"Adapter mix ratio | image_adapter_m: {self.image_adapter_m:.3f}, text_adapter_m: {self.text_adapter_m:.3f}")
 
-    def apply_adapter_residual(self, feat, adapter, mix_ratio):
+    def apply_adapter_residual(self, feat_prenorm, adapter, mix_ratio):
+        """Adapter trước normalize — giống CoPrompt.
+        feat_prenorm: feature chưa normalize cuối (raw hoặc residual_sum chưa norm).
+        Đầu ra: feature đã normalize sau khi mix.
+        """
         if not self.use_adapter:
-            return feat / feat.norm(dim=-1, keepdim=True)
-        x_a = adapter(feat)
-        feat = mix_ratio * x_a + (1 - mix_ratio) * feat
-        feat = feat / feat.norm(dim=-1, keepdim=True)
-        return feat
+            return feat_prenorm / feat_prenorm.norm(dim=-1, keepdim=True)
+        x_a = adapter(feat_prenorm)                              # adapter trên feature thô
+        feat = mix_ratio * x_a + (1 - mix_ratio) * feat_prenorm  # residual mix
+        return feat / feat.norm(dim=-1, keepdim=True)            # normalize sau
 
     def forward(self, x, classnames):
         """
@@ -148,14 +151,15 @@ class CustomCLIP(nn.Module):
         # Đặc trưng Negative lấy từ nhánh Photo
         out_neg = self.extractor_photo(neg_tensor, classnames)
         
-        # 2. Visual features: qua Adapter
-        photo_feat = self.apply_adapter_residual(out_p["image_features"], self.adapter_photo, self.image_adapter_m)
-        sketch_feat = self.apply_adapter_residual(out_s["image_features"], self.adapter_photo, self.image_adapter_m)
-        neg_feat = self.apply_adapter_residual(out_neg["image_features"], self.adapter_photo, self.image_adapter_m)
+        # 2. Visual features: Adapter trước normalize (giống CoPrompt)
+        #    dùng prenorm = (norm_learned + fixed) chưa normalize cuối
+        photo_feat  = self.apply_adapter_residual(out_p["image_features_prenorm"],   self.adapter_photo, self.image_adapter_m)
+        sketch_feat = self.apply_adapter_residual(out_s["image_features_prenorm"],   self.adapter_photo, self.image_adapter_m)
+        neg_feat    = self.apply_adapter_residual(out_neg["image_features_prenorm"], self.adapter_photo, self.image_adapter_m)
         
-        # Text features: KHÔNG qua Adapter (bỏ hoàn toàn text adapter)
-        text_feat_photo = out_p["text_features"]
-        text_feat_sketch = out_s["text_features"]
+        # Text features: qua Adapter (trừ nhánh aug)
+        text_feat_photo  = self.apply_adapter_residual(out_p["text_features_prenorm"],  self.adapter_text, self.text_adapter_m)
+        text_feat_sketch = self.apply_adapter_residual(out_s["text_features_prenorm"],  self.adapter_text, self.text_adapter_m)
 
         # Trích xuất Fixed reference targets
         photo_feat_fixed = out_p["image_features_fixed"]
@@ -283,13 +287,13 @@ class HiCroPL_SBIR(pl.LightningModule):
         return loss
 
     def extract_eval_features(self, tensor, modality):
-        """Extract normalized visual features qua Feature Extractor + Adapter visual"""
+        """Extract visual features: Adapter trước normalize (giống CoPrompt)"""
         extractor = self.model.extractor_photo if modality == 'photo' else self.model.extractor_sketch
         out = extractor(tensor, self.classnames)
-        visual_features = out["image_features"]
-        # Visual adapter (không dùng text adapter trong eval)
-        visual_features = self.model.apply_adapter_residual(visual_features, self.model.adapter_photo, self.model.image_adapter_m)
-        return visual_features
+        # dùng prenorm làm input cho adapter, normalize sau
+        return self.model.apply_adapter_residual(
+            out["image_features_prenorm"], self.model.adapter_photo, self.model.image_adapter_m
+        )
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         if self.eval_mode == 'fine_grained':
