@@ -148,14 +148,14 @@ class CustomCLIP(nn.Module):
         # Đặc trưng Negative lấy từ nhánh Photo
         out_neg = self.extractor_photo(neg_tensor, classnames)
         
-        # 2. Visual features: KHÔNG qua Adapter (bỏ hoàn toàn visual adapter)
-        photo_feat = out_p["image_features"]   # đã norm bên trong extractor
-        sketch_feat = out_s["image_features"]
-        neg_feat = out_neg["image_features"]
+        # 2. Visual features: qua Adapter
+        photo_feat = self.apply_adapter_residual(out_p["image_features"], self.adapter_photo, self.image_adapter_m)
+        sketch_feat = self.apply_adapter_residual(out_s["image_features"], self.adapter_photo, self.image_adapter_m)
+        neg_feat = self.apply_adapter_residual(out_neg["image_features"], self.adapter_photo, self.image_adapter_m)
         
-        # Text features: vẫn giữ Adapter (text only)
-        text_feat_photo = self.apply_adapter_residual(out_p["text_features"], self.adapter_text, self.text_adapter_m)
-        text_feat_sketch = self.apply_adapter_residual(out_s["text_features"], self.adapter_text, self.text_adapter_m)
+        # Text features: KHÔNG qua Adapter (bỏ hoàn toàn text adapter)
+        text_feat_photo = out_p["text_features"]
+        text_feat_sketch = out_s["text_features"]
 
         # Trích xuất Fixed reference targets
         photo_feat_fixed = out_p["image_features_fixed"]
@@ -283,11 +283,13 @@ class HiCroPL_SBIR(pl.LightningModule):
         return loss
 
     def extract_eval_features(self, tensor, modality):
-        """Extract normalized visual features qua Feature Extractor (không Adapter visual)"""
+        """Extract normalized visual features qua Feature Extractor + Adapter visual"""
         extractor = self.model.extractor_photo if modality == 'photo' else self.model.extractor_sketch
         out = extractor(tensor, self.classnames)
-        # Visual adapter bị bỏ hoàn toàn — dùng thẳng feature đã norm từ extractor
-        return out["image_features"]
+        visual_features = out["image_features"]
+        # Visual adapter (không dùng text adapter trong eval)
+        visual_features = self.model.apply_adapter_residual(visual_features, self.model.adapter_photo, self.model.image_adapter_m)
+        return visual_features
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         if self.eval_mode == 'fine_grained':
