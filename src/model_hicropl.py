@@ -148,11 +148,12 @@ class CustomCLIP(nn.Module):
         # Đặc trưng Negative lấy từ nhánh Photo
         out_neg = self.extractor_photo(neg_tensor, classnames)
         
-        # 2. Adapter refinement (text + visual). Aug branches stay adapter-free.
-        photo_feat = self.apply_adapter_residual(out_p["image_features"], self.adapter_photo, self.image_adapter_m)
-        sketch_feat = self.apply_adapter_residual(out_s["image_features"], self.adapter_photo, self.image_adapter_m)
-        neg_feat = self.apply_adapter_residual(out_neg["image_features"], self.adapter_photo, self.image_adapter_m)
+        # 2. Visual features: KHÔNG qua Adapter (bỏ hoàn toàn visual adapter)
+        photo_feat = out_p["image_features"]   # đã norm bên trong extractor
+        sketch_feat = out_s["image_features"]
+        neg_feat = out_neg["image_features"]
         
+        # Text features: vẫn giữ Adapter (text only)
         text_feat_photo = self.apply_adapter_residual(out_p["text_features"], self.adapter_text, self.text_adapter_m)
         text_feat_sketch = self.apply_adapter_residual(out_s["text_features"], self.adapter_text, self.text_adapter_m)
 
@@ -282,19 +283,11 @@ class HiCroPL_SBIR(pl.LightningModule):
         return loss
 
     def extract_eval_features(self, tensor, modality):
-        """Extract normalized visual features dùng CACHED prompts qua Feature Extractor"""
+        """Extract normalized visual features qua Feature Extractor (không Adapter visual)"""
         extractor = self.model.extractor_photo if modality == 'photo' else self.model.extractor_sketch
-        
-        # Trong eval ta cũng có thể gọi full forward extractor, vì Learner đã cache_classnames nên rất nhanh
         out = extractor(tensor, self.classnames)
-        visual_features = out["image_features"]
-        if self.model.use_adapter:
-            x_a = self.model.adapter_photo(visual_features)
-            visual_features = self.model.image_adapter_m * x_a + (1 - self.model.image_adapter_m) * visual_features
-        
-        visual_features_norm = visual_features / visual_features.norm(dim=-1, keepdim=True)
-        
-        return visual_features_norm
+        # Visual adapter bị bỏ hoàn toàn — dùng thẳng feature đã norm từ extractor
+        return out["image_features"]
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         if self.eval_mode == 'fine_grained':
