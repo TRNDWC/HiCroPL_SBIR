@@ -134,8 +134,8 @@ class Sketchy(torch.utils.data.Dataset):
         neg_tensor = self.transform(neg_data)
         
         # Testing no augmentation for sketches and photo 
-        img_aug_tensor = self.transform(sk_data)
-        sk_aug_tensor = self.augmentation(sk_data)
+        img_aug_tensor = self.augmentation(img_data)
+        sk_aug_tensor = self.transform(img_data)
         
         if self.return_orig:
             return sk_tensor, img_tensor, neg_tensor, self.all_categories.index(category), filename, \
