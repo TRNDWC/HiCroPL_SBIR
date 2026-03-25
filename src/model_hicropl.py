@@ -14,6 +14,12 @@ from src.hicropl import (
 from src.hicropl_extractor import HiCroPLFeatureExtractor
 
 
+def freeze_model(m):
+    """Freeze all parameters of the given module."""
+    for param in m.parameters():
+        param.requires_grad_(False)
+        
+
 def freeze_all_but_bn(m):
     if not isinstance(m, torch.nn.LayerNorm):
         if hasattr(m, 'weight') and m.weight is not None:
@@ -51,7 +57,7 @@ class CustomCLIP(nn.Module):
 
         # 1. Distill branch (vanilla CLIP)
         self.clip_model_distill = clip_model_frozen
-        self.clip_model_distill.apply(freeze_all_but_bn)
+        freeze_model(self.clip_model_distill)
         self.distill_visual_encoder = self.clip_model_distill.visual
 
         # 2. Shared Logit Scale
