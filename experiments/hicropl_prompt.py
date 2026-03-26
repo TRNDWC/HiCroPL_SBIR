@@ -72,35 +72,13 @@ if __name__ == '__main__':
     )
 
     # 3. Setup CLIP backbones
+    from src.utils import load_clip_to_cpu, load_clip_to_cpu_teacher
     print("Loading CLIP models...")
-    vision_depth = opts.prompt_depth if opts.vision_depth < 0 else opts.vision_depth
-    language_depth = opts.prompt_depth if opts.language_depth < 0 else opts.language_depth
-    vision_ctx = opts.n_ctx if opts.vision_ctx < 0 else opts.vision_ctx
-    language_ctx = opts.n_ctx if opts.language_ctx < 0 else opts.language_ctx
-
-    design_details = {
-        "trainer": opts.clip_trainer,
-        "vision_depth": vision_depth,
-        "language_depth": language_depth,
-        "vision_ctx": vision_ctx,
-        "language_ctx": language_ctx,
-        "maple_length": opts.n_ctx,
-    }
-
-    # Distillation/reference branch follows CoPrompt style: plain CLIP without prompt routing.
-    frozen_design_details = {
-        "trainer": "CoOp",
-        "vision_depth": 0,
-        "language_depth": 0,
-        "vision_ctx": 0,
-        "language_ctx": 0,
-        "maple_length": opts.n_ctx,
-    }
-
-    clip_model, _ = clip.load(opts.backbone, device=device, design_details=design_details)
+    
+    clip_model = load_clip_to_cpu(opts).to(device)
     clip_model.float() # Training prompt in fp32
     
-    clip_model_frozen, _ = clip.load(opts.backbone, device=device, design_details=frozen_design_details)
+    clip_model_frozen = load_clip_to_cpu_teacher(opts).to(device)
     clip_model_frozen.float()
     clip_model_frozen.eval()
     
