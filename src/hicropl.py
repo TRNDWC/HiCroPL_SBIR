@@ -164,8 +164,10 @@ class CrossModalPromptLearner(nn.Module):
         attn_pooling_visual = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
         self.attn_pooling_visual_nets = _get_clones(attn_pooling_visual, self.prompt_depth - self.cross_layer)
         
-        self.text_proxy_tokens = nn.ParameterList([nn.Parameter(torch.randn(1, ctx_dim, dtype=dtype)) for _ in range(self.cross_layer)])
-        self.visual_proxy_tokens = nn.ParameterList([nn.Parameter(torch.randn(1, v_dim, dtype=dtype)) for _ in range(self.cross_layer, self.prompt_depth)])
+        text_proxy_token = torch.randn(1, ctx_dim, dtype=dtype)
+        self.text_proxy_tokens = nn.ParameterList([nn.Parameter(text_proxy_token) for _ in range(self.cross_layer)])
+        visual_proxy_token = torch.randn(1, v_dim, dtype=dtype)
+        self.visual_proxy_tokens = nn.ParameterList([nn.Parameter(visual_proxy_token) for _ in range(self.cross_layer, self.prompt_depth)])
         
         if prec == "fp16":
             self.attn_pooling_text_nets, self.attn_pooling_visual_nets = self.attn_pooling_text_nets.half(), self.attn_pooling_visual_nets.half()
@@ -255,6 +257,7 @@ class CrossModalPromptLearner(nn.Module):
         text_prompts = torch.cat([self.cross_prompts_text[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)  
         visual_prompts = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)  
         proxy_visual_tokens = []
+        proxy_visual_prompts = None
         for i in range(self.cross_layer, self.prompt_depth):
             visual_proxy_token = self.attn_pooling_visual_nets[i - self.cross_layer](
                 token_query=self.visual_proxy_tokens[i - self.cross_layer],  
@@ -262,6 +265,7 @@ class CrossModalPromptLearner(nn.Module):
                 sequence_value=self.cross_prompts_visual[i]  
             )
             proxy_visual_tokens.append(visual_proxy_token)
+        if len(proxy_visual_tokens) > 0:
             proxy_visual_prompts = torch.cat(proxy_visual_tokens, dim=0)  
         text_prompts = text_prompts.view(-1, text_prompts.shape[-1])  
         proxy_visual_prompts = proxy_visual_prompts.view(-1, proxy_visual_prompts.shape[-1])  
