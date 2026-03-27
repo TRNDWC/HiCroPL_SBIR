@@ -257,7 +257,6 @@ class CrossModalPromptLearner(nn.Module):
         text_prompts = torch.cat([self.cross_prompts_text[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)  
         visual_prompts = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)  
         proxy_visual_tokens = []
-        proxy_visual_prompts = None
         for i in range(self.cross_layer, self.prompt_depth):
             visual_proxy_token = self.attn_pooling_visual_nets[i - self.cross_layer](
                 token_query=self.visual_proxy_tokens[i - self.cross_layer],  
@@ -265,7 +264,6 @@ class CrossModalPromptLearner(nn.Module):
                 sequence_value=self.cross_prompts_visual[i]  
             )
             proxy_visual_tokens.append(visual_proxy_token)
-        if len(proxy_visual_tokens) > 0:
             proxy_visual_prompts = torch.cat(proxy_visual_tokens, dim=0)  
         text_prompts = text_prompts.view(-1, text_prompts.shape[-1])  
         proxy_visual_prompts = proxy_visual_prompts.view(-1, proxy_visual_prompts.shape[-1])  
