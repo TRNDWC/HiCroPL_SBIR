@@ -158,11 +158,13 @@ class CrossModalPromptLearner(nn.Module):
         ######## knowledge mapper network and LKP ########
         self.text2visual_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=ctx_dim, num_attention_heads=8)
         self.sketch2visual_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
+        self.shallow_concat_fusion = nn.Linear(v_dim * 2, v_dim)
         self.photo2sketch_deep_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
         self.visual2text_net = CrossPromptAttention(hidden_size=ctx_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
         if prec == "fp16":
             self.text2visual_net = self.text2visual_net.half()
             self.sketch2visual_net = self.sketch2visual_net.half()
+            self.shallow_concat_fusion = self.shallow_concat_fusion.half()
             self.photo2sketch_deep_net = self.photo2sketch_deep_net.half()
             self.visual2text_net = self.visual2text_net.half()
 
@@ -303,10 +305,8 @@ class CrossModalPromptLearner(nn.Module):
             updated_by_sketch = self.sketch2visual_net(visual_prompts_flat, external, external)
             updated_by_sketch = updated_by_sketch.view(self.cross_layer, self.n_ctx, self.v_dim)
 
-            split = self.n_ctx // 2
-            text_part = updated_by_text[:, :split, :]
-            sketch_part = updated_by_sketch[:, split:, :]
-            updated_visual_prompts = torch.cat([text_part, sketch_part], dim=1)
+            concat_prompts = torch.cat([updated_by_text, updated_by_sketch], dim=-1)
+            updated_visual_prompts = self.shallow_concat_fusion(concat_prompts)
 
         for i in range(self.cross_layer):
             self.cross_prompts_visual[i].data.copy_(updated_visual_prompts[i])
