@@ -117,6 +117,8 @@ class CrossModalPromptLearner(nn.Module):
         ctx_dim = clip_model.ln_final.weight.shape[0]
         vis_dim = clip_model.visual.output_dim if hasattr(clip_model.visual, 'output_dim') else clip_model.visual.conv1.weight.shape[0]
         v_dim = 768
+        self.ctx_dim = ctx_dim
+        self.v_dim = v_dim
 
         self.n_ctx = n_ctx
         self.ctx_init_text = ctx_init
@@ -155,22 +157,40 @@ class CrossModalPromptLearner(nn.Module):
 
         ######## knowledge mapper network and LKP ########
         self.text2visual_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=ctx_dim, num_attention_heads=8)
+        self.sketch2visual_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
+        self.photo2sketch_deep_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
         self.visual2text_net = CrossPromptAttention(hidden_size=ctx_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
         if prec == "fp16":
-            self.text2visual_net, self.visual2text_net = self.text2visual_net.half(), self.visual2text_net.half()
+            self.text2visual_net = self.text2visual_net.half()
+            self.sketch2visual_net = self.sketch2visual_net.half()
+            self.photo2sketch_deep_net = self.photo2sketch_deep_net.half()
+            self.visual2text_net = self.visual2text_net.half()
 
         attn_pooling_text = AttentionPooling(hidden_size=ctx_dim, num_attention_heads=8)
         self.attn_pooling_text_nets = _get_clones(attn_pooling_text, self.cross_layer)
+        attn_pooling_shallow_visual = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
+        self.attn_pooling_shallow_visual_nets = _get_clones(attn_pooling_shallow_visual, self.cross_layer)
         attn_pooling_visual = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
         self.attn_pooling_visual_nets = _get_clones(attn_pooling_visual, self.prompt_depth - self.cross_layer)
+        attn_pooling_photo2sketch = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
+        self.attn_pooling_photo2sketch_nets = _get_clones(attn_pooling_photo2sketch, self.prompt_depth - self.cross_layer)
         
         text_proxy_token = torch.randn(1, ctx_dim, dtype=dtype)
         self.text_proxy_tokens = nn.ParameterList([nn.Parameter(text_proxy_token) for _ in range(self.cross_layer)])
+        shallow_visual_proxy_token = torch.randn(1, v_dim, dtype=dtype)
+        self.shallow_visual_proxy_tokens = nn.ParameterList([nn.Parameter(shallow_visual_proxy_token) for _ in range(self.cross_layer)])
         visual_proxy_token = torch.randn(1, v_dim, dtype=dtype)
         self.visual_proxy_tokens = nn.ParameterList([nn.Parameter(visual_proxy_token) for _ in range(self.cross_layer, self.prompt_depth)])
+        photo2sketch_proxy_token = torch.randn(1, v_dim, dtype=dtype)
+        self.photo2sketch_proxy_tokens = nn.ParameterList([nn.Parameter(photo2sketch_proxy_token) for _ in range(self.cross_layer, self.prompt_depth)])
+
+        self.deep_residual_alpha = float(getattr(cfg, 'deep_residual_alpha', 0.5))
         
         if prec == "fp16":
-            self.attn_pooling_text_nets, self.attn_pooling_visual_nets = self.attn_pooling_text_nets.half(), self.attn_pooling_visual_nets.half()
+            self.attn_pooling_text_nets = self.attn_pooling_text_nets.half()
+            self.attn_pooling_shallow_visual_nets = self.attn_pooling_shallow_visual_nets.half()
+            self.attn_pooling_visual_nets = self.attn_pooling_visual_nets.half()
+            self.attn_pooling_photo2sketch_nets = self.attn_pooling_photo2sketch_nets.half()
 
         ######## Distillation Image Encoder ########
         self.ZS_image_encoder = self.clip_model_distill.visual
@@ -231,27 +251,95 @@ class CrossModalPromptLearner(nn.Module):
 
         return text_input, tokenized_prompts, fixed_embeddings
 
-    def forward(self, classnames):
-        text_input, tokenized_prompts, fixed_embeddings = self._prepare_dynamic_classnames(classnames)
-
-        ######## T->I mapping ########
-        visual_prompts = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)  
-        text_prompts = torch.cat([self.cross_prompts_text[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)  
+    def get_early_text_proxies(self):
         proxy_text_tokens = []
         for i in range(self.cross_layer):
             text_proxy_token = self.attn_pooling_text_nets[i](
-                token_query=self.text_proxy_tokens[i],  
-                sequence_key=self.cross_prompts_text[i],  
-                sequence_value=self.cross_prompts_text[i]  
+                token_query=self.text_proxy_tokens[i],
+                sequence_key=self.cross_prompts_text[i],
+                sequence_value=self.cross_prompts_text[i]
             )
             proxy_text_tokens.append(text_proxy_token)
-        proxy_text_prompts = torch.cat(proxy_text_tokens, dim=0)  
-        visual_prompts = visual_prompts.view(-1, visual_prompts.shape[-1])  
-        proxy_text_prompts = proxy_text_prompts.view(-1, proxy_text_prompts.shape[-1])  
-        updated_visual_prompts = self.text2visual_net(visual_prompts, proxy_text_prompts, proxy_text_prompts)  
-        updated_visual_prompts = updated_visual_prompts.view(self.cross_layer, -1, updated_visual_prompts.shape[-1])  
+        return torch.cat(proxy_text_tokens, dim=0).view(self.cross_layer, self.ctx_dim)
+
+    def get_shallow_visual_proxies(self):
+        proxy_visual_tokens = []
+        for i in range(self.cross_layer):
+            visual_proxy_token = self.attn_pooling_shallow_visual_nets[i](
+                token_query=self.shallow_visual_proxy_tokens[i],
+                sequence_key=self.cross_prompts_visual[i],
+                sequence_value=self.cross_prompts_visual[i]
+            )
+            proxy_visual_tokens.append(visual_proxy_token)
+        return torch.cat(proxy_visual_tokens, dim=0).view(self.cross_layer, self.v_dim)
+
+    def get_deep_visual_prompts(self):
+        return [self.cross_prompts_visual[i] for i in range(self.cross_layer, self.prompt_depth)]
+
+    def forward(
+        self,
+        classnames,
+        external_shallow_visual_proxies=None,
+        use_dual_source_shallow=False,
+        external_deep_visual_prompts=None,
+        residual_photo_to_sketch_deep=False,
+    ):
+        text_input, tokenized_prompts, fixed_embeddings = self._prepare_dynamic_classnames(classnames)
+
+        ######## T->I mapping ########
+        visual_prompts = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)
+        visual_prompts_flat = visual_prompts.view(-1, visual_prompts.shape[-1])
+        proxy_text_prompts = self.get_early_text_proxies().view(-1, self.ctx_dim)
+
+        updated_by_text = self.text2visual_net(visual_prompts_flat, proxy_text_prompts, proxy_text_prompts)
+        updated_by_text = updated_by_text.view(self.cross_layer, self.n_ctx, self.v_dim)
+
+        updated_visual_prompts = updated_by_text
+        if use_dual_source_shallow and external_shallow_visual_proxies is not None:
+            external = external_shallow_visual_proxies.to(
+                device=visual_prompts_flat.device,
+                dtype=visual_prompts_flat.dtype,
+            ).view(self.cross_layer, self.v_dim)
+            updated_by_sketch = self.sketch2visual_net(visual_prompts_flat, external, external)
+            updated_by_sketch = updated_by_sketch.view(self.cross_layer, self.n_ctx, self.v_dim)
+
+            split = self.n_ctx // 2
+            text_part = updated_by_text[:, :split, :]
+            sketch_part = updated_by_sketch[:, split:, :]
+            updated_visual_prompts = torch.cat([text_part, sketch_part], dim=1)
+
         for i in range(self.cross_layer):
             self.cross_prompts_visual[i].data.copy_(updated_visual_prompts[i])
+
+        if residual_photo_to_sketch_deep and external_deep_visual_prompts is not None:
+            n_deep = self.prompt_depth - self.cross_layer
+            own_deep_visual = torch.cat(
+                [self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)],
+                dim=0,
+            )
+            external_deep = torch.stack([
+                p.to(device=own_deep_visual.device, dtype=own_deep_visual.dtype)
+                for p in external_deep_visual_prompts[:n_deep]
+            ], dim=0)
+
+            photo_proxy_tokens = []
+            for i in range(n_deep):
+                photo_proxy = self.attn_pooling_photo2sketch_nets[i](
+                    token_query=self.photo2sketch_proxy_tokens[i],
+                    sequence_key=external_deep[i],
+                    sequence_value=external_deep[i],
+                )
+                photo_proxy_tokens.append(photo_proxy)
+            photo_proxy_prompts = torch.cat(photo_proxy_tokens, dim=0).view(n_deep, self.v_dim)
+
+            own_deep_flat = own_deep_visual.view(-1, self.v_dim)
+            mapped_from_photo = self.photo2sketch_deep_net(own_deep_flat, photo_proxy_prompts, photo_proxy_prompts)
+            mapped_from_photo = mapped_from_photo.view(n_deep, self.n_ctx, self.v_dim)
+
+            alpha = self.deep_residual_alpha
+            updated_deep_visual = alpha * mapped_from_photo + (1.0 - alpha) * own_deep_visual
+            for i in range(n_deep):
+                self.cross_prompts_visual[self.cross_layer + i].data.copy_(updated_deep_visual[i])
 
         ######## I->T mapping ########
         text_prompts = torch.cat([self.cross_prompts_text[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)  

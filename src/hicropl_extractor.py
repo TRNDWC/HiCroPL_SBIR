@@ -18,9 +18,14 @@ class HiCroPLFeatureExtractor(nn.Module):
         self.logit_scale = logit_scale
         self.dtype = dtype
 
-    def forward(self, image, classnames, label=None):
+    def forward(self, image, classnames, label=None, prompt_kwargs=None):
+        if prompt_kwargs is None:
+            prompt_kwargs = {}
         # 1. Gọi Prompt Learner 
-        text_input, tokenized_prompts, text_features_fixed_all, cross_prompts_text_deeper, cross_prompts_visual_deeper = self.prompt_learner(classnames)
+        text_input, tokenized_prompts, text_features_fixed_all, cross_prompts_text_deeper, cross_prompts_visual_deeper = self.prompt_learner(
+            classnames,
+            **prompt_kwargs,
+        )
         
         # 2. Đặc trưng Zero-Shot Fixed Image
         with torch.no_grad():

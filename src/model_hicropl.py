@@ -149,13 +149,39 @@ class CustomCLIP(nn.Module):
         Format: [sk_tensor, img_tensor, neg_tensor, sk_aug_tensor, img_aug_tensor, label, filename]
         """
         sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
+
+        sketch_shallow_visual_proxies = self.prompt_learner_sketch.get_shallow_visual_proxies().detach()
+        photo_deep_visual_prompts = [
+            p.detach() for p in self.prompt_learner_photo.get_deep_visual_prompts()
+        ]
         
         # 1. Trích xuất Feature Cốt lõi thông qua Extractor
-        out_p = self.extractor_photo(photo_tensor, classnames)
-        out_s = self.extractor_sketch(sk_tensor, classnames)
+        out_p = self.extractor_photo(
+            photo_tensor,
+            classnames,
+            prompt_kwargs={
+                'external_shallow_visual_proxies': sketch_shallow_visual_proxies,
+                'use_dual_source_shallow': True,
+            },
+        )
+        out_s = self.extractor_sketch(
+            sk_tensor,
+            classnames,
+            prompt_kwargs={
+                'external_deep_visual_prompts': photo_deep_visual_prompts,
+                'residual_photo_to_sketch_deep': True,
+            },
+        )
         
         # Đặc trưng Negative lấy từ nhánh Photo
-        out_neg = self.extractor_photo(neg_tensor, classnames)
+        out_neg = self.extractor_photo(
+            neg_tensor,
+            classnames,
+            prompt_kwargs={
+                'external_shallow_visual_proxies': sketch_shallow_visual_proxies,
+                'use_dual_source_shallow': True,
+            },
+        )
         
         # 2. Visual features: Adapter trước normalize (giống CoPrompt)
         #    dùng prenorm = (norm_learned + fixed) chưa normalize cuối
@@ -295,7 +321,28 @@ class HiCroPL_SBIR(pl.LightningModule):
     def extract_eval_features(self, tensor, modality):
         """Extract visual features: Adapter trước normalize (giống CoPrompt)"""
         extractor = self.model.extractor_photo if modality == 'photo' else self.model.extractor_sketch
-        out = extractor(tensor, self.classnames)
+        if modality == 'photo':
+            sketch_shallow_visual_proxies = self.model.prompt_learner_sketch.get_shallow_visual_proxies().detach()
+            out = extractor(
+                tensor,
+                self.classnames,
+                prompt_kwargs={
+                    'external_shallow_visual_proxies': sketch_shallow_visual_proxies,
+                    'use_dual_source_shallow': True,
+                },
+            )
+        else:
+            photo_deep_visual_prompts = [
+                p.detach() for p in self.model.prompt_learner_photo.get_deep_visual_prompts()
+            ]
+            out = extractor(
+                tensor,
+                self.classnames,
+                prompt_kwargs={
+                    'external_deep_visual_prompts': photo_deep_visual_prompts,
+                    'residual_photo_to_sketch_deep': True,
+                },
+            )
         # dùng prenorm làm input cho adapter, normalize sau
         return self.model.apply_adapter_residual(
             out["image_features_prenorm"], self.model.adapter_photo, self.model.image_adapter_m
