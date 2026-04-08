@@ -290,23 +290,37 @@ class CrossModalPromptLearner(nn.Module):
 
         ######## T->I mapping ########
         visual_prompts = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)
-        visual_prompts_flat = visual_prompts.view(-1, visual_prompts.shape[-1])
         proxy_text_prompts = self.get_early_text_proxies().view(-1, self.ctx_dim)
 
-        updated_by_text = self.text2visual_net(visual_prompts_flat, proxy_text_prompts, proxy_text_prompts)
-        updated_by_text = updated_by_text.view(self.cross_layer, self.n_ctx, self.v_dim)
+        updated_visual_prompts = None
+        if use_dual_source_shallow:
+            if external_shallow_visual_proxies is None:
+                raise ValueError("Dual-source shallow mapping requires external_shallow_visual_proxies")
+            # Split photo shallow prompts into two query groups:
+            # first half asks text proxy, second half asks sketch proxy.
+            split = self.n_ctx // 2
+            if self.n_ctx % 2 != 0:
+                raise ValueError("n_ctx must be even for dual-source shallow split mapping")
 
-        updated_visual_prompts = updated_by_text
-        if use_dual_source_shallow and external_shallow_visual_proxies is not None:
+            query_text_flat = visual_prompts[:, :split, :].contiguous().view(-1, self.v_dim)
+            updated_by_text = self.text2visual_net(query_text_flat, proxy_text_prompts, proxy_text_prompts)
+            updated_by_text = updated_by_text.view(self.cross_layer, split, self.v_dim)
+
             external = external_shallow_visual_proxies.to(
-                device=visual_prompts_flat.device,
-                dtype=visual_prompts_flat.dtype,
+                device=visual_prompts.device,
+                dtype=visual_prompts.dtype,
             ).view(self.cross_layer, self.v_dim)
-            updated_by_sketch = self.sketch2visual_net(visual_prompts_flat, external, external)
-            updated_by_sketch = updated_by_sketch.view(self.cross_layer, self.n_ctx, self.v_dim)
+            query_sketch_flat = visual_prompts[:, split:, :].contiguous().view(-1, self.v_dim)
+            updated_by_sketch = self.sketch2visual_net(query_sketch_flat, external, external)
+            updated_by_sketch = updated_by_sketch.view(self.cross_layer, self.n_ctx - split, self.v_dim)
 
-            concat_prompts = torch.cat([updated_by_text, updated_by_sketch], dim=-1)
-            updated_visual_prompts = self.shallow_concat_fusion(concat_prompts)
+            updated_visual_prompts = visual_prompts.clone()
+            updated_visual_prompts[:, :split, :].copy_(updated_by_text)
+            updated_visual_prompts[:, split:, :].copy_(updated_by_sketch)
+        else:
+            visual_prompts_flat = visual_prompts.view(-1, visual_prompts.shape[-1])
+            updated_by_text = self.text2visual_net(visual_prompts_flat, proxy_text_prompts, proxy_text_prompts)
+            updated_visual_prompts = updated_by_text.view(self.cross_layer, self.n_ctx, self.v_dim)
 
         for i in range(self.cross_layer):
             self.cross_prompts_visual[i].data.copy_(updated_visual_prompts[i])
