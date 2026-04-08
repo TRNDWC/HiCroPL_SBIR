@@ -45,6 +45,12 @@ def batch_structural_loss(prompted_features, semantic_features, labels):
     Match class-level geometry between prompted visual embeddings and
     frozen text embeddings for the classes present in the current batch.
     """
+    # semantic_features may be either:
+    # - [B, d]: already aligned per sample in the batch
+    # - [N_cls, d]: class-level table over seen classes
+    if semantic_features.shape[0] != labels.shape[0]:
+        semantic_features = semantic_features[labels]
+
     return semantic_prototype_loss(prompted_features, semantic_features, labels)
 
 def cross_loss(feature_1, feature_2, temperature):
