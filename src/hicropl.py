@@ -336,8 +336,7 @@ class CrossModalPromptLearner(nn.Module):
             mapped_from_photo = self.photo2sketch_deep_net(own_deep_flat, photo_proxy_prompts, photo_proxy_prompts)
             mapped_from_photo = mapped_from_photo.view(n_deep, self.n_ctx, self.v_dim)
 
-            alpha = self.deep_residual_alpha
-            updated_deep_visual = alpha * mapped_from_photo + (1.0 - alpha) * own_deep_visual
+            updated_deep_visual = mapped_from_photo
             for i in range(n_deep):
                 self.cross_prompts_visual[self.cross_layer + i].data.copy_(updated_deep_visual[i])
 
