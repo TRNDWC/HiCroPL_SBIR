@@ -89,6 +89,6 @@ def loss_fn_hicropl(args, features):
     loss_ce_aug = lambda_ce_aug * (loss_ce_photo_aug + loss_ce_sketch_aug)
 
     # Total loss
-    total_loss = loss_cross_modal + loss_consistency + loss_ce + loss_ce_aug
+    total_loss = loss_cross_modal + loss_ce
 
     return total_loss
