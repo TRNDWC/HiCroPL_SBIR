@@ -11,7 +11,6 @@ from src.hicropl import (
     TextEncoder,
     VisualEncoder,
 )
-from src.hicropl_extractor import HiCroPLFeatureExtractor
 
 
 def freeze_model(m):
@@ -31,7 +30,7 @@ def freeze_all_but_bn(m):
 class CustomCLIP(nn.Module):
     """
     HiCroPL-SBIR Architecture Wrapper.
-    Sử dụng HiCroPLFeatureExtractor làm nòng cốt.
+    Dùng 4 nhánh trực tiếp: text/photo, visual/photo, text/sketch, visual/sketch.
     """
 
     def __init__(self, cfg, clip_model, clip_model_frozen):
@@ -54,17 +53,26 @@ class CustomCLIP(nn.Module):
         clip_photo = copy.deepcopy(clip_model)
         clip_sketch = copy.deepcopy(clip_model)
 
+        # Branch-specific text templates:
+        # photo branch uses "a photo of a", sketch branch uses "a sketch of a".
+        cfg_photo = copy.deepcopy(cfg)
+        cfg_sketch = copy.deepcopy(cfg)
+        photo_ctx_init = getattr(cfg, 'ctx_init_photo', None) or "a photo of a"
+        sketch_ctx_init = getattr(cfg, 'ctx_init_sketch', None) or "a sketch of a"
+        cfg_photo.ctx_init = photo_ctx_init
+        cfg_sketch.ctx_init = sketch_ctx_init
+
         # -- Prompt Learners --
         print("Initializing Photo Prompt Learner...")
         self.prompt_learner_photo = CrossModalPromptLearner(
-            cfg=cfg,
+            cfg=cfg_photo,
             clip_model=clip_photo,
             clip_model_distill=self.clip_model_distill
         )
 
         print("Initializing Sketch Prompt Learner...")
         self.prompt_learner_sketch = CrossModalPromptLearner(
-            cfg=cfg,
+            cfg=cfg_sketch,
             clip_model=clip_sketch,
             clip_model_distill=self.clip_model_distill
         )
@@ -74,22 +82,58 @@ class CustomCLIP(nn.Module):
         self.text_encoder_sketch = TextEncoder(clip_sketch)
         self.visual_encoder_photo = VisualEncoder(clip_photo)
         self.visual_encoder_sketch = VisualEncoder(clip_sketch)
-        
-        # -- Khởi tạo Feature Extractors --
-        self.extractor_photo = HiCroPLFeatureExtractor(
-            prompt_learner=self.prompt_learner_photo,
-            text_encoder=self.text_encoder_photo,
-            image_encoder=self.visual_encoder_photo,
-            logit_scale=self.logit_scale,
-            dtype=self.dtype
+
+    def _forward_branch(
+        self,
+        image,
+        classnames,
+        prompt_learner,
+        text_encoder,
+        image_encoder,
+        label=None,
+    ):
+        text_input, tokenized_prompts, text_features_fixed_all, cross_prompts_text_deeper, cross_prompts_visual_deeper = prompt_learner(
+            classnames,
         )
-        self.extractor_sketch = HiCroPLFeatureExtractor(
-            prompt_learner=self.prompt_learner_sketch,
-            text_encoder=self.text_encoder_sketch,
-            image_encoder=self.visual_encoder_sketch,
-            logit_scale=self.logit_scale,
-            dtype=self.dtype
+
+        with torch.no_grad():
+            image_features_fixed = prompt_learner.ZS_image_encoder(image.type(self.dtype))
+            image_features_fixed = image_features_fixed / image_features_fixed.norm(dim=-1, keepdim=True)
+
+        text_features_all = text_encoder(text_input, tokenized_prompts, cross_prompts_text_deeper)
+        image_features = image_encoder(
+            image.type(self.dtype),
+            prompt_learner.cross_prompts_visual[0],
+            cross_prompts_visual_deeper,
         )
+
+        image_features_norm1 = image_features / image_features.norm(dim=-1, keepdim=True)
+        image_features_prenorm = image_features_norm1 + image_features_fixed
+        image_features_final = image_features_prenorm / image_features_prenorm.norm(dim=-1, keepdim=True)
+
+        text_features_norm1 = text_features_all / text_features_all.norm(dim=-1, keepdim=True)
+        text_features_prenorm_all = text_features_norm1 + text_features_fixed_all
+        text_features_final_all = text_features_prenorm_all / text_features_prenorm_all.norm(dim=-1, keepdim=True)
+
+        if label is not None:
+            text_features_batch = text_features_final_all[label]
+            text_features_prenorm_batch = text_features_prenorm_all[label]
+            text_features_fixed_batch = text_features_fixed_all[label]
+        else:
+            text_features_batch = text_features_final_all
+            text_features_prenorm_batch = text_features_prenorm_all
+            text_features_fixed_batch = text_features_fixed_all
+
+        return {
+            "image_features": image_features_final,
+            "image_features_prenorm": image_features_prenorm,
+            "image_features_fixed": image_features_fixed,
+            "text_features": text_features_batch,
+            "text_features_prenorm": text_features_prenorm_batch,
+            "text_features_fixed": text_features_fixed_batch,
+            "text_features_all": text_features_final_all,
+            "logit_scale": self.logit_scale.exp(),
+        }
 
     def forward(self, x, classnames):
         """
@@ -98,38 +142,30 @@ class CustomCLIP(nn.Module):
         Format: [sk_tensor, img_tensor, neg_tensor, sk_aug_tensor, img_aug_tensor, label, filename]
         """
         sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
-
-        sketch_shallow_visual_proxies = self.prompt_learner_sketch.get_shallow_visual_proxies().detach()
-        photo_deep_visual_prompts = [
-            p.detach() for p in self.prompt_learner_photo.get_deep_visual_prompts()
-        ]
         
-        # 1. Trích xuất Feature Cốt lõi thông qua Extractor
-        out_p = self.extractor_photo(
+        # 1. Trích xuất feature qua 4 nhánh trực tiếp (không qua extractor wrapper)
+        out_p = self._forward_branch(
             photo_tensor,
             classnames,
-            prompt_kwargs={
-                'external_shallow_visual_proxies': sketch_shallow_visual_proxies,
-                'use_dual_source_shallow': True,
-            },
+            prompt_learner=self.prompt_learner_photo,
+            text_encoder=self.text_encoder_photo,
+            image_encoder=self.visual_encoder_photo,
         )
-        out_s = self.extractor_sketch(
+        out_s = self._forward_branch(
             sk_tensor,
             classnames,
-            prompt_kwargs={
-                'external_deep_visual_prompts': photo_deep_visual_prompts,
-                'residual_photo_to_sketch_deep': True,
-            },
+            prompt_learner=self.prompt_learner_sketch,
+            text_encoder=self.text_encoder_sketch,
+            image_encoder=self.visual_encoder_sketch,
         )
         
         # Đặc trưng Negative lấy từ nhánh Photo
-        out_neg = self.extractor_photo(
+        out_neg = self._forward_branch(
             neg_tensor,
             classnames,
-            prompt_kwargs={
-                'external_shallow_visual_proxies': sketch_shallow_visual_proxies,
-                'use_dual_source_shallow': True,
-            },
+            prompt_learner=self.prompt_learner_photo,
+            text_encoder=self.text_encoder_photo,
+            image_encoder=self.visual_encoder_photo,
         )
         
         # 2. Use extractor outputs directly, without adapter residual mixing
@@ -261,29 +297,22 @@ class HiCroPL_SBIR(pl.LightningModule):
         return loss
 
     def extract_eval_features(self, tensor, modality):
-        """Extract visual features directly from the extractor outputs."""
-        extractor = self.model.extractor_photo if modality == 'photo' else self.model.extractor_sketch
+        """Extract visual features directly from four-branch forward path."""
         if modality == 'photo':
-            sketch_shallow_visual_proxies = self.model.prompt_learner_sketch.get_shallow_visual_proxies().detach()
-            out = extractor(
+            out = self.model._forward_branch(
                 tensor,
                 self.classnames,
-                prompt_kwargs={
-                    'external_shallow_visual_proxies': sketch_shallow_visual_proxies,
-                    'use_dual_source_shallow': True,
-                },
+                prompt_learner=self.model.prompt_learner_photo,
+                text_encoder=self.model.text_encoder_photo,
+                image_encoder=self.model.visual_encoder_photo,
             )
         else:
-            photo_deep_visual_prompts = [
-                p.detach() for p in self.model.prompt_learner_photo.get_deep_visual_prompts()
-            ]
-            out = extractor(
+            out = self.model._forward_branch(
                 tensor,
                 self.classnames,
-                prompt_kwargs={
-                    'external_deep_visual_prompts': photo_deep_visual_prompts,
-                    'residual_photo_to_sketch_deep': True,
-                },
+                prompt_learner=self.model.prompt_learner_sketch,
+                text_encoder=self.model.text_encoder_sketch,
+                image_encoder=self.model.visual_encoder_sketch,
             )
         return out["image_features"]
 
