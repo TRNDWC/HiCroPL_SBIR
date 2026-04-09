@@ -11,6 +11,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, RichProgressBar
 
 from src.clip import clip
 from src.model_hicropl import CustomCLIP, HiCroPL_SBIR
+from src.losses_hicropl import compute_text_prototypes
 from src.dataset_retrieval import Sketchy, ValidDataset
 from experiments.options import opts
 
@@ -117,15 +118,28 @@ if __name__ == '__main__':
     )
 
     # 6. Initialize Model
+    # Step 1 (reference): Precompute S_text ONCE using frozen CLIP and the shared
+    # dual-modal prompt. Labels are integer indices into `classnames`, so the
+    # proto matrix rows must be ordered exactly as `classnames`.
+    print("Precomputing text prototype matrix (done once before training)...")
+    text_proto_matrix = compute_text_prototypes(
+        classnames=classnames,
+        clip_text_encoder=clip_model_frozen.encode_text,
+        tokenize_fn=clip.tokenize,
+        device=device,
+        ctx_prefix="a photo or a sketch of",
+    )  # [n_seen, d], float32, detached
+    print(f"text_proto_matrix shape: {text_proto_matrix.shape}")
+
     if ckpt_path is None:
         custom_clip = CustomCLIP(opts, clip_model, clip_model_frozen)
-        model = HiCroPL_SBIR(cfg=opts, args=opts, classnames=classnames, model=custom_clip)
+        model = HiCroPL_SBIR(cfg=opts, args=opts, classnames=classnames, model=custom_clip,
+                             text_proto_matrix=text_proto_matrix)
     else:
         print ('resuming training from %s'%ckpt_path)
-        # Note: Depending on Lightning version, PyTorch Lightning may require the architecture 
-        # to be instantiated before load_from_checkpoint or handle it directly if args are passed correctly.
         custom_clip = CustomCLIP(opts, clip_model, clip_model_frozen)
-        model = HiCroPL_SBIR.load_from_checkpoint(ckpt_path, cfg=opts, args=opts, classnames=classnames, model=custom_clip)
+        model = HiCroPL_SBIR.load_from_checkpoint(ckpt_path, cfg=opts, args=opts, classnames=classnames,
+                                                   model=custom_clip, text_proto_matrix=text_proto_matrix)
 
     print ('\nBeginning training HiCroPL-SBIR... Good luck!')
     trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader], ckpt_path=ckpt_path)

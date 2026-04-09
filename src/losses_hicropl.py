@@ -7,6 +7,47 @@ def _normalize(x):
     return F.normalize(x, dim=-1)
 
 
+def _normalize_matrix(m):
+    """Min-max normalize a matrix to [0, 1] for stable Frobenius comparison."""
+    min_v = m.min()
+    max_v = m.max()
+    return (m - min_v) / (max_v - min_v + 1e-8)
+
+
+def compute_text_prototypes(classnames, clip_text_encoder, tokenize_fn, device,
+                             ctx_prefix="a photo or a sketch of"):
+    """
+    Precompute frozen CLIP text prototype vectors for all seen classes.
+    Call ONCE before training and store the result.
+
+    Args:
+        classnames        : list of seen class name strings
+        clip_text_encoder : callable, e.g. clip_model_distill.encode_text
+        tokenize_fn       : e.g. clip.tokenize
+        device            : torch.device
+        ctx_prefix        : prompt prefix (default "a photo or a sketch of")
+
+    Returns:
+        text_proto_mat : [n_cls, d] unit-norm prototype matrix, detached
+    """
+    text_prototypes = []
+    with torch.no_grad():
+        for cls in classnames:
+            tokens = tokenize_fn(f"{ctx_prefix} {cls}").to(device)
+            feat = clip_text_encoder(tokens)   # [1, d]
+            feat = _normalize(feat)
+            text_prototypes.append(feat)
+    text_proto_mat = torch.cat(text_prototypes, dim=0)   # [n_cls, d]
+    return text_proto_mat.detach()
+
+
+# Keep old name as alias for backward compatibility
+def compute_text_similarity_matrix(classnames, clip_text_encoder, tokenize_fn, device,
+                                    ctx_prefix="a photo or a sketch of"):
+    """Alias for compute_text_prototypes (returns [n_cls, d], not [n_cls, n_cls])."""
+    return compute_text_prototypes(classnames, clip_text_encoder, tokenize_fn, device, ctx_prefix)
+
+
 def _class_prototypes(features, labels):
     unique_labels = torch.unique(labels, sorted=True)
     prototypes = []
@@ -26,6 +67,15 @@ def _class_prototypes(features, labels):
 
 
 def semantic_prototype_loss(visual_features, semantic_features, labels):
+    """
+    Match class-level geometry between visual and text embeddings.
+
+    Follows the reference exactly:
+      1. Compute class centroids: mean in feature space -> normalize to unit sphere
+      2. Build similarity matrices S_prompted [k,k] and S_text [k,k]
+      3. Normalize both matrices to [0, 1] (min-max)
+      4. Loss = ||S_prompted_norm - S_text_norm||^2_F / k^2
+    """
     visual_proto, proto_labels = _class_prototypes(visual_features, labels)
     semantic_proto, semantic_labels = _class_prototypes(semantic_features, labels)
 
@@ -35,20 +85,33 @@ def semantic_prototype_loss(visual_features, semantic_features, labels):
     if not torch.equal(proto_labels, semantic_labels):
         raise ValueError("Visual and semantic prototypes must be aligned by the same class labels.")
 
-    visual_sim = visual_proto @ visual_proto.t()
-    semantic_sim = semantic_proto @ semantic_proto.t()
-    return F.mse_loss(visual_sim, semantic_sim)
+    k = visual_proto.shape[0]
+
+    # Step 2: similarity matrices
+    S_prompted = visual_proto @ visual_proto.t()      # [k, k]
+    S_text_mat = semantic_proto @ semantic_proto.t()  # [k, k]
+
+    # Step 3: normalize both to [0, 1]
+    S_prompted_norm = _normalize_matrix(S_prompted)
+    S_text_norm     = _normalize_matrix(S_text_mat)
+
+    # Step 4: Frobenius norm loss / k^2
+    diff = S_prompted_norm - S_text_norm
+    return torch.norm(diff, p='fro') ** 2 / (k * k)
 
 
 def batch_structural_loss(prompted_features, semantic_features, labels):
     """
     Match class-level geometry between prompted visual embeddings and
     frozen text embeddings for the classes present in the current batch.
+
+    semantic_features can be:
+      - [B, d] : per-sample text features already aligned with batch
+      - [N_cls, d]: full seen-class table (output of compute_text_similarity_matrix
+                    row vectors); rows are indexed by integer label value
     """
-    # semantic_features may be either:
-    # - [B, d]: already aligned per sample in the batch
-    # - [N_cls, d]: class-level table over seen classes
     if semantic_features.shape[0] != labels.shape[0]:
+        # Full table mode: index per-sample features from the class table
         semantic_features = semantic_features[labels]
 
     return semantic_prototype_loss(prompted_features, semantic_features, labels)
@@ -82,16 +145,23 @@ def cross_loss(feature_1, feature_2, temperature):
 
     return F.cross_entropy(logits, labels_target)
 
-def loss_fn_hicropl(args, features):
+def loss_fn_hicropl(args, features, text_proto_matrix=None):
     """
     Combined Loss Function for HiCroPL-SBIR.
-    
+
+    Args:
+        args             : config namespace
+        features         : tuple returned by CustomCLIP.forward()
+        text_proto_matrix: [n_seen, d] precomputed frozen text prototypes
+                           (output of compute_text_prototypes). When provided,
+                           this is used as the structural-loss geometry anchor
+                           instead of the per-batch text_feat_fixed values.
+
     Loss Components:
-    L1: Triplet Loss (sketch, positive_photo, negative_photo) - Retrieval alignment
     L2: InfoNCE Loss (sketch - positive_photo) - Cross-modal alignment
-    L3: InfoNCE Loss (sketch - sketch_aug) + (photo - photo_aug) - Consistency regularization
+    L3: InfoNCE Loss (sketch - sketch_aug) + (photo - photo_aug) - Consistency
     L4: Cross-Entropy Loss (text - photo) + (text - sketch) - Classification
-    L5: Cross-Entropy Loss (text - photo_aug) + (text - sketch_aug) - Augmented Classification
+    L5: Semantic Prototype Anchoring
     """
     (
         photo_feat, logits_photo,
@@ -140,9 +210,15 @@ def loss_fn_hicropl(args, features):
     loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
     # --- L5: Semantic Prototype Anchoring ---
-    # Keep photo and sketch geometry aligned separately; no cross-modality concat here.
-    structural_loss_photo = batch_structural_loss(photo_feat, text_feat_fixed_photo, label)
-    structural_loss_sketch = batch_structural_loss(sketch_feat, text_feat_fixed_sketch, label)
+    # Use precomputed text prototypes [n_seen, d] when available;
+    # else fall back to per-batch fixed text features.
+    if text_proto_matrix is not None:
+        text_proto = text_proto_matrix.to(device)   # [n_seen, d]
+        structural_loss_photo  = batch_structural_loss(photo_feat,  text_proto, label)
+        structural_loss_sketch = batch_structural_loss(sketch_feat, text_proto, label)
+    else:
+        structural_loss_photo  = batch_structural_loss(photo_feat,  text_feat_fixed_photo,  label)
+        structural_loss_sketch = batch_structural_loss(sketch_feat, text_feat_fixed_sketch, label)
     structural_loss = lambda_struct * (structural_loss_photo + structural_loss_sketch)
 
     # --- L5: Cross-Entropy Loss (text - photo_aug) + (text - sketch_aug) ---

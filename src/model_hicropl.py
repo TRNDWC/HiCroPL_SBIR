@@ -202,12 +202,16 @@ class CustomCLIP(nn.Module):
 
 
 class HiCroPL_SBIR(pl.LightningModule):
-    def __init__(self, cfg, args, classnames, model):
+    def __init__(self, cfg, args, classnames, model, text_proto_matrix=None):
         super().__init__()
         self.cfg = cfg
         self.args = args
         self.classnames = classnames
         self.model = model
+        # Precomputed frozen text prototypes [n_seen, d] for structural loss.
+        # Set via compute_text_prototypes() in the entrypoint, or None to fall
+        # back to per-batch text_feat_fixed values.
+        self.text_proto_matrix = text_proto_matrix
         
         self.best_metric = 1e-3
 
@@ -283,9 +287,10 @@ class HiCroPL_SBIR(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         from src.losses_hicropl import loss_fn_hicropl
-        
+
         features = self.model(batch, self.classnames)
-        loss = loss_fn_hicropl(self.args, features)
+        loss = loss_fn_hicropl(self.args, features,
+                               text_proto_matrix=self.text_proto_matrix)
         
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
         self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False, logger=False)
