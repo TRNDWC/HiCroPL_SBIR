@@ -62,8 +62,10 @@ class CustomCLIP(nn.Module):
         )
 
         print("Initializing Sketch Prompt Learner...")
+        cfg_sketch = copy.copy(cfg)
+        setattr(cfg_sketch, 'ctx_init', getattr(cfg, 'ctx_init_sketch', getattr(cfg, 'ctx_init', 'a sketch of a')))
         self.prompt_learner_sketch = CrossModalPromptLearner(
-            cfg=cfg,
+            cfg=cfg_sketch,
             clip_model=clip_sketch,
             clip_model_distill=self.clip_model_distill
         )
