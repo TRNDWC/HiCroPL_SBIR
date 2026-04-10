@@ -71,7 +71,7 @@ parser.add_argument('--lambda_distill', type=float, default=1.0, help='Legacy op
 parser.add_argument('--clip_trainer', type=str, default='HiCroPL', help='Trainer key for CLIP block routing')
 parser.add_argument('--vision_depth', type=int, default=-1, help='Prompted visual depth; -1 means use prompt_depth')
 parser.add_argument('--language_depth', type=int, default=-1, help='Prompted text depth; -1 means use prompt_depth')
-parser.add_argument('--vision_ctx', type=int, default=8, help='Visual prompt token count; -1 means use n_ctx')
-parser.add_argument('--language_ctx', type=int, default=4, help='Text prompt token count; -1 means use n_ctx')
+parser.add_argument('--vision_ctx', type=int, default=-1, help='Visual prompt token count; -1 means use n_ctx')
+parser.add_argument('--language_ctx', type=int, default=-1, help='Text prompt token count; -1 means use n_ctx')
 
 opts = parser.parse_args()

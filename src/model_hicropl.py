@@ -53,26 +53,17 @@ class CustomCLIP(nn.Module):
         clip_photo = copy.deepcopy(clip_model)
         clip_sketch = copy.deepcopy(clip_model)
 
-        # Branch-specific text templates:
-        # photo branch uses "a photo of a", sketch branch uses "a sketch of a".
-        cfg_photo = copy.deepcopy(cfg)
-        cfg_sketch = copy.deepcopy(cfg)
-        photo_ctx_init = getattr(cfg, 'ctx_init_photo', None) or "a photo of a"
-        sketch_ctx_init = getattr(cfg, 'ctx_init_sketch', None) or "a sketch of a"
-        cfg_photo.ctx_init = photo_ctx_init
-        cfg_sketch.ctx_init = sketch_ctx_init
-
         # -- Prompt Learners --
         print("Initializing Photo Prompt Learner...")
         self.prompt_learner_photo = CrossModalPromptLearner(
-            cfg=cfg_photo,
+            cfg=cfg,
             clip_model=clip_photo,
             clip_model_distill=self.clip_model_distill
         )
 
         print("Initializing Sketch Prompt Learner...")
         self.prompt_learner_sketch = CrossModalPromptLearner(
-            cfg=cfg_sketch,
+            cfg=cfg,
             clip_model=clip_sketch,
             clip_model_distill=self.clip_model_distill
         )

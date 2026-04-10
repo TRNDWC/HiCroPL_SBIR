@@ -106,11 +106,7 @@ class CrossModalPromptLearner(nn.Module):
         
         self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
         self.cross_layer = getattr(cfg, 'cross_layer', 4)
-        n_ctx_default = getattr(cfg, 'n_ctx', 4)
-        cfg_language_ctx = getattr(cfg, 'language_ctx', -1)
-        cfg_vision_ctx = getattr(cfg, 'vision_ctx', -1)
-        self.n_ctx_text = cfg_language_ctx if cfg_language_ctx > 0 else n_ctx_default
-        self.n_ctx_visual = cfg_vision_ctx if cfg_vision_ctx > 0 else n_ctx_default
+        n_ctx = getattr(cfg, 'n_ctx', 4)
         ctx_init = getattr(cfg, 'ctx_init', "a photo of a")
         self.dataset_name = getattr(cfg, 'dataset', 'sketchy')
         prec = getattr(cfg, 'prec', "fp32")
@@ -124,8 +120,7 @@ class CrossModalPromptLearner(nn.Module):
         self.ctx_dim = ctx_dim
         self.v_dim = v_dim
 
-        # Keep backward compatibility for any legacy code that still reads n_ctx.
-        self.n_ctx = self.n_ctx_visual
+        self.n_ctx = n_ctx
         self.ctx_init_text = ctx_init
         self.dtype = dtype
         self.token_embedding = clip_model.token_embedding
@@ -135,7 +130,7 @@ class CrossModalPromptLearner(nn.Module):
         self.clip_model_distill = clip_model_distill if clip_model_distill is not None else clip_model
 
         ######## cross-modal text token initialization ########
-        if ctx_init and self.n_ctx_text <= 4:
+        if ctx_init and self.n_ctx <= 4:
             ctx_init_clean = ctx_init.replace("_", " ")
             from src.clip import clip as _clip
             prompt = _clip.tokenize(ctx_init_clean)
@@ -143,22 +138,22 @@ class CrossModalPromptLearner(nn.Module):
             prompt = prompt.to(text_device)
             with torch.no_grad():
                 embedding = clip_model.token_embedding(prompt).type(dtype)
-            ctx_vectors = embedding[0, 1: 1 + self.n_ctx_text, :]
+            ctx_vectors = embedding[0, 1: 1 + self.n_ctx, :]
         else:
-            ctx_vectors = torch.empty(self.n_ctx_text, ctx_dim, dtype=dtype)
+            ctx_vectors = torch.empty(self.n_ctx, ctx_dim, dtype=dtype)
             nn.init.normal_(ctx_vectors, std=0.02)
 
         self.ctx = nn.Parameter(ctx_vectors)
         cross_prompts_text = nn.ParameterList(
             [self.ctx] +
-            [nn.Parameter(torch.empty(self.n_ctx_text, 512, dtype=dtype)) for _ in range(self.prompt_depth - 1)]
+            [nn.Parameter(torch.empty(self.n_ctx, 512, dtype=dtype)) for _ in range(self.prompt_depth - 1)]
         )
         for single_para in cross_prompts_text[1:]:
             nn.init.normal_(single_para, std=0.02)
         self.cross_prompts_text = cross_prompts_text
 
         ######## cross-modal visual token initialization ########
-        visual_vectors = torch.empty(self.n_ctx_visual, v_dim, dtype=dtype)
+        visual_vectors = torch.empty(self.n_ctx, v_dim, dtype=dtype)
         nn.init.normal_(visual_vectors, std=0.02)
         cross_prompts_visual = nn.ParameterList([nn.Parameter(visual_vectors) for _ in range(self.prompt_depth)])
         self.cross_prompts_visual = cross_prompts_visual
@@ -212,7 +207,7 @@ class CrossModalPromptLearner(nn.Module):
         device = self.cross_prompts_text[0].device
         
         classnames_clean = [name.replace("_", " ") for name in classnames]
-        prompt_prefix = self.ctx_init_text if self.ctx_init_text else " ".join(["X"] * self.n_ctx_text)
+        prompt_prefix = self.ctx_init_text if self.ctx_init_text else " ".join(["X"] * self.n_ctx)
         raw_prompts = [prompt_prefix + " " + name + "." for name in classnames_clean]
         
         from src.clip import clip as _clip
@@ -222,7 +217,7 @@ class CrossModalPromptLearner(nn.Module):
             embedding = self.token_embedding(tokenized_prompts).type(self.dtype)  
             
         token_prefix = embedding[:, :1, :]
-        token_suffix = embedding[:, 1 + self.n_ctx_text:, :]
+        token_suffix = embedding[:, 1 + self.n_ctx:, :]
         
         ctx = self.cross_prompts_text[0]
         if ctx.dim() == 2:
@@ -266,7 +261,7 @@ class CrossModalPromptLearner(nn.Module):
 
         visual_prompts_flat = visual_prompts.view(-1, visual_prompts.shape[-1])
         updated_by_text = self.text2visual_net(visual_prompts_flat, proxy_text_prompts, proxy_text_prompts)
-        updated_visual_prompts = updated_by_text.view(self.cross_layer, self.n_ctx_visual, self.v_dim)
+        updated_visual_prompts = updated_by_text.view(self.cross_layer, -1, updated_by_text.shape[-1])
 
         for i in range(self.cross_layer):
             self.cross_prompts_visual[i].data.copy_(updated_visual_prompts[i])
@@ -286,11 +281,7 @@ class CrossModalPromptLearner(nn.Module):
         text_prompts = text_prompts.view(-1, text_prompts.shape[-1])  
         proxy_visual_prompts = proxy_visual_prompts.view(-1, proxy_visual_prompts.shape[-1])  
         updated_text_prompts = self.visual2text_net(text_prompts, proxy_visual_prompts, proxy_visual_prompts)  
-        updated_text_prompts = updated_text_prompts.view(
-            self.prompt_depth - self.cross_layer,
-            self.n_ctx_text,
-            updated_text_prompts.shape[-1],
-        )
+        updated_text_prompts = updated_text_prompts.view(self.prompt_depth - self.cross_layer, -1, updated_text_prompts.shape[-1])
         for i in range(self.cross_layer, self.prompt_depth):
             self.cross_prompts_text[i].data.copy_(updated_text_prompts[i - self.cross_layer])
 
