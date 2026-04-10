@@ -167,8 +167,7 @@ def loss_fn_hicropl(args, features):
     lambda_consistency = getattr(args, 'lambda_consistency', 1.0)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
     lambda_ce_aug = getattr(args, 'lambda_ce_aug', 1.0)
-    lambda_struct_photo = getattr(args, 'lambda_struct_photo', 0.1)
-    lambda_struct_sketch = getattr(args, 'lambda_struct_sketch', 0.1)
+    lambda_struct = getattr(args, 'lambda_struct', 0.1)
     triplet_margin = getattr(args, 'triplet_margin', 0.3)
 
     # --- L1: Triplet Loss (sketch, positive_photo, negative_photo) ---
@@ -203,8 +202,7 @@ def loss_fn_hicropl(args, features):
         labels=label,
         multimodal_text_similarity_matrix=text_similarity_multimodal,
     )
-    lambda_struct_mm = 0.5 * (lambda_struct_photo + lambda_struct_sketch)
-    loss_struct = lambda_struct_mm * loss_struct_mm
+    loss_struct = lambda_struct * loss_struct_mm
 
     # --- L6: Cross-Entropy Loss (text - photo_aug) + (text - sketch_aug) ---
     # loss_ce_photo_aug = F.cross_entropy(logits_photo_aug, label)
