@@ -118,21 +118,16 @@ if __name__ == '__main__':
     )
 
     # 6. Initialize Model
-    print("Precomputing modality-specific text similarity matrices (done once before training)...")
-    text_similarity_photo = compute_text_similarity_matrix(
+    print("Precomputing ONE shared text similarity matrix (done once before training)...")
+    shared_text_similarity = compute_text_similarity_matrix(
         classnames=classnames,
         clip_text_encoder=clip_model_frozen.encode_text,
         tokenize_fn=clip.tokenize,
         device=device,
-        prompt_template="a photo of a {cls}",
+        prompt_template="a photo or a sketch of a {cls}",
     )
-    text_similarity_sketch = compute_text_similarity_matrix(
-        classnames=classnames,
-        clip_text_encoder=clip_model_frozen.encode_text,
-        tokenize_fn=clip.tokenize,
-        device=device,
-        prompt_template="a sketch of a {cls}",
-    )
+    text_similarity_photo = shared_text_similarity
+    text_similarity_sketch = shared_text_similarity
     print(f"text_similarity_photo shape: {text_similarity_photo.shape}")
     print(f"text_similarity_sketch shape: {text_similarity_sketch.shape}")
 
