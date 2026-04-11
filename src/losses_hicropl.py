@@ -42,69 +42,27 @@ def compute_structural_loss(prompted_features: torch.Tensor,
     return structural_loss
 
 
-def build_multimodal_text_similarity_matrix(photo_text_prototypes: torch.Tensor,
-                                            sketch_text_prototypes: torch.Tensor) -> torch.Tensor:
-    """Build a 2Kx2K target map from photo/sketch text prototypes."""
-    photo_text = F.normalize(photo_text_prototypes, dim=-1, eps=1e-8)
-    sketch_text = F.normalize(sketch_text_prototypes, dim=-1, eps=1e-8)
-
-    photo_photo = photo_text @ photo_text.t()
-    photo_sketch = photo_text @ sketch_text.t()
-    sketch_photo = sketch_text @ photo_text.t()
-    sketch_sketch = sketch_text @ sketch_text.t()
-
-    top = torch.cat([photo_photo, photo_sketch], dim=1)
-    bottom = torch.cat([sketch_photo, sketch_sketch], dim=1)
-    return torch.cat([top, bottom], dim=0)
-
-
-def compute_multimodal_structural_loss(photo_features: torch.Tensor,
-                                       sketch_features: torch.Tensor,
-                                       labels: torch.Tensor,
-                                       multimodal_text_similarity_matrix: torch.Tensor) -> torch.Tensor:
-    """Match 2Kx2K model geometry (photo+sketch) to 2Kx2K text-guided target map."""
-    if photo_features.numel() == 0 or sketch_features.numel() == 0:
-        return photo_features.new_tensor(0.0)
-
-    labels = labels.to(photo_features.device).long()
-    unique_classes = torch.unique(labels, sorted=True)
-    if unique_classes.numel() < 2:
-        return photo_features.new_tensor(0.0)
-
-    photo_centroids = []
-    sketch_centroids = []
-    for cls_idx in unique_classes:
-        cls_mask = labels == cls_idx
-        photo_centroids.append(photo_features[cls_mask].mean(dim=0))
-        sketch_centroids.append(sketch_features[cls_mask].mean(dim=0))
-
-    photo_centroids = F.normalize(torch.stack(photo_centroids, dim=0), dim=1, eps=1e-8)
-    sketch_centroids = F.normalize(torch.stack(sketch_centroids, dim=0), dim=1, eps=1e-8)
-
-    model_nodes = torch.cat([photo_centroids, sketch_centroids], dim=0)
-    model_similarity = model_nodes @ model_nodes.t()
-
-    n_classes_total = multimodal_text_similarity_matrix.shape[0] // 2
-    target_indices = torch.cat([
-        unique_classes,
-        unique_classes + n_classes_total,
-    ], dim=0)
-    target_similarity = multimodal_text_similarity_matrix.index_select(0, target_indices)
-    target_similarity = target_similarity.index_select(1, target_indices)
-
-    model_similarity = _min_max_normalize_matrix(model_similarity)
-    target_similarity = _min_max_normalize_matrix(target_similarity)
-
-    n = model_similarity.shape[0]
-    structural_loss = torch.norm(model_similarity - target_similarity, p='fro') ** 2
-    structural_loss = structural_loss / (n * n)
-    return structural_loss
-
-
 def build_text_similarity_matrix(text_prototypes: torch.Tensor) -> torch.Tensor:
     """Build a cosine similarity matrix from frozen text prototypes."""
     normalized = F.normalize(text_prototypes, dim=-1, eps=1e-8)
     return normalized @ normalized.t()
+
+
+def compute_text_similarity_matrix(classnames,
+                                   clip_text_encoder,
+                                   tokenize_fn,
+                                   device,
+                                   prompt_template: str) -> torch.Tensor:
+    """Precompute a modality-specific text similarity matrix over seen classes."""
+    text_prototypes = []
+    with torch.no_grad():
+        for cls in classnames:
+            tokens = tokenize_fn(prompt_template.format(cls=cls)).to(device)
+            text_feat = clip_text_encoder(tokens)
+            text_prototypes.append(F.normalize(text_feat, dim=-1, eps=1e-8))
+
+    text_prototypes = torch.cat(text_prototypes, dim=0)
+    return build_text_similarity_matrix(text_prototypes).detach()
 
 def cross_loss(feature_1, feature_2, temperature):
     device = feature_1.device
@@ -135,7 +93,10 @@ def cross_loss(feature_1, feature_2, temperature):
 
     return F.cross_entropy(logits, labels_target)
 
-def loss_fn_hicropl(args, features):
+def loss_fn_hicropl(args,
+                    features,
+                    text_similarity_photo: torch.Tensor = None,
+                    text_similarity_sketch: torch.Tensor = None):
     """
     Combined Loss Function for HiCroPL-SBIR.
     
@@ -191,18 +152,35 @@ def loss_fn_hicropl(args, features):
     loss_ce_sketch = F.cross_entropy(logits_sketch, label)
     loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
-    # --- L5: Multi-modal structural anchoring via 2Kx2K text target map ---
-    text_similarity_multimodal = build_multimodal_text_similarity_matrix(
-        photo_text_prototypes=text_feat_fixed_photo,
-        sketch_text_prototypes=text_feat_fixed_sketch,
-    )
-    loss_struct_mm = compute_multimodal_structural_loss(
-        photo_features=photo_feat,
-        sketch_features=sketch_feat,
+    # --- L5: Modality-specific structural anchoring ---
+    lambda_struct_photo = getattr(args, 'lambda_struct_photo', None)
+    lambda_struct_sketch = getattr(args, 'lambda_struct_sketch', None)
+    if lambda_struct_photo is None:
+        lambda_struct_photo = lambda_struct
+    if lambda_struct_sketch is None:
+        lambda_struct_sketch = lambda_struct
+
+    if text_similarity_photo is None:
+        text_similarity_photo = build_text_similarity_matrix(text_feat_fixed_photo)
+    else:
+        text_similarity_photo = text_similarity_photo.to(device)
+
+    if text_similarity_sketch is None:
+        text_similarity_sketch = build_text_similarity_matrix(text_feat_fixed_sketch)
+    else:
+        text_similarity_sketch = text_similarity_sketch.to(device)
+
+    loss_struct_photo = compute_structural_loss(
+        prompted_features=photo_feat,
         labels=label,
-        multimodal_text_similarity_matrix=text_similarity_multimodal,
+        text_similarity_matrix=text_similarity_photo,
     )
-    loss_struct = lambda_struct * loss_struct_mm
+    loss_struct_sketch = compute_structural_loss(
+        prompted_features=sketch_feat,
+        labels=label,
+        text_similarity_matrix=text_similarity_sketch,
+    )
+    loss_struct = lambda_struct_photo * loss_struct_photo + lambda_struct_sketch * loss_struct_sketch
 
     # --- L6: Cross-Entropy Loss (text - photo_aug) + (text - sketch_aug) ---
     # loss_ce_photo_aug = F.cross_entropy(logits_photo_aug, label)
@@ -210,6 +188,6 @@ def loss_fn_hicropl(args, features):
     # loss_ce_aug = lambda_ce_aug * (loss_ce_photo_aug + loss_ce_sketch_aug)
 
     # Total loss
-    total_loss = loss_cross_modal + loss_ce + loss_struct
+    total_loss = loss_cross_modal + loss_struct
 
     return total_loss

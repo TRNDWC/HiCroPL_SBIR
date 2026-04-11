@@ -204,12 +204,16 @@ class CustomCLIP(nn.Module):
 
 
 class HiCroPL_SBIR(pl.LightningModule):
-    def __init__(self, cfg, args, classnames, model):
+    def __init__(self, cfg, args, classnames, model,
+                 text_similarity_photo=None,
+                 text_similarity_sketch=None):
         super().__init__()
         self.cfg = cfg
         self.args = args
         self.classnames = classnames
         self.model = model
+        self.text_similarity_photo = text_similarity_photo
+        self.text_similarity_sketch = text_similarity_sketch
         
         self.best_metric = 1e-3
 
@@ -282,7 +286,12 @@ class HiCroPL_SBIR(pl.LightningModule):
         from src.losses_hicropl import loss_fn_hicropl
         
         features = self.model(batch, self.classnames)
-        loss = loss_fn_hicropl(self.args, features)
+        loss = loss_fn_hicropl(
+            self.args,
+            features,
+            text_similarity_photo=self.text_similarity_photo,
+            text_similarity_sketch=self.text_similarity_sketch,
+        )
         
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
         self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False, logger=False)

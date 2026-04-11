@@ -12,6 +12,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, RichProgressBar
 from src.clip import clip
 from src.model_hicropl import CustomCLIP, HiCroPL_SBIR
 from src.dataset_retrieval import Sketchy, ValidDataset
+from src.losses_hicropl import compute_text_similarity_matrix
 from experiments.options import opts
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -117,15 +118,48 @@ if __name__ == '__main__':
     )
 
     # 6. Initialize Model
+    print("Precomputing modality-specific text similarity matrices (done once before training)...")
+    text_similarity_photo = compute_text_similarity_matrix(
+        classnames=classnames,
+        clip_text_encoder=clip_model_frozen.encode_text,
+        tokenize_fn=clip.tokenize,
+        device=device,
+        prompt_template="a photo of a {cls}",
+    )
+    text_similarity_sketch = compute_text_similarity_matrix(
+        classnames=classnames,
+        clip_text_encoder=clip_model_frozen.encode_text,
+        tokenize_fn=clip.tokenize,
+        device=device,
+        prompt_template="a sketch of a {cls}",
+    )
+    print(f"text_similarity_photo shape: {text_similarity_photo.shape}")
+    print(f"text_similarity_sketch shape: {text_similarity_sketch.shape}")
+
     if ckpt_path is None:
         custom_clip = CustomCLIP(opts, clip_model, clip_model_frozen)
-        model = HiCroPL_SBIR(cfg=opts, args=opts, classnames=classnames, model=custom_clip)
+        model = HiCroPL_SBIR(
+            cfg=opts,
+            args=opts,
+            classnames=classnames,
+            model=custom_clip,
+            text_similarity_photo=text_similarity_photo,
+            text_similarity_sketch=text_similarity_sketch,
+        )
     else:
         print ('resuming training from %s'%ckpt_path)
         # Note: Depending on Lightning version, PyTorch Lightning may require the architecture 
         # to be instantiated before load_from_checkpoint or handle it directly if args are passed correctly.
         custom_clip = CustomCLIP(opts, clip_model, clip_model_frozen)
-        model = HiCroPL_SBIR.load_from_checkpoint(ckpt_path, cfg=opts, args=opts, classnames=classnames, model=custom_clip)
+        model = HiCroPL_SBIR.load_from_checkpoint(
+            ckpt_path,
+            cfg=opts,
+            args=opts,
+            classnames=classnames,
+            model=custom_clip,
+            text_similarity_photo=text_similarity_photo,
+            text_similarity_sketch=text_similarity_sketch,
+        )
 
     print ('\nBeginning training HiCroPL-SBIR... Good luck!')
     trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader], ckpt_path=ckpt_path)
