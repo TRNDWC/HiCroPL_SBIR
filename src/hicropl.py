@@ -147,7 +147,6 @@ class CrossModalPromptLearner(nn.Module):
         v_dim = 768
         self.ctx_dim = ctx_dim
         self.v_dim = v_dim
-        self.photo_token_split = max(1, self.n_ctx_photo // 2)
 
         # Backward-compatible defaults map to photo branch values.
         self.prompt_depth = self.prompt_depth_photo
@@ -202,7 +201,8 @@ class CrossModalPromptLearner(nn.Module):
 
         self.text2visual_net_photo = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=ctx_dim, num_attention_heads=8)
         self.visual2text_net_photo = CrossPromptAttention(hidden_size=ctx_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
-        self.photo_tail_from_sketch_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
+        self.sketch2visual_net_photo = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
+        self.gate_alpha = nn.Parameter(torch.tensor(0.01, dtype=dtype))
 
         attn_pooling_text_photo = AttentionPooling(hidden_size=ctx_dim, num_attention_heads=8)
         self.attn_pooling_text_nets_photo = _get_clones(attn_pooling_text_photo, self.cross_layer_photo)
@@ -252,7 +252,8 @@ class CrossModalPromptLearner(nn.Module):
         if self.prec_photo == "fp16":
             self.text2visual_net_photo = self.text2visual_net_photo.half()
             self.visual2text_net_photo = self.visual2text_net_photo.half()
-            self.photo_tail_from_sketch_net = self.photo_tail_from_sketch_net.half()
+            self.sketch2visual_net_photo = self.sketch2visual_net_photo.half()
+            self.gate_alpha = nn.Parameter(self.gate_alpha.data.half())
             self.attn_pooling_text_nets_photo = self.attn_pooling_text_nets_photo.half()
             self.attn_pooling_visual_nets_photo = self.attn_pooling_visual_nets_photo.half()
 
@@ -379,15 +380,24 @@ class CrossModalPromptLearner(nn.Module):
             return self.cross_prompts_visual_sketch[0]
         raise ValueError(f"Unknown modality: {modality}")
 
-    def _split_photo_visual_tokens(self, visual_tokens):
-        head_tokens = visual_tokens[:self.photo_token_split]
-        tail_tokens = visual_tokens[self.photo_token_split:]
-        return head_tokens, tail_tokens
+    def _build_external_shallow_visual_proxies_from_sketch(self, device, dtype):
+        """Build sketch shallow proxies as [cross_layer_photo, v_dim] for additive injection."""
+        if self.cross_layer_sketch == 0:
+            base = torch.zeros((1, self.v_dim), device=device, dtype=dtype)
+        else:
+            proxies = []
+            for i in range(self.cross_layer_sketch):
+                # Summarize each shallow sketch layer into one proxy vector.
+                proxies.append(self.cross_prompts_visual_sketch[i].mean(dim=0, keepdim=True))
+            base = torch.cat(proxies, dim=0).to(device=device, dtype=dtype)
 
-    def _merge_photo_visual_tokens(self, head_tokens, tail_tokens):
-        if tail_tokens.numel() == 0:
-            return head_tokens
-        return torch.cat([head_tokens, tail_tokens], dim=0)
+        if base.shape[0] == self.cross_layer_photo:
+            return base
+        if base.shape[0] > self.cross_layer_photo:
+            return base[:self.cross_layer_photo]
+
+        repeat_factor = (self.cross_layer_photo + base.shape[0] - 1) // base.shape[0]
+        return base.repeat(repeat_factor, 1)[:self.cross_layer_photo]
 
     def _build_branch_output(self, classnames, modality):
         text_input, tokenized_prompts, fixed_embeddings = self._prepare_dynamic_classnames(classnames, modality)
@@ -431,7 +441,6 @@ class CrossModalPromptLearner(nn.Module):
             visual_proxy_tokens = self.visual_proxy_tokens_photo
             cross_layer = self.cross_layer_photo
             prompt_depth = self.prompt_depth_photo
-            peer_visual_prompts = self.cross_prompts_visual_sketch
         elif modality == "sketch":
             cross_prompts_text = self.cross_prompts_text_sketch
             cross_prompts_visual = self.cross_prompts_visual_sketch
@@ -441,7 +450,6 @@ class CrossModalPromptLearner(nn.Module):
             visual_proxy_tokens = self.visual_proxy_tokens_sketch
             cross_layer = self.cross_layer_sketch
             prompt_depth = self.prompt_depth_sketch
-            peer_visual_prompts = None
         else:
             raise ValueError(f"Unknown modality: {modality}")
 
@@ -449,31 +457,33 @@ class CrossModalPromptLearner(nn.Module):
 
         ######## T->I mapping ########
         if modality == "photo":
+            visual_prompts = torch.cat([cross_prompts_visual[i].unsqueeze(0) for i in range(cross_layer)], dim=0)
             proxy_text_prompts = self.get_early_text_proxies(modality).view(-1, self.ctx_dim)
+            visual_prompts_flat = visual_prompts.view(-1, visual_prompts.shape[-1])
+
+            # Preserve the baseline full text->visual update.
+            updated_by_text = text2visual_net(
+                visual_prompts_flat,
+                proxy_text_prompts,
+                proxy_text_prompts,
+            )
+            updated_by_text = updated_by_text.view(cross_layer, self.n_ctx_photo, self.v_dim)
+
+            # Add sketch knowledge as a gated residual.
+            external_shallow_visual_proxies = self._build_external_shallow_visual_proxies_from_sketch(
+                device=visual_prompts.device,
+                dtype=visual_prompts.dtype,
+            )
+            sketch_contribution = self.sketch2visual_net_photo(
+                visual_prompts_flat,
+                external_shallow_visual_proxies,
+                external_shallow_visual_proxies,
+            )
+            sketch_contribution = sketch_contribution.view(cross_layer, self.n_ctx_photo, self.v_dim)
+
+            updated_visual_prompts = updated_by_text + self.gate_alpha.to(dtype=visual_prompts.dtype) * sketch_contribution
             for i in range(cross_layer):
-                visual_tokens = cross_prompts_visual[i]
-                photo_head_tokens, photo_tail_tokens = self._split_photo_visual_tokens(visual_tokens)
-
-                updated_photo_head = text2visual_net(photo_head_tokens, proxy_text_prompts, proxy_text_prompts)
-
-                if peer_visual_prompts is not None:
-                    peer_index = min(i, len(peer_visual_prompts) - 1)
-                    peer_tokens = peer_visual_prompts[peer_index]
-                    if peer_tokens.shape[0] >= photo_tail_tokens.shape[0]:
-                        peer_source = peer_tokens[: photo_tail_tokens.shape[0]]
-                    else:
-                        repeat_factor = (photo_tail_tokens.shape[0] + peer_tokens.shape[0] - 1) // peer_tokens.shape[0]
-                        peer_source = peer_tokens.repeat(repeat_factor, 1)[: photo_tail_tokens.shape[0]]
-                    updated_photo_tail = self.photo_tail_from_sketch_net(
-                        photo_tail_tokens,
-                        peer_source,
-                        peer_source,
-                    )
-                else:
-                    updated_photo_tail = photo_tail_tokens
-
-                updated_visual_prompts = self._merge_photo_visual_tokens(updated_photo_head, updated_photo_tail)
-                cross_prompts_visual[i].data.copy_(updated_visual_prompts)
+                cross_prompts_visual[i].data.copy_(updated_visual_prompts[i])
         else:
             visual_prompts = torch.cat([cross_prompts_visual[i].unsqueeze(0) for i in range(cross_layer)], dim=0)
             proxy_text_prompts = self.get_early_text_proxies(modality).view(-1, self.ctx_dim)
