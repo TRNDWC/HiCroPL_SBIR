@@ -234,6 +234,8 @@ class CrossModalPromptLearner(nn.Module):
         self.text2visual_net_sketch = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=ctx_dim, num_attention_heads=8)
         self.visual2text_net_sketch = CrossPromptAttention(hidden_size=ctx_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
         self.photo_to_sketch_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
+        self.gate_beta = nn.Parameter(torch.tensor(0.01, dtype=dtype))
+        self.gate_gamma = nn.Parameter(torch.tensor(0.01, dtype=dtype))
 
         attn_pooling_text_sketch = AttentionPooling(hidden_size=ctx_dim, num_attention_heads=8)
         self.attn_pooling_text_nets_sketch = _get_clones(attn_pooling_text_sketch, self.cross_layer_sketch)
@@ -408,20 +410,73 @@ class CrossModalPromptLearner(nn.Module):
 
         return text_input, tokenized_prompts, fixed_embeddings, cross_prompts_text_deeper, cross_prompts_visual_deeper
 
-    def _apply_photo_to_sketch_deep_flow(self):
-        """Update sketch deep visual prompts using the already-updated photo prompts."""
+    def _build_sketch_deep_proxy_from_snapshot(self, sketch_visual_snapshot):
+        proxy_visual_tokens = []
         for i in range(self.cross_layer_sketch, self.prompt_depth_sketch):
+            layer_offset = i - self.cross_layer_sketch
+            visual_proxy_token = self.attn_pooling_visual_nets_sketch[layer_offset](
+                token_query=self.visual_proxy_tokens_sketch[layer_offset],
+                sequence_key=sketch_visual_snapshot[layer_offset],
+                sequence_value=sketch_visual_snapshot[layer_offset]
+            )
+            proxy_visual_tokens.append(visual_proxy_token)
+        return torch.cat(proxy_visual_tokens, dim=0)
+
+    def _apply_parallel_deep_flow(self):
+        """Fix 3: apply photo->sketch and sketch->text deep updates in parallel from snapshots."""
+        deep_start = self.cross_layer_sketch
+        deep_end = self.prompt_depth_sketch
+        if deep_start >= deep_end:
+            return
+
+        sketch_visual_snapshot = [
+            self.cross_prompts_visual_sketch[i].clone()
+            for i in range(deep_start, deep_end)
+        ]
+        sketch_text_snapshot = [
+            self.cross_prompts_text_sketch[i].clone()
+            for i in range(deep_start, deep_end)
+        ]
+
+        sketch_updates = []
+        for i in range(deep_start, deep_end):
+            layer_offset = i - deep_start
+            # Deterministic alignment policy: clamp to photo deepest layer if depths differ.
             photo_index = min(i, self.prompt_depth_photo - 1)
             photo_source = self.cross_prompts_visual_photo[photo_index]
-            sketch_target = self.cross_prompts_visual_sketch[i]
-            updated_sketch = self.photo_to_sketch_net(
-                sketch_target,
-                photo_source,
-                photo_source,
-            )
-            self.cross_prompts_visual_sketch[i].data.copy_(updated_sketch)
+            sketch_query = sketch_visual_snapshot[layer_offset]
+            updated_sketch = self.photo_to_sketch_net(sketch_query, photo_source, photo_source)
+            sketch_updates.append(updated_sketch)
 
-    def _forward_single_modality(self, classnames, modality):
+        sketch_proxy_prompts = self._build_sketch_deep_proxy_from_snapshot(sketch_visual_snapshot)
+        sketch_text_prompts = torch.cat([x.unsqueeze(0) for x in sketch_text_snapshot], dim=0)
+        sketch_text_prompts = sketch_text_prompts.view(-1, sketch_text_prompts.shape[-1])
+        updated_text_prompts = self.visual2text_net_sketch(
+            sketch_text_prompts,
+            sketch_proxy_prompts,
+            sketch_proxy_prompts
+        )
+        updated_text_prompts = updated_text_prompts.view(
+            deep_end - deep_start,
+            -1,
+            updated_text_prompts.shape[-1]
+        )
+
+        for i in range(deep_start, deep_end):
+            layer_offset = i - deep_start
+            original_sketch = sketch_visual_snapshot[layer_offset]
+            original_text = sketch_text_snapshot[layer_offset]
+
+            sketch_residual = sketch_updates[layer_offset] - original_sketch
+            text_residual = updated_text_prompts[layer_offset] - original_text
+
+            sketch_new = original_sketch + self.gate_beta * sketch_residual
+            text_new = original_text + self.gate_gamma * text_residual
+
+            self.cross_prompts_visual_sketch[i].data.copy_(sketch_new)
+            self.cross_prompts_text_sketch[i].data.copy_(text_new)
+
+    def _forward_single_modality(self, classnames, modality, apply_deep_i2t=True):
         if modality == "photo":
             cross_prompts_text = self.cross_prompts_text_photo
             cross_prompts_visual = self.cross_prompts_visual_photo
@@ -486,23 +541,24 @@ class CrossModalPromptLearner(nn.Module):
                 cross_prompts_visual[i].data.copy_(updated_visual_prompts[i])
 
         ######## I->T mapping ########
-        text_prompts = torch.cat([cross_prompts_text[i].unsqueeze(0) for i in range(cross_layer, prompt_depth)], dim=0)
-        visual_prompts = torch.cat([cross_prompts_visual[i].unsqueeze(0) for i in range(cross_layer, prompt_depth)], dim=0)
-        proxy_visual_tokens = []
-        for i in range(cross_layer, prompt_depth):
-            visual_proxy_token = attn_pooling_visual_nets[i - cross_layer](
-                token_query=visual_proxy_tokens[i - cross_layer],
-                sequence_key=cross_prompts_visual[i],
-                sequence_value=cross_prompts_visual[i]
-            )
-            proxy_visual_tokens.append(visual_proxy_token)
-            proxy_visual_prompts = torch.cat(proxy_visual_tokens, dim=0)
-        text_prompts = text_prompts.view(-1, text_prompts.shape[-1])
-        proxy_visual_prompts = proxy_visual_prompts.view(-1, proxy_visual_prompts.shape[-1])
-        updated_text_prompts = visual2text_net(text_prompts, proxy_visual_prompts, proxy_visual_prompts)
-        updated_text_prompts = updated_text_prompts.view(prompt_depth - cross_layer, -1, updated_text_prompts.shape[-1])
-        for i in range(cross_layer, prompt_depth):
-            cross_prompts_text[i].data.copy_(updated_text_prompts[i - cross_layer])
+        if apply_deep_i2t:
+            text_prompts = torch.cat([cross_prompts_text[i].unsqueeze(0) for i in range(cross_layer, prompt_depth)], dim=0)
+            visual_prompts = torch.cat([cross_prompts_visual[i].unsqueeze(0) for i in range(cross_layer, prompt_depth)], dim=0)
+            proxy_visual_tokens = []
+            for i in range(cross_layer, prompt_depth):
+                visual_proxy_token = attn_pooling_visual_nets[i - cross_layer](
+                    token_query=visual_proxy_tokens[i - cross_layer],
+                    sequence_key=cross_prompts_visual[i],
+                    sequence_value=cross_prompts_visual[i]
+                )
+                proxy_visual_tokens.append(visual_proxy_token)
+                proxy_visual_prompts = torch.cat(proxy_visual_tokens, dim=0)
+            text_prompts = text_prompts.view(-1, text_prompts.shape[-1])
+            proxy_visual_prompts = proxy_visual_prompts.view(-1, proxy_visual_prompts.shape[-1])
+            updated_text_prompts = visual2text_net(text_prompts, proxy_visual_prompts, proxy_visual_prompts)
+            updated_text_prompts = updated_text_prompts.view(prompt_depth - cross_layer, -1, updated_text_prompts.shape[-1])
+            for i in range(cross_layer, prompt_depth):
+                cross_prompts_text[i].data.copy_(updated_text_prompts[i - cross_layer])
 
         cross_prompts_text_deeper = [cross_prompts_text[i] for i in range(1, len(cross_prompts_text))]
         cross_prompts_visual_deeper = [cross_prompts_visual[i] for i in range(1, len(cross_prompts_visual))]
@@ -510,9 +566,9 @@ class CrossModalPromptLearner(nn.Module):
         return text_input, tokenized_prompts, fixed_embeddings, cross_prompts_text_deeper, cross_prompts_visual_deeper
 
     def forward_all(self, classnames):
-        sketch_outputs = self._forward_single_modality(classnames, "sketch")
+        sketch_outputs = self._forward_single_modality(classnames, "sketch", apply_deep_i2t=False)
         photo_outputs = self._forward_single_modality(classnames, "photo")
-        self._apply_photo_to_sketch_deep_flow()
+        self._apply_parallel_deep_flow()
         sketch_outputs = self._build_branch_output(classnames, "sketch")
 
         return {
