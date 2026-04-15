@@ -49,22 +49,15 @@ class CustomCLIP(nn.Module):
         clip_model.apply(freeze_all_but_bn)
         self.dtype = clip_model.dtype
 
-        # Local deepcopies for per-modality branches (photo/sketch)
+        # Local deepcopies for per-modality encoders (photo/sketch)
         clip_photo = copy.deepcopy(clip_model)
         clip_sketch = copy.deepcopy(clip_model)
 
-        # -- Prompt Learners --
-        print("Initializing Photo Prompt Learner...")
-        self.prompt_learner_photo = CrossModalPromptLearner(
+        # -- Shared Prompt Learner (contains both photo/sketch prompt sets) --
+        print("Initializing Shared Prompt Learner...")
+        self.prompt_learner = CrossModalPromptLearner(
             cfg=cfg,
-            clip_model=clip_photo,
-            clip_model_distill=self.clip_model_distill
-        )
-
-        print("Initializing Sketch Prompt Learner...")
-        self.prompt_learner_sketch = CrossModalPromptLearner(
-            cfg=cfg,
-            clip_model=clip_sketch,
+            clip_model=clip_model,
             clip_model_distill=self.clip_model_distill
         )
 
@@ -78,23 +71,22 @@ class CustomCLIP(nn.Module):
         self,
         image,
         classnames,
-        prompt_learner,
+        modality,
+        prompt_outputs,
         text_encoder,
         image_encoder,
         label=None,
     ):
-        text_input, tokenized_prompts, text_features_fixed_all, cross_prompts_text_deeper, cross_prompts_visual_deeper = prompt_learner(
-            classnames,
-        )
+        text_input, tokenized_prompts, text_features_fixed_all, cross_prompts_text_deeper, cross_prompts_visual_deeper = prompt_outputs[modality]
 
         with torch.no_grad():
-            image_features_fixed = prompt_learner.ZS_image_encoder(image.type(self.dtype))
+            image_features_fixed = self.prompt_learner.ZS_image_encoder(image.type(self.dtype))
             image_features_fixed = image_features_fixed / image_features_fixed.norm(dim=-1, keepdim=True)
 
         text_features_all = text_encoder(text_input, tokenized_prompts, cross_prompts_text_deeper)
         image_features = image_encoder(
             image.type(self.dtype),
-            prompt_learner.cross_prompts_visual[0],
+            self.prompt_learner.get_first_visual_prompt(modality),
             cross_prompts_visual_deeper,
         )
 
@@ -133,19 +125,22 @@ class CustomCLIP(nn.Module):
         Format: [sk_tensor, img_tensor, neg_tensor, sk_aug_tensor, img_aug_tensor, label, filename]
         """
         sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
+        prompt_outputs = self.prompt_learner.forward_all(classnames)
         
         # 1. Trích xuất feature qua 4 nhánh trực tiếp (không qua extractor wrapper)
         out_p = self._forward_branch(
             photo_tensor,
             classnames,
-            prompt_learner=self.prompt_learner_photo,
+            modality='photo',
+            prompt_outputs=prompt_outputs,
             text_encoder=self.text_encoder_photo,
             image_encoder=self.visual_encoder_photo,
         )
         out_s = self._forward_branch(
             sk_tensor,
             classnames,
-            prompt_learner=self.prompt_learner_sketch,
+            modality='sketch',
+            prompt_outputs=prompt_outputs,
             text_encoder=self.text_encoder_sketch,
             image_encoder=self.visual_encoder_sketch,
         )
@@ -154,7 +149,8 @@ class CustomCLIP(nn.Module):
         out_neg = self._forward_branch(
             neg_tensor,
             classnames,
-            prompt_learner=self.prompt_learner_photo,
+            modality='photo',
+            prompt_outputs=prompt_outputs,
             text_encoder=self.text_encoder_photo,
             image_encoder=self.visual_encoder_photo,
         )
@@ -247,8 +243,7 @@ class HiCroPL_SBIR(pl.LightningModule):
         seen_ids = set()
 
         prompt_params = []
-        add_unique_params(self.model.prompt_learner_photo.parameters(), prompt_params, seen_ids)
-        add_unique_params(self.model.prompt_learner_sketch.parameters(), prompt_params, seen_ids)
+        add_unique_params(self.model.prompt_learner.parameters(), prompt_params, seen_ids)
 
         ln_params = []
         for module in self.model.modules():
@@ -289,11 +284,13 @@ class HiCroPL_SBIR(pl.LightningModule):
 
     def extract_eval_features(self, tensor, modality):
         """Extract visual features directly from four-branch forward path."""
+        prompt_outputs = self.model.prompt_learner.forward_all(self.classnames)
         if modality == 'photo':
             out = self.model._forward_branch(
                 tensor,
                 self.classnames,
-                prompt_learner=self.model.prompt_learner_photo,
+                modality='photo',
+                prompt_outputs=prompt_outputs,
                 text_encoder=self.model.text_encoder_photo,
                 image_encoder=self.model.visual_encoder_photo,
             )
@@ -301,7 +298,8 @@ class HiCroPL_SBIR(pl.LightningModule):
             out = self.model._forward_branch(
                 tensor,
                 self.classnames,
-                prompt_learner=self.model.prompt_learner_sketch,
+                modality='sketch',
+                prompt_outputs=prompt_outputs,
                 text_encoder=self.model.text_encoder_sketch,
                 image_encoder=self.model.visual_encoder_sketch,
             )

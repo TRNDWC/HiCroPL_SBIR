@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from collections import OrderedDict
+from types import SimpleNamespace
 
 def get_device():
     if torch.cuda.is_available():
@@ -101,8 +102,18 @@ class CrossPromptAttention(nn.Module):
 
 
 class CrossModalPromptLearner(nn.Module):
-    def __init__(self, cfg, clip_model, clip_model_distill=None):
+    def __init__(self, cfg=None, clip_model=None, clip_model_distill=None, **kwargs):
         super().__init__()
+
+        if clip_model is None:
+            raise ValueError("clip_model is required")
+
+        if cfg is None:
+            cfg = SimpleNamespace()
+
+        for key, value in kwargs.items():
+            if not hasattr(cfg, key):
+                setattr(cfg, key, value)
         
         self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
         self.cross_layer = getattr(cfg, 'cross_layer', 4)
@@ -124,7 +135,7 @@ class CrossModalPromptLearner(nn.Module):
         self.ctx_init_text = ctx_init
         self.dtype = dtype
         self.token_embedding = clip_model.token_embedding
-        self.clip_model = clip_model 
+        self.clip_model = clip_model
         
         # [SỬA ĐỔI LOAD DATA]: Trong framework SBIR, không có teacher gốc mà dùng chung distill branch
         self.clip_model_distill = clip_model_distill if clip_model_distill is not None else clip_model
@@ -143,50 +154,101 @@ class CrossModalPromptLearner(nn.Module):
             ctx_vectors = torch.empty(self.n_ctx, ctx_dim, dtype=dtype)
             nn.init.normal_(ctx_vectors, std=0.02)
 
-        self.ctx = nn.Parameter(ctx_vectors)
-        cross_prompts_text = nn.ParameterList(
-            [self.ctx] +
-            [nn.Parameter(torch.empty(self.n_ctx, 512, dtype=dtype)) for _ in range(self.prompt_depth - 1)]
-        )
-        for single_para in cross_prompts_text[1:]:
-            nn.init.normal_(single_para, std=0.02)
-        self.cross_prompts_text = cross_prompts_text
-
         ######## cross-modal visual token initialization ########
         visual_vectors = torch.empty(self.n_ctx, v_dim, dtype=dtype)
         nn.init.normal_(visual_vectors, std=0.02)
-        cross_prompts_visual = nn.ParameterList([nn.Parameter(visual_vectors) for _ in range(self.prompt_depth)])
-        self.cross_prompts_visual = cross_prompts_visual
 
-        ######## knowledge mapper network and LKP ########
-        self.text2visual_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=ctx_dim, num_attention_heads=8)
-        self.visual2text_net = CrossPromptAttention(hidden_size=ctx_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
+        ######## PHOTO branch params ########
+        self.ctx_photo = nn.Parameter(ctx_vectors.clone())
+        self.cross_prompts_text_photo = nn.ParameterList(
+            [self.ctx_photo] +
+            [nn.Parameter(torch.empty(self.n_ctx, 512, dtype=dtype)) for _ in range(self.prompt_depth - 1)]
+        )
+        for single_para in self.cross_prompts_text_photo[1:]:
+            nn.init.normal_(single_para, std=0.02)
+
+        self.cross_prompts_visual_photo = nn.ParameterList(
+            [nn.Parameter(visual_vectors.clone()) for _ in range(self.prompt_depth)]
+        )
+
+        self.text2visual_net_photo = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=ctx_dim, num_attention_heads=8)
+        self.visual2text_net_photo = CrossPromptAttention(hidden_size=ctx_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
+
+        attn_pooling_text_photo = AttentionPooling(hidden_size=ctx_dim, num_attention_heads=8)
+        self.attn_pooling_text_nets_photo = _get_clones(attn_pooling_text_photo, self.cross_layer)
+        attn_pooling_visual_photo = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
+        self.attn_pooling_visual_nets_photo = _get_clones(attn_pooling_visual_photo, self.prompt_depth - self.cross_layer)
+
+        text_proxy_token_photo = torch.randn(1, ctx_dim, dtype=dtype)
+        self.text_proxy_tokens_photo = nn.ParameterList(
+            [nn.Parameter(text_proxy_token_photo.clone()) for _ in range(self.cross_layer)]
+        )
+        visual_proxy_token_photo = torch.randn(1, v_dim, dtype=dtype)
+        self.visual_proxy_tokens_photo = nn.ParameterList(
+            [nn.Parameter(visual_proxy_token_photo.clone()) for _ in range(self.cross_layer, self.prompt_depth)]
+        )
+
+        ######## SKETCH branch params ########
+        self.ctx_sketch = nn.Parameter(ctx_vectors.clone())
+        self.cross_prompts_text_sketch = nn.ParameterList(
+            [self.ctx_sketch] +
+            [nn.Parameter(torch.empty(self.n_ctx, 512, dtype=dtype)) for _ in range(self.prompt_depth - 1)]
+        )
+        for single_para in self.cross_prompts_text_sketch[1:]:
+            nn.init.normal_(single_para, std=0.02)
+
+        self.cross_prompts_visual_sketch = nn.ParameterList(
+            [nn.Parameter(visual_vectors.clone()) for _ in range(self.prompt_depth)]
+        )
+
+        self.text2visual_net_sketch = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=ctx_dim, num_attention_heads=8)
+        self.visual2text_net_sketch = CrossPromptAttention(hidden_size=ctx_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
+
+        attn_pooling_text_sketch = AttentionPooling(hidden_size=ctx_dim, num_attention_heads=8)
+        self.attn_pooling_text_nets_sketch = _get_clones(attn_pooling_text_sketch, self.cross_layer)
+        attn_pooling_visual_sketch = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
+        self.attn_pooling_visual_nets_sketch = _get_clones(attn_pooling_visual_sketch, self.prompt_depth - self.cross_layer)
+
+        text_proxy_token_sketch = torch.randn(1, ctx_dim, dtype=dtype)
+        self.text_proxy_tokens_sketch = nn.ParameterList(
+            [nn.Parameter(text_proxy_token_sketch.clone()) for _ in range(self.cross_layer)]
+        )
+        visual_proxy_token_sketch = torch.randn(1, v_dim, dtype=dtype)
+        self.visual_proxy_tokens_sketch = nn.ParameterList(
+            [nn.Parameter(visual_proxy_token_sketch.clone()) for _ in range(self.cross_layer, self.prompt_depth)]
+        )
+
         if prec == "fp16":
-            self.text2visual_net = self.text2visual_net.half()
-            self.visual2text_net = self.visual2text_net.half()
+            self.text2visual_net_photo = self.text2visual_net_photo.half()
+            self.visual2text_net_photo = self.visual2text_net_photo.half()
+            self.attn_pooling_text_nets_photo = self.attn_pooling_text_nets_photo.half()
+            self.attn_pooling_visual_nets_photo = self.attn_pooling_visual_nets_photo.half()
 
-        attn_pooling_text = AttentionPooling(hidden_size=ctx_dim, num_attention_heads=8)
-        self.attn_pooling_text_nets = _get_clones(attn_pooling_text, self.cross_layer)
-        attn_pooling_visual = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
-        self.attn_pooling_visual_nets = _get_clones(attn_pooling_visual, self.prompt_depth - self.cross_layer)
+            self.text2visual_net_sketch = self.text2visual_net_sketch.half()
+            self.visual2text_net_sketch = self.visual2text_net_sketch.half()
+            self.attn_pooling_text_nets_sketch = self.attn_pooling_text_nets_sketch.half()
+            self.attn_pooling_visual_nets_sketch = self.attn_pooling_visual_nets_sketch.half()
 
-        text_proxy_token = torch.randn(1, ctx_dim, dtype=dtype)
-        self.text_proxy_tokens = nn.ParameterList([nn.Parameter(text_proxy_token) for _ in range(self.cross_layer)])
-        visual_proxy_token = torch.randn(1, v_dim, dtype=dtype)
-        self.visual_proxy_tokens = nn.ParameterList([nn.Parameter(visual_proxy_token) for _ in range(self.cross_layer, self.prompt_depth)])
-
-        if prec == "fp16":
-            self.attn_pooling_text_nets = self.attn_pooling_text_nets.half()
-            self.attn_pooling_visual_nets = self.attn_pooling_visual_nets.half()
+        # Backward compatibility aliases for existing code paths/tests.
+        self.ctx = self.ctx_photo
+        self.cross_prompts_text = self.cross_prompts_text_photo
+        self.cross_prompts_visual = self.cross_prompts_visual_photo
+        self.text2visual_net = self.text2visual_net_photo
+        self.visual2text_net = self.visual2text_net_photo
+        self.attn_pooling_text_nets = self.attn_pooling_text_nets_photo
+        self.attn_pooling_visual_nets = self.attn_pooling_visual_nets_photo
+        self.text_proxy_tokens = self.text_proxy_tokens_photo
+        self.visual_proxy_tokens = self.visual_proxy_tokens_photo
 
         ######## Distillation Image Encoder ########
         self.ZS_image_encoder = self.clip_model_distill.visual
 
         # Cache động để lưu classnames của batch 
         self._cached_classnames = None
-        self._cached_text_input = None
         self._cached_tokenized_prompts = None
         self._cached_fixed_embeddings = None
+        self._cached_text_input_photo = None
+        self._cached_text_input_sketch = None
 
     def construct_prompts(self, ctx, prefix, suffix, label=None):
         if label is not None:
@@ -194,101 +256,156 @@ class CrossModalPromptLearner(nn.Module):
             suffix = suffix[label]
         return torch.cat([prefix, ctx, suffix], dim=1)
 
-    def _prepare_dynamic_classnames(self, classnames):
+    def _prepare_dynamic_classnames(self, classnames, modality):
         """
         [CHỈNH SỬA LOAD DATA SKETCH_VLM]: 
         Bỏ triệt để GPT Classifier đọc JSON mapping rườm rà.
         Test Zero-Shot trên Sketchy chỉ cần gọi trực tiếp hàm encode_text tĩnh.
         """
-        if self._cached_classnames is not None and classnames == self._cached_classnames:
-            return self._cached_text_input, self._cached_tokenized_prompts, self._cached_fixed_embeddings
-            
-        n_cls = len(classnames)
-        device = self.cross_prompts_text[0].device
-        
-        classnames_clean = [name.replace("_", " ") for name in classnames]
-        prompt_prefix = self.ctx_init_text if self.ctx_init_text else " ".join(["X"] * self.n_ctx)
-        raw_prompts = [prompt_prefix + " " + name + "." for name in classnames_clean]
-        
-        from src.clip import clip as _clip
-        tokenized_prompts = torch.cat([_clip.tokenize(p) for p in raw_prompts]).to(device)
-        
-        with torch.no_grad():
-            embedding = self.token_embedding(tokenized_prompts).type(self.dtype)  
-            
-        token_prefix = embedding[:, :1, :]
-        token_suffix = embedding[:, 1 + self.n_ctx:, :]
-        
-        ctx = self.cross_prompts_text[0]
-        if ctx.dim() == 2:
-            ctx = ctx.unsqueeze(0).expand(n_cls, -1, -1)
-            
-        text_input = self.construct_prompts(ctx, token_prefix, token_suffix)
+        if modality == "photo":
+            cross_prompts_text = self.cross_prompts_text_photo
+        elif modality == "sketch":
+            cross_prompts_text = self.cross_prompts_text_sketch
+        else:
+            raise ValueError(f"Unknown modality: {modality}")
 
-        # [SỬA ĐỔI LOAD DATA]: Băm text thành Fixed Embeddings bằng CLIP model gốc (thay vì read folder/json gpt_clip_classifier)
-        with torch.no_grad():
-            fixed_embeddings = self.clip_model_distill.encode_text(tokenized_prompts)
-            fixed_embeddings = fixed_embeddings / fixed_embeddings.norm(dim=-1, keepdim=True)
-            fixed_embeddings = fixed_embeddings.type(self.dtype)
-        
-        self._cached_classnames = classnames
-        self._cached_text_input = text_input
-        self._cached_tokenized_prompts = tokenized_prompts
-        self._cached_fixed_embeddings = fixed_embeddings
+        if self._cached_classnames is None or classnames != self._cached_classnames:
+            device = cross_prompts_text[0].device
+            classnames_clean = [name.replace("_", " ") for name in classnames]
+            prompt_prefix = self.ctx_init_text if self.ctx_init_text else " ".join(["X"] * self.n_ctx)
+            raw_prompts = [prompt_prefix + " " + name + "." for name in classnames_clean]
 
-        return text_input, tokenized_prompts, fixed_embeddings
+            from src.clip import clip as _clip
+            tokenized_prompts = torch.cat([_clip.tokenize(p) for p in raw_prompts]).to(device)
 
-    def get_early_text_proxies(self):
+            with torch.no_grad():
+                fixed_embeddings = self.clip_model_distill.encode_text(tokenized_prompts)
+                fixed_embeddings = fixed_embeddings / fixed_embeddings.norm(dim=-1, keepdim=True)
+                fixed_embeddings = fixed_embeddings.type(self.dtype)
+
+            self._cached_classnames = classnames
+            self._cached_tokenized_prompts = tokenized_prompts
+            self._cached_fixed_embeddings = fixed_embeddings
+            self._cached_text_input_photo = None
+            self._cached_text_input_sketch = None
+            
+        text_input = self._cached_text_input_photo if modality == "photo" else self._cached_text_input_sketch
+        if text_input is None:
+            tokenized_prompts = self._cached_tokenized_prompts
+            n_cls = len(classnames)
+            with torch.no_grad():
+                embedding = self.token_embedding(tokenized_prompts).type(self.dtype)
+
+            token_prefix = embedding[:, :1, :]
+            token_suffix = embedding[:, 1 + self.n_ctx:, :]
+
+            ctx = cross_prompts_text[0]
+            if ctx.dim() == 2:
+                ctx = ctx.unsqueeze(0).expand(n_cls, -1, -1)
+
+            text_input = self.construct_prompts(ctx, token_prefix, token_suffix)
+            if modality == "photo":
+                self._cached_text_input_photo = text_input
+            else:
+                self._cached_text_input_sketch = text_input
+
+        return text_input, self._cached_tokenized_prompts, self._cached_fixed_embeddings
+
+    def get_early_text_proxies(self, modality):
+        if modality == "photo":
+            attn_pooling_text_nets = self.attn_pooling_text_nets_photo
+            text_proxy_tokens = self.text_proxy_tokens_photo
+            cross_prompts_text = self.cross_prompts_text_photo
+        elif modality == "sketch":
+            attn_pooling_text_nets = self.attn_pooling_text_nets_sketch
+            text_proxy_tokens = self.text_proxy_tokens_sketch
+            cross_prompts_text = self.cross_prompts_text_sketch
+        else:
+            raise ValueError(f"Unknown modality: {modality}")
         proxy_text_tokens = []
         for i in range(self.cross_layer):
-            text_proxy_token = self.attn_pooling_text_nets[i](
-                token_query=self.text_proxy_tokens[i],
-                sequence_key=self.cross_prompts_text[i],
-                sequence_value=self.cross_prompts_text[i]
+            text_proxy_token = attn_pooling_text_nets[i](
+                token_query=text_proxy_tokens[i],
+                sequence_key=cross_prompts_text[i],
+                sequence_value=cross_prompts_text[i]
             )
             proxy_text_tokens.append(text_proxy_token)
         return torch.cat(proxy_text_tokens, dim=0).view(self.cross_layer, self.ctx_dim)
 
-    def forward(
-        self,
-        classnames,
-    ):
-        text_input, tokenized_prompts, fixed_embeddings = self._prepare_dynamic_classnames(classnames)
+    def get_first_visual_prompt(self, modality):
+        if modality == "photo":
+            return self.cross_prompts_visual_photo[0]
+        if modality == "sketch":
+            return self.cross_prompts_visual_sketch[0]
+        raise ValueError(f"Unknown modality: {modality}")
+
+    def _forward_single_modality(self, classnames, modality):
+        text_input, tokenized_prompts, fixed_embeddings = self._prepare_dynamic_classnames(classnames, modality)
+
+        if modality == "photo":
+            cross_prompts_text = self.cross_prompts_text_photo
+            cross_prompts_visual = self.cross_prompts_visual_photo
+            text2visual_net = self.text2visual_net_photo
+            visual2text_net = self.visual2text_net_photo
+            attn_pooling_visual_nets = self.attn_pooling_visual_nets_photo
+            visual_proxy_tokens = self.visual_proxy_tokens_photo
+        elif modality == "sketch":
+            cross_prompts_text = self.cross_prompts_text_sketch
+            cross_prompts_visual = self.cross_prompts_visual_sketch
+            text2visual_net = self.text2visual_net_sketch
+            visual2text_net = self.visual2text_net_sketch
+            attn_pooling_visual_nets = self.attn_pooling_visual_nets_sketch
+            visual_proxy_tokens = self.visual_proxy_tokens_sketch
+        else:
+            raise ValueError(f"Unknown modality: {modality}")
 
         ######## T->I mapping ########
-        visual_prompts = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)
-        proxy_text_prompts = self.get_early_text_proxies().view(-1, self.ctx_dim)
+        visual_prompts = torch.cat([cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)
+        proxy_text_prompts = self.get_early_text_proxies(modality).view(-1, self.ctx_dim)
 
         visual_prompts_flat = visual_prompts.view(-1, visual_prompts.shape[-1])
-        updated_by_text = self.text2visual_net(visual_prompts_flat, proxy_text_prompts, proxy_text_prompts)
+        updated_by_text = text2visual_net(visual_prompts_flat, proxy_text_prompts, proxy_text_prompts)
         updated_visual_prompts = updated_by_text.view(self.cross_layer, -1, updated_by_text.shape[-1])
 
         for i in range(self.cross_layer):
-            self.cross_prompts_visual[i].data.copy_(updated_visual_prompts[i])
+            cross_prompts_visual[i].data.copy_(updated_visual_prompts[i])
 
         ######## I->T mapping ########
-        text_prompts = torch.cat([self.cross_prompts_text[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)  
-        visual_prompts = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)  
+        text_prompts = torch.cat([cross_prompts_text[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)
+        visual_prompts = torch.cat([cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)
         proxy_visual_tokens = []
         for i in range(self.cross_layer, self.prompt_depth):
-            visual_proxy_token = self.attn_pooling_visual_nets[i - self.cross_layer](
-                token_query=self.visual_proxy_tokens[i - self.cross_layer],  
-                sequence_key=self.cross_prompts_visual[i],  
-                sequence_value=self.cross_prompts_visual[i]  
+            visual_proxy_token = attn_pooling_visual_nets[i - self.cross_layer](
+                token_query=visual_proxy_tokens[i - self.cross_layer],
+                sequence_key=cross_prompts_visual[i],
+                sequence_value=cross_prompts_visual[i]
             )
             proxy_visual_tokens.append(visual_proxy_token)
-            proxy_visual_prompts = torch.cat(proxy_visual_tokens, dim=0)  
-        text_prompts = text_prompts.view(-1, text_prompts.shape[-1])  
-        proxy_visual_prompts = proxy_visual_prompts.view(-1, proxy_visual_prompts.shape[-1])  
-        updated_text_prompts = self.visual2text_net(text_prompts, proxy_visual_prompts, proxy_visual_prompts)  
+            proxy_visual_prompts = torch.cat(proxy_visual_tokens, dim=0)
+        text_prompts = text_prompts.view(-1, text_prompts.shape[-1])
+        proxy_visual_prompts = proxy_visual_prompts.view(-1, proxy_visual_prompts.shape[-1])
+        updated_text_prompts = visual2text_net(text_prompts, proxy_visual_prompts, proxy_visual_prompts)
         updated_text_prompts = updated_text_prompts.view(self.prompt_depth - self.cross_layer, -1, updated_text_prompts.shape[-1])
         for i in range(self.cross_layer, self.prompt_depth):
-            self.cross_prompts_text[i].data.copy_(updated_text_prompts[i - self.cross_layer])
+            cross_prompts_text[i].data.copy_(updated_text_prompts[i - self.cross_layer])
 
-        cross_prompts_text_deeper = [self.cross_prompts_text[i] for i in range(1, len(self.cross_prompts_text))]
-        cross_prompts_visual_deeper = [self.cross_prompts_visual[i] for i in range(1, len(self.cross_prompts_visual))]
-        
+        cross_prompts_text_deeper = [cross_prompts_text[i] for i in range(1, len(cross_prompts_text))]
+        cross_prompts_visual_deeper = [cross_prompts_visual[i] for i in range(1, len(cross_prompts_visual))]
+
         return text_input, tokenized_prompts, fixed_embeddings, cross_prompts_text_deeper, cross_prompts_visual_deeper
+
+    def forward_all(self, classnames):
+        return {
+            "photo": self._forward_single_modality(classnames, "photo"),
+            "sketch": self._forward_single_modality(classnames, "sketch"),
+        }
+
+    def forward(
+        self,
+        classnames,
+        modality="photo",
+    ):
+        return self._forward_single_modality(classnames, modality)
 
 
 class VisualEncoder(nn.Module):
