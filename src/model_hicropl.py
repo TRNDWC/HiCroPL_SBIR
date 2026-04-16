@@ -91,12 +91,12 @@ class CustomCLIP(nn.Module):
         )
 
         image_features_norm1 = image_features / image_features.norm(dim=-1, keepdim=True)
-        image_features_prenorm = image_features_norm1 + image_features_fixed
-        image_features_final = image_features_prenorm / image_features_prenorm.norm(dim=-1, keepdim=True)
+        image_features_prenorm = image_features_norm1
+        image_features_final = image_features_prenorm
 
         text_features_norm1 = text_features_all / text_features_all.norm(dim=-1, keepdim=True)
-        text_features_prenorm_all = text_features_norm1 + text_features_fixed_all
-        text_features_final_all = text_features_prenorm_all / text_features_prenorm_all.norm(dim=-1, keepdim=True)
+        text_features_prenorm_all = text_features_norm1
+        text_features_final_all = text_features_prenorm_all
 
         if label is not None:
             text_features_batch = text_features_final_all[label]
