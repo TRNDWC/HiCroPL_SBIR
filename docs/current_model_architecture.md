@@ -1,5 +1,17 @@
 # HiCroPL-SBIR Current Model Documentation
 
+## Status Update (2026-04-16)
+
+This document has historical sections and is no longer fully authoritative for all bi-knowledge flows.
+
+- Current shallow/deep cross-flow behavior should be read together with:
+	- `docs/bi_knowledge_flow_additive_injection_design.md`
+	- `docs/prompt_update_noise_fixes.md`
+- In particular, any older statement implying strictly independent photo/sketch branches (no cross-update) should be treated as outdated.
+- The source of truth is current code in:
+	- `src/hicropl.py`
+	- `src/model_hicropl.py`
+
 ## 1. Scope and Purpose
 
 This document describes the current implementation of the HiCroPL-based ZS-SBIR model in this repository. The goal is to provide a detailed system-level view of:
@@ -135,6 +147,8 @@ Visual prompts are initialized independently per branch, with branch-specific co
 If branch-specific initialization strings are different, the two text prompt branches start with semantically different priors from step zero.
 
 ## 6. Prompt Update Mechanics
+
+Status note (2026-04-16): this section contains baseline-oriented wording and may not reflect later additive/cross-flow refinements.
 
 Within each modality branch, prompt updates follow two sequential mappings:
 

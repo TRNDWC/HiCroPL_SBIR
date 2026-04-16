@@ -1,5 +1,14 @@
 # Bi-Knowledge Flow Design: Additive Injection (Shallow Phase)
 
+## Status Update (2026-04-16)
+
+This document started as design-only, but core additive ideas have been integrated in code.
+
+- The design intent in this file is still valid.
+- Some wording that implies "pre-implementation only" should be interpreted as historical.
+- For post-fix runtime notes (prompt-drift and update-noise fixes), also read:
+  - `docs/prompt_update_noise_fixes.md`
+
 ## 1. Muc tieu
 
 Tai lieu nay mo ta mot huong thiet ke de sua shallow-phase bi-knowledge flow theo nguyen tac:

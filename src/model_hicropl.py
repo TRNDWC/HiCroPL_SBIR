@@ -225,6 +225,7 @@ class HiCroPL_SBIR(pl.LightningModule):
             'filenames': [],
             'base_names': []
         })
+        self._cached_eval_prompt_outputs = None
 
     def on_train_epoch_start(self):
         self.model.visual_encoder_photo.eval()
@@ -282,9 +283,18 @@ class HiCroPL_SBIR(pl.LightningModule):
         
         return loss
 
+    def on_validation_epoch_start(self):
+        with torch.no_grad():
+            self._cached_eval_prompt_outputs = self.model.prompt_learner.forward_all(self.classnames)
+
     def extract_eval_features(self, tensor, modality):
         """Extract visual features directly from four-branch forward path."""
-        prompt_outputs = self.model.prompt_learner.forward_all(self.classnames)
+        prompt_outputs = self._cached_eval_prompt_outputs
+        if prompt_outputs is None:
+            with torch.no_grad():
+                prompt_outputs = self.model.prompt_learner.forward_all(self.classnames)
+            self._cached_eval_prompt_outputs = prompt_outputs
+
         if modality == 'photo':
             out = self.model._forward_branch(
                 tensor,
@@ -347,6 +357,7 @@ class HiCroPL_SBIR(pl.LightningModule):
             target_buckets[cat_idx]['base_names'].append(bname)
 
     def on_validation_epoch_end(self):
+        self._cached_eval_prompt_outputs = None
         if self.eval_mode == 'fine_grained':
             return self._on_validation_epoch_end_fine_grained()
         else:

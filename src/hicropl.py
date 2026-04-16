@@ -380,15 +380,16 @@ class CrossModalPromptLearner(nn.Module):
             return self.cross_prompts_visual_sketch[0]
         raise ValueError(f"Unknown modality: {modality}")
 
-    def _build_external_shallow_visual_proxies_from_sketch(self, device, dtype):
+    def _build_external_shallow_visual_proxies_from_sketch(self, device, dtype, sketch_shallow_snapshot=None):
         """Build sketch shallow proxies as [cross_layer_photo, v_dim] for additive injection."""
         if self.cross_layer_sketch == 0:
             base = torch.zeros((1, self.v_dim), device=device, dtype=dtype)
         else:
             proxies = []
+            source_visual_prompts = sketch_shallow_snapshot if sketch_shallow_snapshot is not None else self.cross_prompts_visual_sketch
             for i in range(self.cross_layer_sketch):
                 # Summarize each shallow sketch layer into one proxy vector.
-                proxies.append(self.cross_prompts_visual_sketch[i].mean(dim=0, keepdim=True))
+                proxies.append(source_visual_prompts[i].mean(dim=0, keepdim=True))
             base = torch.cat(proxies, dim=0).to(device=device, dtype=dtype)
 
         if base.shape[0] == self.cross_layer_photo:
@@ -431,7 +432,7 @@ class CrossModalPromptLearner(nn.Module):
             )
             self.cross_prompts_visual_sketch[i].data.copy_(updated_sketch)
 
-    def _forward_single_modality(self, classnames, modality):
+    def _forward_single_modality(self, classnames, modality, sketch_shallow_snapshot=None):
         if modality == "photo":
             cross_prompts_text = self.cross_prompts_text_photo
             cross_prompts_visual = self.cross_prompts_visual_photo
@@ -473,6 +474,7 @@ class CrossModalPromptLearner(nn.Module):
             external_shallow_visual_proxies = self._build_external_shallow_visual_proxies_from_sketch(
                 device=visual_prompts.device,
                 dtype=visual_prompts.dtype,
+                sketch_shallow_snapshot=sketch_shallow_snapshot,
             )
             sketch_contribution = self.sketch2visual_net_photo(
                 visual_prompts_flat,
@@ -520,8 +522,17 @@ class CrossModalPromptLearner(nn.Module):
         return text_input, tokenized_prompts, fixed_embeddings, cross_prompts_text_deeper, cross_prompts_visual_deeper
 
     def forward_all(self, classnames):
+        sketch_shallow_snapshot = [
+            self.cross_prompts_visual_sketch[i].clone()
+            for i in range(self.cross_layer_sketch)
+        ]
+
         sketch_outputs = self._forward_single_modality(classnames, "sketch")
-        photo_outputs = self._forward_single_modality(classnames, "photo")
+        photo_outputs = self._forward_single_modality(
+            classnames,
+            "photo",
+            sketch_shallow_snapshot=sketch_shallow_snapshot,
+        )
         self._apply_photo_to_sketch_deep_flow()
         sketch_outputs = self._build_branch_output(classnames, "sketch")
 

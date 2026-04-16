@@ -1,5 +1,16 @@
 # Bi-Knowledge Flow Implementation Notes
 
+## Status Update (2026-04-16)
+
+This document records an earlier implementation/proposal stage.
+
+- Keep this file as historical context for design evolution.
+- Do not treat every behavior here as current runtime behavior.
+- For current behavior and fixes, read:
+  - `docs/bi_knowledge_flow_additive_injection_design.md`
+  - `docs/prompt_update_noise_fixes.md`
+- Final authority remains current code in `src/hicropl.py` and `src/model_hicropl.py`.
+
 ## 1. Muc tieu
 
 Tai lieu nay mo ta luong bi-knowledge flow hien tai da duoc implement trong CrossModalPromptLearner, voi cac nguyen tac:
