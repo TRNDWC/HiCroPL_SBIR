@@ -137,7 +137,65 @@ Result: Text gets dual input (photo_direct + sketch_filtered)
 | **Flow** | Diverge (Text/Sketch) → Merge (Photo) | Parallel (Photo→T & S→T) with cross-link (P→S) |
 | **Why?** | Photo is hub: gets diverse inputs early | Text is hub: gets filtered + direct inputs deep |
 
-### 2.2 Early Layers (0-3): Split Photo Prompt
+### 2.1.3 Fix 1 (Recommended): Additive Injection in Shallow + Chain in Deep
+
+This section supersedes token splitting in Section 2.2.
+
+Fix 1 objectives:
+- Keep full text->visual behavior for all visual tokens in shallow layers (same behavior as v3).
+- Inject sketch knowledge as additive residual (not token split replacement).
+- Use learnable gate initialized near zero so training starts close to v3.
+- Deep phase uses chain photo -> sketch -> text_sketch without blend coefficients.
+
+Shallow phase equations:
+
+1) Full text->visual update (unchanged):
+
+  updated_by_text = text2visual(Q_all_visual, K_text_proxy, V_text_proxy)
+
+2) Sketch residual contribution:
+
+  sketch_contribution = sketch2visual(Q_all_visual, K_sketch_proxy, V_sketch_proxy)
+
+3) Gated additive injection:
+
+  updated_visual = updated_by_text + gate_alpha * sketch_contribution
+
+Gate parameter:
+
+  gate_alpha = nn.Parameter(torch.tensor(0.01))
+
+Design rationale:
+- At initialization, gate_alpha is very small, so model behavior is almost v3.
+- Sketch-to-photo influence grows only if optimization finds it useful.
+- This avoids hard early interference from cross-modal sketch signal.
+
+Deep phase rule:
+- Apply chain photo -> sketch -> text_sketch.
+- Use direct modal update style (copy/update), no blend alpha coefficients.
+
+Pseudo implementation sketch:
+
+  if shallow and flow == sketch_to_photo_early:
+    updated_by_text = text2visual_net(all_visual_tokens, text_proxy, text_proxy)
+    sketch_contribution = sketch2visual_net(all_visual_tokens, sketch_proxy, sketch_proxy)
+    updated_visual = updated_by_text + gate_alpha * sketch_contribution
+    cross_prompts_visual[i].copy_(updated_visual)
+
+  if deep and flow == photo_to_sketch_deep:
+    updated_sketch = visual2visual_deep(sketch_prompts, photo_proxy, photo_proxy)
+    cross_prompts_visual[i].copy_(updated_sketch)
+    updated_text_sketch = visual2text(text_prompts, sketch_proxy, sketch_proxy)
+    cross_prompts_text[i].copy_(updated_text_sketch)
+
+Implementation checklist for Fix 1:
+- Add parameter gate_alpha initialized to 0.01.
+- Add sketch2visual_net (or equivalent) for shallow residual injection.
+- Keep original text2visual on full token set (no 2+2 token split).
+- Keep deep chain photo -> sketch -> text_sketch without blend coefficients.
+- Log gate_alpha per epoch to monitor whether model uses sketch residual.
+
+### 2.2 Early Layers (0-3): Split Photo Prompt (Legacy, replaced by Fix 1)
 
 **New concept**: Partition photo prompt into **two sub-streams**
 

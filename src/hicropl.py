@@ -162,10 +162,9 @@ class CrossModalPromptLearner(nn.Module):
         ######## knowledge mapper network and LKP ########
         self.text2visual_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=ctx_dim, num_attention_heads=8)
         self.visual2text_net = CrossPromptAttention(hidden_size=ctx_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
-        self.external_visual_to_visual_early = _get_clones(
-            CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8),
-            self.cross_layer,
-        )
+        self.sketch2visual_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
+        # Start near-zero so model initially behaves close to vanilla text->visual mapping.
+        self.gate_alpha = nn.Parameter(torch.tensor(0.01, dtype=dtype))
         self.external_visual_to_visual_deep = _get_clones(
             CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8),
             self.prompt_depth - self.cross_layer,
@@ -173,7 +172,7 @@ class CrossModalPromptLearner(nn.Module):
         if prec == "fp16":
             self.text2visual_net = self.text2visual_net.half()
             self.visual2text_net = self.visual2text_net.half()
-            self.external_visual_to_visual_early = self.external_visual_to_visual_early.half()
+            self.sketch2visual_net = self.sketch2visual_net.half()
             self.external_visual_to_visual_deep = self.external_visual_to_visual_deep.half()
 
         attn_pooling_text = AttentionPooling(hidden_size=ctx_dim, num_attention_heads=8)
@@ -269,39 +268,41 @@ class CrossModalPromptLearner(nn.Module):
         text_input, tokenized_prompts, fixed_embeddings = self._prepare_dynamic_classnames(classnames)
 
         ######## T->I mapping ########
-        # For photo branch in shallow layers, enforce split-query design:
-        # first half query attends to text; second half query attends to sketch.
         if (
             self.triplet_enable_external
             and external_flow == "sketch_to_photo_early"
             and external_visual_prompts is not None
         ):
-            proxy_text_prompts = self.get_early_text_proxies().view(self.cross_layer, self.ctx_dim)
+            visual_prompts = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)
+            proxy_text_prompts = self.get_early_text_proxies().view(-1, self.ctx_dim)
+            visual_prompts_flat = visual_prompts.view(-1, visual_prompts.shape[-1])
+
+            # Keep full text->visual flow on ALL visual tokens.
+            updated_by_text = self.text2visual_net(
+                visual_prompts_flat,
+                proxy_text_prompts,
+                proxy_text_prompts,
+            )
+            updated_by_text = updated_by_text.view(self.cross_layer, self.n_ctx, self.v_dim)
+
+            # Add sketch knowledge as gated residual on top.
+            external_shallow_visual_proxies = self._build_external_shallow_visual_proxies(
+                external_visual_prompts,
+                device=visual_prompts.device,
+                dtype=visual_prompts.dtype,
+            )
+            sketch_contribution = self.sketch2visual_net(
+                visual_prompts_flat,
+                external_shallow_visual_proxies,
+                external_shallow_visual_proxies,
+            )
+            sketch_contribution = sketch_contribution.view(self.cross_layer, self.n_ctx, self.v_dim)
+
+            gate = self.gate_alpha.to(dtype=updated_by_text.dtype)
+            updated_visual_prompts = updated_by_text + gate * sketch_contribution
+
             for i in range(self.cross_layer):
-                current = self.cross_prompts_visual[i]
-                split = current.shape[0] // 2
-
-                if split <= 0 or split >= current.shape[0]:
-                    # Fallback if n_ctx cannot be split cleanly into two non-empty query blocks.
-                    text_proxy = proxy_text_prompts[i].unsqueeze(0)
-                    updated = self.text2visual_net(current, text_proxy, text_proxy)
-                    self.cross_prompts_visual[i].data.copy_(updated)
-                    continue
-
-                q_text = current[:split]
-                q_sketch = current[split:]
-
-                text_proxy = proxy_text_prompts[i].unsqueeze(0)
-                sketch_source = external_visual_prompts[i]
-
-                updated_q_text = self.text2visual_net(q_text, text_proxy, text_proxy)
-                updated_q_sketch = self.external_visual_to_visual_early[i](
-                    q_sketch,
-                    sketch_source,
-                    sketch_source,
-                )
-                updated = torch.cat([updated_q_text, updated_q_sketch], dim=0)
-                self.cross_prompts_visual[i].data.copy_(updated)
+                self.cross_prompts_visual[i].data.copy_(updated_visual_prompts[i])
         else:
             visual_prompts = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)
             proxy_text_prompts = self.get_early_text_proxies().view(-1, self.ctx_dim)
@@ -314,7 +315,7 @@ class CrossModalPromptLearner(nn.Module):
                 self.cross_prompts_visual[i].data.copy_(updated_visual_prompts[i])
 
         # External cross-branch prompt exchange:
-        # - sketch_to_photo_early is applied directly inside shallow T->I mapping above.
+        # - sketch_to_photo_early is applied directly inside shallow additive T->I mapping above.
         # - photo_to_sketch_deep is applied below before deep I->T (forming photo->sketch->text_sketch chain).
         self._apply_external_visual_flow(external_visual_prompts, external_flow)
 
@@ -357,6 +358,14 @@ class CrossModalPromptLearner(nn.Module):
                 source = external_visual_prompts[i]
                 updated = self.external_visual_to_visual_deep[idx](current, source, source)
                 self.cross_prompts_visual[i].data.copy_(updated)
+
+    def _build_external_shallow_visual_proxies(self, external_visual_prompts, device, dtype):
+        # Build one proxy per shallow layer: [cross_layer, v_dim]
+        proxies = []
+        for i in range(self.cross_layer):
+            proxy = external_visual_prompts[i].to(device=device, dtype=dtype).mean(dim=0)
+            proxies.append(proxy)
+        return torch.stack(proxies, dim=0)
 
 
 class VisualEncoder(nn.Module):
