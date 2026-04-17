@@ -66,6 +66,8 @@ parser.add_argument('--adapter_reduction', type=int, default=4, help='Bottleneck
 parser.add_argument('--image_adapter_m', type=float, default=0.5, help='Residual mixing ratio for image adapter output (used when --use_adapter is enabled)')
 parser.add_argument('--text_adapter_m', type=float, default=0.5, help='Residual mixing ratio for text adapter output (used when --use_adapter is enabled)')
 parser.add_argument('--lambda_distill', type=float, default=1.0, help='Legacy option, currently unused in the active HiCroPL loss')
+parser.add_argument('--triplet_enable_external', action='store_true', default=False,
+                    help='Enable external cross-branch prompt exchange: sketch->photo (early) and photo->sketch (deep)')
 
 # CLIP design_details (CoPrompt-style builder config)
 parser.add_argument('--clip_trainer', type=str, default='HiCroPL', help='Trainer key for CLIP block routing')

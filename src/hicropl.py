@@ -110,6 +110,7 @@ class CrossModalPromptLearner(nn.Module):
         ctx_init = getattr(cfg, 'ctx_init', "a photo of a")
         self.dataset_name = getattr(cfg, 'dataset', 'sketchy')
         prec = getattr(cfg, 'prec', "fp32")
+        self.triplet_enable_external = getattr(cfg, 'triplet_enable_external', True)
         
         assert self.prompt_depth >= 1, "Language prompt depth should be >=1"
         
@@ -161,9 +162,19 @@ class CrossModalPromptLearner(nn.Module):
         ######## knowledge mapper network and LKP ########
         self.text2visual_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=ctx_dim, num_attention_heads=8)
         self.visual2text_net = CrossPromptAttention(hidden_size=ctx_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
+        self.external_visual_to_visual_early = _get_clones(
+            CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8),
+            self.cross_layer,
+        )
+        self.external_visual_to_visual_deep = _get_clones(
+            CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8),
+            self.prompt_depth - self.cross_layer,
+        )
         if prec == "fp16":
             self.text2visual_net = self.text2visual_net.half()
             self.visual2text_net = self.visual2text_net.half()
+            self.external_visual_to_visual_early = self.external_visual_to_visual_early.half()
+            self.external_visual_to_visual_deep = self.external_visual_to_visual_deep.half()
 
         attn_pooling_text = AttentionPooling(hidden_size=ctx_dim, num_attention_heads=8)
         self.attn_pooling_text_nets = _get_clones(attn_pooling_text, self.cross_layer)
@@ -252,19 +263,60 @@ class CrossModalPromptLearner(nn.Module):
     def forward(
         self,
         classnames,
+        external_visual_prompts=None,
+        external_flow=None,
     ):
         text_input, tokenized_prompts, fixed_embeddings = self._prepare_dynamic_classnames(classnames)
 
         ######## T->I mapping ########
-        visual_prompts = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)
-        proxy_text_prompts = self.get_early_text_proxies().view(-1, self.ctx_dim)
+        # For photo branch in shallow layers, enforce split-query design:
+        # first half query attends to text; second half query attends to sketch.
+        if (
+            self.triplet_enable_external
+            and external_flow == "sketch_to_photo_early"
+            and external_visual_prompts is not None
+        ):
+            proxy_text_prompts = self.get_early_text_proxies().view(self.cross_layer, self.ctx_dim)
+            for i in range(self.cross_layer):
+                current = self.cross_prompts_visual[i]
+                split = current.shape[0] // 2
 
-        visual_prompts_flat = visual_prompts.view(-1, visual_prompts.shape[-1])
-        updated_by_text = self.text2visual_net(visual_prompts_flat, proxy_text_prompts, proxy_text_prompts)
-        updated_visual_prompts = updated_by_text.view(self.cross_layer, -1, updated_by_text.shape[-1])
+                if split <= 0 or split >= current.shape[0]:
+                    # Fallback if n_ctx cannot be split cleanly into two non-empty query blocks.
+                    text_proxy = proxy_text_prompts[i].unsqueeze(0)
+                    updated = self.text2visual_net(current, text_proxy, text_proxy)
+                    self.cross_prompts_visual[i].data.copy_(updated)
+                    continue
 
-        for i in range(self.cross_layer):
-            self.cross_prompts_visual[i].data.copy_(updated_visual_prompts[i])
+                q_text = current[:split]
+                q_sketch = current[split:]
+
+                text_proxy = proxy_text_prompts[i].unsqueeze(0)
+                sketch_source = external_visual_prompts[i]
+
+                updated_q_text = self.text2visual_net(q_text, text_proxy, text_proxy)
+                updated_q_sketch = self.external_visual_to_visual_early[i](
+                    q_sketch,
+                    sketch_source,
+                    sketch_source,
+                )
+                updated = torch.cat([updated_q_text, updated_q_sketch], dim=0)
+                self.cross_prompts_visual[i].data.copy_(updated)
+        else:
+            visual_prompts = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)
+            proxy_text_prompts = self.get_early_text_proxies().view(-1, self.ctx_dim)
+
+            visual_prompts_flat = visual_prompts.view(-1, visual_prompts.shape[-1])
+            updated_by_text = self.text2visual_net(visual_prompts_flat, proxy_text_prompts, proxy_text_prompts)
+            updated_visual_prompts = updated_by_text.view(self.cross_layer, -1, updated_by_text.shape[-1])
+
+            for i in range(self.cross_layer):
+                self.cross_prompts_visual[i].data.copy_(updated_visual_prompts[i])
+
+        # External cross-branch prompt exchange:
+        # - sketch_to_photo_early is applied directly inside shallow T->I mapping above.
+        # - photo_to_sketch_deep is applied below before deep I->T (forming photo->sketch->text_sketch chain).
+        self._apply_external_visual_flow(external_visual_prompts, external_flow)
 
         ######## I->T mapping ########
         text_prompts = torch.cat([self.cross_prompts_text[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)  
@@ -289,6 +341,22 @@ class CrossModalPromptLearner(nn.Module):
         cross_prompts_visual_deeper = [self.cross_prompts_visual[i] for i in range(1, len(self.cross_prompts_visual))]
         
         return text_input, tokenized_prompts, fixed_embeddings, cross_prompts_text_deeper, cross_prompts_visual_deeper
+
+    def _apply_external_visual_flow(self, external_visual_prompts, external_flow):
+        if not self.triplet_enable_external or external_visual_prompts is None or external_flow is None:
+            return
+
+        if external_flow == "sketch_to_photo_early":
+            # Already handled in shallow split-query T->I mapping.
+            return
+
+        elif external_flow == "photo_to_sketch_deep":
+            for i in range(self.cross_layer, self.prompt_depth):
+                idx = i - self.cross_layer
+                current = self.cross_prompts_visual[i]
+                source = external_visual_prompts[i]
+                updated = self.external_visual_to_visual_deep[idx](current, source, source)
+                self.cross_prompts_visual[i].data.copy_(updated)
 
 
 class VisualEncoder(nn.Module):

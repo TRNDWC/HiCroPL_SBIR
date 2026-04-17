@@ -82,9 +82,13 @@ class CustomCLIP(nn.Module):
         text_encoder,
         image_encoder,
         label=None,
+        external_visual_prompts=None,
+        external_flow=None,
     ):
         text_input, tokenized_prompts, text_features_fixed_all, cross_prompts_text_deeper, cross_prompts_visual_deeper = prompt_learner(
             classnames,
+            external_visual_prompts=external_visual_prompts,
+            external_flow=external_flow,
         )
 
         with torch.no_grad():
@@ -126,6 +130,11 @@ class CustomCLIP(nn.Module):
             "logit_scale": self.logit_scale.exp(),
         }
 
+    @staticmethod
+    def _snapshot_visual_prompts(prompt_learner):
+        # Snapshot prevents accidental graph coupling across the two modality branches.
+        return [p.detach() for p in prompt_learner.cross_prompts_visual]
+
     def forward(self, x, classnames):
         """
         Forward pass for training with augmentation support.
@@ -133,6 +142,9 @@ class CustomCLIP(nn.Module):
         Format: [sk_tensor, img_tensor, neg_tensor, sk_aug_tensor, img_aug_tensor, label, filename]
         """
         sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
+
+        sketch_prompt_snapshot = self._snapshot_visual_prompts(self.prompt_learner_sketch)
+        photo_prompt_snapshot = self._snapshot_visual_prompts(self.prompt_learner_photo)
         
         # 1. Trích xuất feature qua 4 nhánh trực tiếp (không qua extractor wrapper)
         out_p = self._forward_branch(
@@ -141,6 +153,8 @@ class CustomCLIP(nn.Module):
             prompt_learner=self.prompt_learner_photo,
             text_encoder=self.text_encoder_photo,
             image_encoder=self.visual_encoder_photo,
+            external_visual_prompts=sketch_prompt_snapshot,
+            external_flow="sketch_to_photo_early",
         )
         out_s = self._forward_branch(
             sk_tensor,
@@ -148,6 +162,8 @@ class CustomCLIP(nn.Module):
             prompt_learner=self.prompt_learner_sketch,
             text_encoder=self.text_encoder_sketch,
             image_encoder=self.visual_encoder_sketch,
+            external_visual_prompts=photo_prompt_snapshot,
+            external_flow="photo_to_sketch_deep",
         )
         
         # Đặc trưng Negative lấy từ nhánh Photo
@@ -157,6 +173,8 @@ class CustomCLIP(nn.Module):
             prompt_learner=self.prompt_learner_photo,
             text_encoder=self.text_encoder_photo,
             image_encoder=self.visual_encoder_photo,
+            external_visual_prompts=sketch_prompt_snapshot,
+            external_flow="sketch_to_photo_early",
         )
         
         # 2. Use extractor outputs directly, without adapter residual mixing
@@ -290,20 +308,26 @@ class HiCroPL_SBIR(pl.LightningModule):
     def extract_eval_features(self, tensor, modality):
         """Extract visual features directly from four-branch forward path."""
         if modality == 'photo':
+            sketch_prompt_snapshot = self.model._snapshot_visual_prompts(self.model.prompt_learner_sketch)
             out = self.model._forward_branch(
                 tensor,
                 self.classnames,
                 prompt_learner=self.model.prompt_learner_photo,
                 text_encoder=self.model.text_encoder_photo,
                 image_encoder=self.model.visual_encoder_photo,
+                external_visual_prompts=sketch_prompt_snapshot,
+                external_flow="sketch_to_photo_early",
             )
         else:
+            photo_prompt_snapshot = self.model._snapshot_visual_prompts(self.model.prompt_learner_photo)
             out = self.model._forward_branch(
                 tensor,
                 self.classnames,
                 prompt_learner=self.model.prompt_learner_sketch,
                 text_encoder=self.model.text_encoder_sketch,
                 image_encoder=self.model.visual_encoder_sketch,
+                external_visual_prompts=photo_prompt_snapshot,
+                external_flow="photo_to_sketch_deep",
             )
         return out["image_features"]
 
