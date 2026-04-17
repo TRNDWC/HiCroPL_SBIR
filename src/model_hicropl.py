@@ -143,8 +143,8 @@ class CustomCLIP(nn.Module):
         """
         sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
 
+        # Capture cross-branch prompts with within-batch ordering to avoid stale conditioning.
         sketch_prompt_snapshot = self._snapshot_visual_prompts(self.prompt_learner_sketch)
-        photo_prompt_snapshot = self._snapshot_visual_prompts(self.prompt_learner_photo)
         
         # 1. Trích xuất feature qua 4 nhánh trực tiếp (không qua extractor wrapper)
         out_p = self._forward_branch(
@@ -156,6 +156,9 @@ class CustomCLIP(nn.Module):
             external_visual_prompts=sketch_prompt_snapshot,
             external_flow="sketch_to_photo_early",
         )
+
+        # Use latest photo prompts after photo-branch update for sketch conditioning.
+        photo_prompt_snapshot = self._snapshot_visual_prompts(self.prompt_learner_photo)
         out_s = self._forward_branch(
             sk_tensor,
             classnames,
@@ -165,6 +168,9 @@ class CustomCLIP(nn.Module):
             external_visual_prompts=photo_prompt_snapshot,
             external_flow="photo_to_sketch_deep",
         )
+
+        # Use latest sketch prompts after sketch-branch update for negative photo branch.
+        sketch_prompt_snapshot = self._snapshot_visual_prompts(self.prompt_learner_sketch)
         
         # Đặc trưng Negative lấy từ nhánh Photo
         out_neg = self._forward_branch(
