@@ -262,11 +262,18 @@ class HiCroPL_SBIR(pl.LightningModule):
                     seen_ids.add(id(p))
                     out_list.append(p)
 
+        def add_prompt_token_params(prompt_learner, out_list, seen_ids):
+            # Prompt-token bucket only: excludes auxiliary mappers/gates to keep reporting stable.
+            add_unique_params(prompt_learner.cross_prompts_text.parameters(), out_list, seen_ids)
+            add_unique_params(prompt_learner.cross_prompts_visual.parameters(), out_list, seen_ids)
+            add_unique_params(prompt_learner.text_proxy_tokens.parameters(), out_list, seen_ids)
+            add_unique_params(prompt_learner.visual_proxy_tokens.parameters(), out_list, seen_ids)
+
         seen_ids = set()
 
         prompt_params = []
-        add_unique_params(self.model.prompt_learner_photo.parameters(), prompt_params, seen_ids)
-        add_unique_params(self.model.prompt_learner_sketch.parameters(), prompt_params, seen_ids)
+        add_prompt_token_params(self.model.prompt_learner_photo, prompt_params, seen_ids)
+        add_prompt_token_params(self.model.prompt_learner_sketch, prompt_params, seen_ids)
 
         ln_params = []
         for module in self.model.modules():

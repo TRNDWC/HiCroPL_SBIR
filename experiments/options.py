@@ -68,6 +68,8 @@ parser.add_argument('--text_adapter_m', type=float, default=0.5, help='Residual 
 parser.add_argument('--lambda_distill', type=float, default=1.0, help='Legacy option, currently unused in the active HiCroPL loss')
 parser.add_argument('--triplet_enable_external', action='store_true', default=False,
                     help='Enable external cross-branch prompt exchange: sketch->photo (early) and photo->sketch (deep)')
+parser.add_argument('--triplet_mode', type=str, default='fix1', choices=['fix1', 'fix3'],
+                    help='Triplet experimental mode: fix1 (serial deep) or fix3 (parallel deep)')
 
 # CLIP design_details (CoPrompt-style builder config)
 parser.add_argument('--clip_trainer', type=str, default='HiCroPL', help='Trainer key for CLIP block routing')

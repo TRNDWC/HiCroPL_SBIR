@@ -72,6 +72,7 @@ Changes:
 ### 2.3 In experiments/options.py
 Added CLI options:
 - `--triplet_enable_external`
+- `--triplet_mode` (`fix1` or `fix3`)
 
 ## 3. How to Run
 
@@ -80,10 +81,20 @@ Enable triplet external flows during training:
 ```bash
 python -m experiments.hicropl_prompt \
   --exp_name=hicropl_triplet \
-  --triplet_enable_external
+  --triplet_enable_external \
+  --triplet_mode=fix1
 ```
 
 If you do not pass `--triplet_enable_external`, the new external flows are off and behavior stays close to previous baseline.
+
+To run Fix3 only:
+
+```bash
+python -m experiments.hicropl_prompt \
+  --exp_name=hicropl_triplet_fix3 \
+  --triplet_enable_external \
+  --triplet_mode=fix3
+```
 
 ## 4. Mapping to Your Requirement
 

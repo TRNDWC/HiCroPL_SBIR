@@ -111,6 +111,7 @@ class CrossModalPromptLearner(nn.Module):
         self.dataset_name = getattr(cfg, 'dataset', 'sketchy')
         prec = getattr(cfg, 'prec', "fp32")
         self.triplet_enable_external = getattr(cfg, 'triplet_enable_external', True)
+        self.triplet_mode = getattr(cfg, 'triplet_mode', 'fix1')
         
         assert self.prompt_depth >= 1, "Language prompt depth should be >=1"
         
@@ -165,6 +166,8 @@ class CrossModalPromptLearner(nn.Module):
         self.sketch2visual_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
         # Start near-zero so model initially behaves close to vanilla text->visual mapping.
         self.gate_alpha = nn.Parameter(torch.tensor(0.01, dtype=dtype))
+        self.gate_beta = nn.Parameter(torch.tensor(0.01, dtype=dtype))
+        self.gate_gamma = nn.Parameter(torch.tensor(0.01, dtype=dtype))
         self.external_visual_to_visual_deep = _get_clones(
             CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8),
             self.prompt_depth - self.cross_layer,
@@ -317,26 +320,30 @@ class CrossModalPromptLearner(nn.Module):
         # External cross-branch prompt exchange:
         # - sketch_to_photo_early is applied directly inside shallow additive T->I mapping above.
         # - photo_to_sketch_deep is applied below before deep I->T (forming photo->sketch->text_sketch chain).
-        self._apply_external_visual_flow(external_visual_prompts, external_flow)
+        deep_text_override = self._apply_external_visual_flow(external_visual_prompts, external_flow)
 
         ######## I->T mapping ########
-        text_prompts = torch.cat([self.cross_prompts_text[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)  
-        visual_prompts = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)  
-        proxy_visual_tokens = []
-        for i in range(self.cross_layer, self.prompt_depth):
-            visual_proxy_token = self.attn_pooling_visual_nets[i - self.cross_layer](
-                token_query=self.visual_proxy_tokens[i - self.cross_layer],  
-                sequence_key=self.cross_prompts_visual[i],  
-                sequence_value=self.cross_prompts_visual[i]  
-            )
-            proxy_visual_tokens.append(visual_proxy_token)
-            proxy_visual_prompts = torch.cat(proxy_visual_tokens, dim=0)  
-        text_prompts = text_prompts.view(-1, text_prompts.shape[-1])  
-        proxy_visual_prompts = proxy_visual_prompts.view(-1, proxy_visual_prompts.shape[-1])  
-        updated_text_prompts = self.visual2text_net(text_prompts, proxy_visual_prompts, proxy_visual_prompts)  
-        updated_text_prompts = updated_text_prompts.view(self.prompt_depth - self.cross_layer, -1, updated_text_prompts.shape[-1])
-        for i in range(self.cross_layer, self.prompt_depth):
-            self.cross_prompts_text[i].data.copy_(updated_text_prompts[i - self.cross_layer])
+        if deep_text_override is not None:
+            for i in range(self.cross_layer, self.prompt_depth):
+                self.cross_prompts_text[i].data.copy_(deep_text_override[i - self.cross_layer])
+        else:
+            text_prompts = torch.cat([self.cross_prompts_text[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)
+            visual_prompts = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)
+            proxy_visual_tokens = []
+            for i in range(self.cross_layer, self.prompt_depth):
+                visual_proxy_token = self.attn_pooling_visual_nets[i - self.cross_layer](
+                    token_query=self.visual_proxy_tokens[i - self.cross_layer],
+                    sequence_key=self.cross_prompts_visual[i],
+                    sequence_value=self.cross_prompts_visual[i]
+                )
+                proxy_visual_tokens.append(visual_proxy_token)
+                proxy_visual_prompts = torch.cat(proxy_visual_tokens, dim=0)
+            text_prompts = text_prompts.view(-1, text_prompts.shape[-1])
+            proxy_visual_prompts = proxy_visual_prompts.view(-1, proxy_visual_prompts.shape[-1])
+            updated_text_prompts = self.visual2text_net(text_prompts, proxy_visual_prompts, proxy_visual_prompts)
+            updated_text_prompts = updated_text_prompts.view(self.prompt_depth - self.cross_layer, -1, updated_text_prompts.shape[-1])
+            for i in range(self.cross_layer, self.prompt_depth):
+                self.cross_prompts_text[i].data.copy_(updated_text_prompts[i - self.cross_layer])
 
         cross_prompts_text_deeper = [self.cross_prompts_text[i] for i in range(1, len(self.cross_prompts_text))]
         cross_prompts_visual_deeper = [self.cross_prompts_visual[i] for i in range(1, len(self.cross_prompts_visual))]
@@ -345,19 +352,84 @@ class CrossModalPromptLearner(nn.Module):
 
     def _apply_external_visual_flow(self, external_visual_prompts, external_flow):
         if not self.triplet_enable_external or external_visual_prompts is None or external_flow is None:
-            return
+            return None
 
         if external_flow == "sketch_to_photo_early":
             # Already handled in shallow split-query T->I mapping.
-            return
+            return None
 
         elif external_flow == "photo_to_sketch_deep":
+            if self.triplet_mode == 'fix3':
+                return self._apply_fix3_parallel_deep(external_visual_prompts)
+
+            # fix1/default deep path: serial photo->sketch then regular visual->text
             for i in range(self.cross_layer, self.prompt_depth):
                 idx = i - self.cross_layer
                 current = self.cross_prompts_visual[i]
                 source = external_visual_prompts[i]
                 updated = self.external_visual_to_visual_deep[idx](current, source, source)
                 self.cross_prompts_visual[i].data.copy_(updated)
+
+        return None
+
+    def _apply_fix3_parallel_deep(self, external_visual_prompts):
+        # Snapshot original deep states to break serial dependency.
+        original_sketch_deep = [
+            self.cross_prompts_visual[i].detach().clone()
+            for i in range(self.cross_layer, self.prompt_depth)
+        ]
+        original_text_deep = [
+            self.cross_prompts_text[i].detach().clone()
+            for i in range(self.cross_layer, self.prompt_depth)
+        ]
+
+        sketch_updates = []
+        text_updates = []
+
+        for i in range(self.cross_layer, self.prompt_depth):
+            idx = i - self.cross_layer
+            source_photo = external_visual_prompts[i].to(
+                device=original_sketch_deep[idx].device,
+                dtype=original_sketch_deep[idx].dtype,
+            )
+
+            # Path A: photo -> sketch, based on ORIGINAL sketch prompts.
+            photo_proxy = self.attn_pooling_visual_nets[idx](
+                token_query=self.visual_proxy_tokens[idx],
+                sequence_key=source_photo,
+                sequence_value=source_photo,
+            )
+            sketch_update = self.external_visual_to_visual_deep[idx](
+                original_sketch_deep[idx],
+                photo_proxy,
+                photo_proxy,
+            )
+            sketch_updates.append(sketch_update)
+
+            # Path B: sketch -> text, based on ORIGINAL sketch prompts.
+            sketch_proxy = self.attn_pooling_visual_nets[idx](
+                token_query=self.visual_proxy_tokens[idx],
+                sequence_key=original_sketch_deep[idx],
+                sequence_value=original_sketch_deep[idx],
+            )
+            text_update = self.visual2text_net(
+                original_text_deep[idx],
+                sketch_proxy,
+                sketch_proxy,
+            )
+            text_updates.append(text_update)
+
+        gate_beta = self.gate_beta.to(dtype=original_sketch_deep[0].dtype)
+        gate_gamma = self.gate_gamma.to(dtype=original_text_deep[0].dtype)
+
+        updated_text_deep = []
+        for i in range(self.prompt_depth - self.cross_layer):
+            visual_new = original_sketch_deep[i] + gate_beta * sketch_updates[i]
+            text_new = original_text_deep[i] + gate_gamma * text_updates[i]
+            self.cross_prompts_visual[self.cross_layer + i].data.copy_(visual_new)
+            updated_text_deep.append(text_new)
+
+        return updated_text_deep
 
     def _build_external_shallow_visual_proxies(self, external_visual_prompts, device, dtype):
         # Build one proxy per shallow layer: [cross_layer, v_dim]
