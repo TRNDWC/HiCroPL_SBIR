@@ -230,12 +230,149 @@ class HiCroPL_SBIR(pl.LightningModule):
             'base_names': []
         })
 
+        # Structural loss configuration (text-geometry anchored memory bank).
+        self.lambda_struct = float(getattr(args, 'lambda_struct', 0.0))
+        self.struct_warmup_epochs = int(getattr(args, 'struct_warmup_epochs', 1))
+        self.struct_ema_momentum = float(getattr(args, 'struct_ema_momentum', 0.95))
+        # Keep structural behavior fixed to avoid extra ablation parameters.
+        self.struct_min_ready_classes = 2
+        self.struct_exclude_self = False
+        self.struct_include_photo = True
+        self.struct_include_sketch = True
+
+        self.num_seen_classes = len(self.classnames)
+        embed_dim = int(self.model.clip_model_distill.text_projection.shape[-1])
+
+        self.register_buffer('struct_photo_centroids', torch.zeros(self.num_seen_classes, embed_dim))
+        self.register_buffer('struct_sketch_centroids', torch.zeros(self.num_seen_classes, embed_dim))
+        self.register_buffer('struct_photo_initialized', torch.zeros(self.num_seen_classes, dtype=torch.bool))
+        self.register_buffer('struct_sketch_initialized', torch.zeros(self.num_seen_classes, dtype=torch.bool))
+        self.register_buffer('struct_text_sim', torch.zeros(self.num_seen_classes, self.num_seen_classes))
+        self._struct_text_ready = False
+
     def on_train_epoch_start(self):
         self.model.visual_encoder_photo.eval()
         self.model.visual_encoder_sketch.eval()
         self.model.text_encoder_photo.eval()
         self.model.text_encoder_sketch.eval()
         self.model.clip_model_distill.eval()
+
+    def on_train_start(self):
+        self._initialize_struct_text_geometry()
+
+    def _initialize_struct_text_geometry(self):
+        if self._struct_text_ready or self.num_seen_classes == 0:
+            return
+
+        from src.clip import clip as _clip
+
+        prompt_prefix = getattr(self.cfg, 'ctx_init', 'a photo or a sketch of a')
+        classnames_clean = [name.replace('_', ' ') for name in self.classnames]
+        prompts = [f"{prompt_prefix} {name}." for name in classnames_clean]
+        tokenized_prompts = torch.cat([_clip.tokenize(p) for p in prompts]).to(self.device)
+
+        with torch.no_grad():
+            text_features = self.model.clip_model_distill.encode_text(tokenized_prompts)
+            text_features = F.normalize(text_features.float(), dim=-1)
+            self.struct_text_sim.copy_(text_features @ text_features.t())
+
+        self._struct_text_ready = True
+
+    def _validate_struct_labels(self, labels):
+        if labels.numel() == 0:
+            return
+        min_label = int(labels.min().item())
+        max_label = int(labels.max().item())
+        if min_label < 0 or max_label >= self.num_seen_classes:
+            raise ValueError(
+                f"Structural loss expects labels in [0, {self.num_seen_classes - 1}], "
+                f"but got min={min_label}, max={max_label}. Remap dataset labels first."
+            )
+
+    def _update_struct_memory_bank(self, features, labels, bank, initialized):
+        self._validate_struct_labels(labels)
+        unique_labels = labels.unique()
+        for cls in unique_labels:
+            cls_idx = int(cls.item())
+            cls_mask = labels == cls
+            if not cls_mask.any():
+                continue
+
+            cls_centroid = features[cls_mask].mean(dim=0)
+            cls_centroid = F.normalize(cls_centroid.unsqueeze(0), dim=-1).squeeze(0)
+
+            if not initialized[cls_idx]:
+                bank[cls_idx].copy_(cls_centroid)
+                initialized[cls_idx] = True
+            else:
+                bank[cls_idx].mul_(self.struct_ema_momentum).add_(
+                    cls_centroid * (1.0 - self.struct_ema_momentum)
+                )
+                bank[cls_idx].copy_(F.normalize(bank[cls_idx].unsqueeze(0), dim=-1).squeeze(0))
+
+    def _compute_structural_modality_loss(self, features, labels, bank, initialized):
+        if labels.numel() == 0 or int(initialized.sum().item()) < self.struct_min_ready_classes:
+            return features.new_zeros(())
+
+        self._validate_struct_labels(labels)
+        ref_indices = initialized.nonzero(as_tuple=False).squeeze(1)
+        if ref_indices.numel() < self.struct_min_ready_classes:
+            return features.new_zeros(())
+
+        ref_centroids = bank[ref_indices].detach()
+        losses = []
+
+        for cls in labels.unique():
+            cls_idx = int(cls.item())
+            cls_mask = labels == cls
+            if cls_mask.sum() == 0:
+                continue
+
+            # Hybrid gradient flow: query centroid has gradient, EMA targets are detached.
+            batch_centroid = features[cls_mask].mean(dim=0, keepdim=True)
+            batch_centroid = F.normalize(batch_centroid, dim=-1)
+
+            sim_pred = (batch_centroid @ ref_centroids.t()).squeeze(0)
+            sim_target = self.struct_text_sim[cls_idx, ref_indices].detach()
+
+            if self.struct_exclude_self:
+                valid = ref_indices != cls_idx
+                if valid.sum() == 0:
+                    continue
+                sim_pred = sim_pred[valid]
+                sim_target = sim_target[valid]
+
+            losses.append(F.mse_loss(sim_pred, sim_target))
+
+        if not losses:
+            return features.new_zeros(())
+        return torch.stack(losses).mean()
+
+    def _compute_structural_loss(self, photo_feat, sketch_feat, labels):
+        if self.lambda_struct <= 0.0:
+            return photo_feat.new_zeros(())
+        if self.current_epoch < self.struct_warmup_epochs:
+            return photo_feat.new_zeros(())
+        if not self._struct_text_ready:
+            self._initialize_struct_text_geometry()
+
+        losses = []
+        if self.struct_include_photo:
+            losses.append(
+                self._compute_structural_modality_loss(
+                    photo_feat, labels, self.struct_photo_centroids, self.struct_photo_initialized
+                )
+            )
+        if self.struct_include_sketch:
+            losses.append(
+                self._compute_structural_modality_loss(
+                    sketch_feat, labels, self.struct_sketch_centroids, self.struct_sketch_initialized
+                )
+            )
+
+        if not losses:
+            return photo_feat.new_zeros(())
+        return torch.stack(losses).mean()
 
     def configure_optimizers(self):
         def add_unique_params(candidates, out_list, seen_ids):
@@ -280,9 +417,26 @@ class HiCroPL_SBIR(pl.LightningModule):
         from src.losses_hicropl import loss_fn_hicropl
         
         features = self.model(batch, self.classnames)
-        loss = loss_fn_hicropl(self.args, features)
+        base_loss, base_components = loss_fn_hicropl(self.args, features, return_components=True)
+
+        photo_feat = F.normalize(features[0], dim=-1)
+        sketch_feat = F.normalize(features[2], dim=-1)
+        label = features[5].to(photo_feat.device).long()
+
+        with torch.no_grad():
+            self._update_struct_memory_bank(photo_feat.detach(), label, self.struct_photo_centroids, self.struct_photo_initialized)
+            self._update_struct_memory_bank(sketch_feat.detach(), label, self.struct_sketch_centroids, self.struct_sketch_initialized)
+
+        struct_loss = self._compute_structural_loss(photo_feat, sketch_feat, label)
+        loss = base_loss + (self.lambda_struct * struct_loss)
         
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
+        self.log('train_loss_base', base_loss.detach(), on_step=True, on_epoch=True, prog_bar=False, logger=True)
+        self.log('train_loss_struct', struct_loss.detach(), on_step=True, on_epoch=True, prog_bar=False, logger=True)
+        self.log('struct_ready_photo', self.struct_photo_initialized.float().mean(), on_step=False, on_epoch=True, prog_bar=False, logger=True)
+        self.log('struct_ready_sketch', self.struct_sketch_initialized.float().mean(), on_step=False, on_epoch=True, prog_bar=False, logger=True)
+        self.log('loss_cross_modal', base_components['loss_cross_modal'], on_step=True, on_epoch=True, prog_bar=False, logger=True)
+        self.log('loss_ce', base_components['loss_ce'], on_step=True, on_epoch=True, prog_bar=False, logger=True)
         self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False, logger=False)
         
         return loss
