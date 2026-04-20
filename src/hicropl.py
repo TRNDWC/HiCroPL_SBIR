@@ -291,6 +291,137 @@ class CrossModalPromptLearner(nn.Module):
         return text_input, tokenized_prompts, fixed_embeddings, cross_prompts_text_deeper, cross_prompts_visual_deeper
 
 
+class CrossModalPromptLearner_SketchPhoto(nn.Module):
+    """Cross-modality visual prompt updater for Sketch<->Photo.
+
+    Early layers (0..cross_layer-1): sketch proxies update photo prompts.
+    Deeper layers (cross_layer..prompt_depth-1): photo proxies update sketch prompts.
+    """
+
+    def __init__(self, cfg, v_dim=768):
+        super().__init__()
+
+        self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
+        self.cross_layer = getattr(cfg, 'cross_layer', 4)
+        self.n_ctx = getattr(cfg, 'n_ctx', 4)
+        prec = getattr(cfg, 'prec', 'fp32')
+
+        if self.cross_layer < 0 or self.cross_layer > self.prompt_depth:
+            raise ValueError(
+                f"cross_layer must be in [0, prompt_depth], got {self.cross_layer} for prompt_depth={self.prompt_depth}"
+            )
+
+        self.v_dim = v_dim
+        self.num_early = self.cross_layer
+        self.num_deeper = self.prompt_depth - self.cross_layer
+
+        self.sketch_to_photo = CrossPromptAttention(
+            hidden_size=v_dim,
+            encoder_hidden_size=v_dim,
+            num_attention_heads=8,
+        )
+        self.photo_to_sketch = CrossPromptAttention(
+            hidden_size=v_dim,
+            encoder_hidden_size=v_dim,
+            num_attention_heads=8,
+        )
+
+        if self.num_early > 0:
+            attn_pooling_sketch = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
+            self.attn_pooling_sketch_early = _get_clones(attn_pooling_sketch, self.num_early)
+            self.sketch_proxy_tokens = nn.ParameterList(
+                [nn.Parameter(torch.randn(1, v_dim)) for _ in range(self.num_early)]
+            )
+        else:
+            self.attn_pooling_sketch_early = nn.ModuleList()
+            self.sketch_proxy_tokens = nn.ParameterList()
+
+        if self.num_deeper > 0:
+            attn_pooling_photo = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
+            self.attn_pooling_photo_deeper = _get_clones(attn_pooling_photo, self.num_deeper)
+            self.photo_proxy_tokens = nn.ParameterList(
+                [nn.Parameter(torch.randn(1, v_dim)) for _ in range(self.num_deeper)]
+            )
+        else:
+            self.attn_pooling_photo_deeper = nn.ModuleList()
+            self.photo_proxy_tokens = nn.ParameterList()
+
+        if prec == 'fp16':
+            self.sketch_to_photo = self.sketch_to_photo.half()
+            self.photo_to_sketch = self.photo_to_sketch.half()
+            self.attn_pooling_sketch_early = self.attn_pooling_sketch_early.half()
+            self.attn_pooling_photo_deeper = self.attn_pooling_photo_deeper.half()
+
+    def _validate_prompts(self, prompts, name):
+        if len(prompts) != self.prompt_depth:
+            raise ValueError(
+                f"{name} should have {self.prompt_depth} layers, got {len(prompts)}"
+            )
+        for i, p in enumerate(prompts):
+            if p.ndim != 2 or p.shape[0] != self.n_ctx or p.shape[1] != self.v_dim:
+                raise ValueError(
+                    f"{name}[{i}] should have shape [{self.n_ctx}, {self.v_dim}], got {tuple(p.shape)}"
+                )
+
+    def forward(self, photo_visual_prompts, sketch_visual_prompts):
+        self._validate_prompts(photo_visual_prompts, "photo_visual_prompts")
+        self._validate_prompts(sketch_visual_prompts, "sketch_visual_prompts")
+
+        updated_photo = [p for p in photo_visual_prompts]
+        updated_sketch = [p for p in sketch_visual_prompts]
+
+        if self.num_early > 0:
+            photo_early = torch.stack(updated_photo[:self.num_early], dim=0)
+            sketch_proxy_tokens = []
+            for i in range(self.num_early):
+                sketch_proxy = self.attn_pooling_sketch_early[i](
+                    token_query=self.sketch_proxy_tokens[i],
+                    sequence_key=updated_sketch[i],
+                    sequence_value=updated_sketch[i],
+                )
+                sketch_proxy_tokens.append(sketch_proxy)
+
+            sketch_proxies = torch.cat(sketch_proxy_tokens, dim=0).view(self.num_early, self.v_dim)
+
+            photo_early_flat = photo_early.view(-1, self.v_dim)
+            photo_early_updated = self.sketch_to_photo(
+                photo_early_flat,
+                sketch_proxies,
+                sketch_proxies,
+            )
+            photo_early_updated = photo_early_updated.view(self.num_early, self.n_ctx, self.v_dim)
+
+            for i in range(self.num_early):
+                updated_photo[i] = photo_early_updated[i]
+
+        if self.num_deeper > 0:
+            sketch_deeper = torch.stack(updated_sketch[self.cross_layer:self.prompt_depth], dim=0)
+            photo_proxy_tokens = []
+            for i in range(self.num_deeper):
+                layer_idx = self.cross_layer + i
+                photo_proxy = self.attn_pooling_photo_deeper[i](
+                    token_query=self.photo_proxy_tokens[i],
+                    sequence_key=updated_photo[layer_idx],
+                    sequence_value=updated_photo[layer_idx],
+                )
+                photo_proxy_tokens.append(photo_proxy)
+
+            photo_proxies = torch.cat(photo_proxy_tokens, dim=0).view(self.num_deeper, self.v_dim)
+
+            sketch_deeper_flat = sketch_deeper.view(-1, self.v_dim)
+            sketch_deeper_updated = self.photo_to_sketch(
+                sketch_deeper_flat,
+                photo_proxies,
+                photo_proxies,
+            )
+            sketch_deeper_updated = sketch_deeper_updated.view(self.num_deeper, self.n_ctx, self.v_dim)
+
+            for i in range(self.num_deeper):
+                updated_sketch[self.cross_layer + i] = sketch_deeper_updated[i]
+
+        return updated_photo, updated_sketch
+
+
 class VisualEncoder(nn.Module):
     """Wraps CLIP VisionTransformer_HiCroPL for deep prompt injection.
     

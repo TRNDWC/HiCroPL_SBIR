@@ -8,6 +8,7 @@ from torchmetrics.functional.retrieval import retrieval_average_precision, retri
 
 from src.hicropl import (
     CrossModalPromptLearner,
+    CrossModalPromptLearner_SketchPhoto,
     TextEncoder,
     VisualEncoder,
 )
@@ -68,6 +69,12 @@ class CustomCLIP(nn.Module):
             clip_model_distill=self.clip_model_distill
         )
 
+        print("Initializing Sketch-Photo Visual Prompt Learner...")
+        self.prompt_learner_sketch_photo = CrossModalPromptLearner_SketchPhoto(
+            cfg=cfg,
+            v_dim=768,
+        )
+
         # -- Encoders --
         self.text_encoder_photo = TextEncoder(clip_photo)
         self.text_encoder_sketch = TextEncoder(clip_sketch)
@@ -82,10 +89,27 @@ class CustomCLIP(nn.Module):
         text_encoder,
         image_encoder,
         label=None,
+        branch_prompts=None,
+        first_visual_prompt_override=None,
+        deeper_visual_prompts_override=None,
     ):
-        text_input, tokenized_prompts, text_features_fixed_all, cross_prompts_text_deeper, cross_prompts_visual_deeper = prompt_learner(
-            classnames,
-        )
+        if branch_prompts is None:
+            text_input, tokenized_prompts, text_features_fixed_all, cross_prompts_text_deeper, cross_prompts_visual_deeper = prompt_learner(
+                classnames,
+            )
+            first_visual_prompt = prompt_learner.cross_prompts_visual[0]
+        else:
+            text_input = branch_prompts["text_input"]
+            tokenized_prompts = branch_prompts["tokenized_prompts"]
+            text_features_fixed_all = branch_prompts["text_features_fixed_all"]
+            cross_prompts_text_deeper = branch_prompts["cross_prompts_text_deeper"]
+            cross_prompts_visual_deeper = branch_prompts["cross_prompts_visual_deeper"]
+            first_visual_prompt = branch_prompts["first_visual_prompt"]
+
+        if first_visual_prompt_override is not None:
+            first_visual_prompt = first_visual_prompt_override
+        if deeper_visual_prompts_override is not None:
+            cross_prompts_visual_deeper = deeper_visual_prompts_override
 
         with torch.no_grad():
             image_features_fixed = prompt_learner.ZS_image_encoder(image.type(self.dtype))
@@ -94,7 +118,7 @@ class CustomCLIP(nn.Module):
         text_features_all = text_encoder(text_input, tokenized_prompts, cross_prompts_text_deeper)
         image_features = image_encoder(
             image.type(self.dtype),
-            prompt_learner.cross_prompts_visual[0],
+            first_visual_prompt,
             cross_prompts_visual_deeper,
         )
 
@@ -133,6 +157,43 @@ class CustomCLIP(nn.Module):
         Format: [sk_tensor, img_tensor, neg_tensor, sk_aug_tensor, img_aug_tensor, label, filename]
         """
         sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
+
+        photo_text_input, photo_tokenized_prompts, photo_text_features_fixed_all, photo_cross_prompts_text_deeper, photo_cross_prompts_visual_deeper = self.prompt_learner_photo(
+            classnames,
+        )
+        sketch_text_input, sketch_tokenized_prompts, sketch_text_features_fixed_all, sketch_cross_prompts_text_deeper, sketch_cross_prompts_visual_deeper = self.prompt_learner_sketch(
+            classnames,
+        )
+
+        photo_visual_prompts = [self.prompt_learner_photo.cross_prompts_visual[0]] + list(photo_cross_prompts_visual_deeper)
+        sketch_visual_prompts = [self.prompt_learner_sketch.cross_prompts_visual[0]] + list(sketch_cross_prompts_visual_deeper)
+
+        photo_visual_prompts_updated, sketch_visual_prompts_updated = self.prompt_learner_sketch_photo(
+            photo_visual_prompts,
+            sketch_visual_prompts,
+        )
+
+        photo_first_visual_prompt = photo_visual_prompts_updated[0]
+        photo_deeper_visual_prompts = photo_visual_prompts_updated[1:]
+        sketch_first_visual_prompt = sketch_visual_prompts_updated[0]
+        sketch_deeper_visual_prompts = sketch_visual_prompts_updated[1:]
+
+        photo_branch_prompts = {
+            "text_input": photo_text_input,
+            "tokenized_prompts": photo_tokenized_prompts,
+            "text_features_fixed_all": photo_text_features_fixed_all,
+            "cross_prompts_text_deeper": photo_cross_prompts_text_deeper,
+            "cross_prompts_visual_deeper": photo_cross_prompts_visual_deeper,
+            "first_visual_prompt": self.prompt_learner_photo.cross_prompts_visual[0],
+        }
+        sketch_branch_prompts = {
+            "text_input": sketch_text_input,
+            "tokenized_prompts": sketch_tokenized_prompts,
+            "text_features_fixed_all": sketch_text_features_fixed_all,
+            "cross_prompts_text_deeper": sketch_cross_prompts_text_deeper,
+            "cross_prompts_visual_deeper": sketch_cross_prompts_visual_deeper,
+            "first_visual_prompt": self.prompt_learner_sketch.cross_prompts_visual[0],
+        }
         
         # 1. Trích xuất feature qua 4 nhánh trực tiếp (không qua extractor wrapper)
         out_p = self._forward_branch(
@@ -141,6 +202,9 @@ class CustomCLIP(nn.Module):
             prompt_learner=self.prompt_learner_photo,
             text_encoder=self.text_encoder_photo,
             image_encoder=self.visual_encoder_photo,
+            branch_prompts=photo_branch_prompts,
+            first_visual_prompt_override=photo_first_visual_prompt,
+            deeper_visual_prompts_override=photo_deeper_visual_prompts,
         )
         out_s = self._forward_branch(
             sk_tensor,
@@ -148,6 +212,9 @@ class CustomCLIP(nn.Module):
             prompt_learner=self.prompt_learner_sketch,
             text_encoder=self.text_encoder_sketch,
             image_encoder=self.visual_encoder_sketch,
+            branch_prompts=sketch_branch_prompts,
+            first_visual_prompt_override=sketch_first_visual_prompt,
+            deeper_visual_prompts_override=sketch_deeper_visual_prompts,
         )
         
         # Đặc trưng Negative lấy từ nhánh Photo
@@ -157,6 +224,9 @@ class CustomCLIP(nn.Module):
             prompt_learner=self.prompt_learner_photo,
             text_encoder=self.text_encoder_photo,
             image_encoder=self.visual_encoder_photo,
+            branch_prompts=photo_branch_prompts,
+            first_visual_prompt_override=photo_first_visual_prompt,
+            deeper_visual_prompts_override=photo_deeper_visual_prompts,
         )
         
         # 2. Use extractor outputs directly, without adapter residual mixing
@@ -249,6 +319,7 @@ class HiCroPL_SBIR(pl.LightningModule):
         prompt_params = []
         add_unique_params(self.model.prompt_learner_photo.parameters(), prompt_params, seen_ids)
         add_unique_params(self.model.prompt_learner_sketch.parameters(), prompt_params, seen_ids)
+        add_unique_params(self.model.prompt_learner_sketch_photo.parameters(), prompt_params, seen_ids)
 
         ln_params = []
         for module in self.model.modules():
