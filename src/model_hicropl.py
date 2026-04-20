@@ -301,10 +301,14 @@ class HiCroPL_SBIR(pl.LightningModule):
         })
 
     def on_train_epoch_start(self):
-        self.model.visual_encoder_photo.eval()
-        self.model.visual_encoder_sketch.eval()
-        self.model.text_encoder_photo.eval()
-        self.model.text_encoder_sketch.eval()
+        # Keep trainable branches in train mode; only frozen distill branch stays in eval.
+        self.model.visual_encoder_photo.train()
+        self.model.visual_encoder_sketch.train()
+        self.model.text_encoder_photo.train()
+        self.model.text_encoder_sketch.train()
+        self.model.prompt_learner_photo.train()
+        self.model.prompt_learner_sketch.train()
+        self.model.prompt_learner_sketch_photo.train()
         self.model.clip_model_distill.eval()
 
     def configure_optimizers(self):
