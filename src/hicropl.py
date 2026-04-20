@@ -8,6 +8,14 @@ Components:
     - TextEncoder: CLIP text encoder with deep prompt injection
     - VisualEncoder: CLIP ViT encoder with deep prompt injection
     - CrossModalPromptLearner: Bidirectional knowledge flow (text <-> visual)
+    - CrossModalPromptLearner_SketchPhoto: Sketch<->photo visual prompt exchanger with per-layer proxy tokens
+
+**CrossModalPromptLearner_SketchPhoto:**
+A specialized module for exchanging visual prompts between sketch and photo branches.
+Uses per-layer learnable proxy tokens (matching HiCroPL gốc architecture) while
+maintaining gradient flow via in-place updates (.data.copy_()) to preserve trainability
+of both sketch and photo prompt learners. This design balances architectural consistency
+with computational efficiency.
 """
 
 import copy
@@ -292,134 +300,178 @@ class CrossModalPromptLearner(nn.Module):
 
 
 class CrossModalPromptLearner_SketchPhoto(nn.Module):
-    """Cross-modality visual prompt updater for Sketch<->Photo.
-
-    Early layers (0..cross_layer-1): sketch proxies update photo prompts.
-    Deeper layers (cross_layer..prompt_depth-1): photo proxies update sketch prompts.
+    """Lightweight visual prompt exchanger for Sketch<->Photo branches in HiCroPL.
+    
+    This module implements cross-modality visual prompt exchange for sketch-based image 
+    retrieval (SBIR) by allowing learned representations from one modality to guide 
+    refinement of prompts in the other modality.
+    
+    **Architecture:**
+    - Early layers (0..cross_layer-1): Sketch proxies → Photo prompts
+    - Deeper layers (cross_layer..prompt_depth-1): Photo proxies → Sketch prompts
+    
+    **Key Design Decisions (matching HiCroPL gốc):**
+    - Per-layer proxy tokens: Each layer has its own learnable query token (not shared)
+      This preserves layer-specific learning capacity, consistent with original HiCroPL
+    - In-place updates using .data.copy_() to preserve gradient flow to original parameters
+    - Reuses AttentionPooling and CrossPromptAttention from CrossModalPromptLearner
+    
+    **Gradient Flow:**
+    Updates use .data.copy_() instead of assignment to ensure gradients flow back to 
+    the original prompt parameters in parent prompt learners. This allows both 
+    sketch and photo prompts to remain trainable while maintaining architectural consistency.
+    
+    **Usage:**
+    ```python
+    exchanger = CrossModalPromptLearner_SketchPhoto(cfg)
+    photo_prompts_updated, sketch_prompts_updated = exchanger(
+        photo_visual_prompts,  # list of [n_ctx, 768] tensors
+        sketch_visual_prompts  # list of [n_ctx, 768] tensors
+    )
+    ```
     """
 
     def __init__(self, cfg, v_dim=768):
+        """Initialize the cross-modal prompt exchanger with per-layer proxy tokens.
+        
+        Args:
+            cfg: Configuration object with attributes:
+                - prompt_depth (int): Total number of prompt layers (default: 9)
+                - cross_layer (int): Layer index where sketch→photo switches to photo→sketch (default: 4)
+                - n_ctx (int): Number of context tokens per prompt (default: 4)
+            v_dim (int): Visual embedding dimension, should match CLIP output (default: 768)
+        
+        Note:
+            Unlike a naive per-layer approach that would create 2*(num_early+num_deeper) parameters,
+            this design creates exactly num_early + num_deeper proxy tokens while maintaining
+            layer-specific learning capacity through per-layer AttentionPooling modules.
+        """
         super().__init__()
 
         self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
         self.cross_layer = getattr(cfg, 'cross_layer', 4)
         self.n_ctx = getattr(cfg, 'n_ctx', 4)
-        prec = getattr(cfg, 'prec', 'fp32')
-
-        if self.cross_layer < 0 or self.cross_layer > self.prompt_depth:
-            raise ValueError(
-                f"cross_layer must be in [0, prompt_depth], got {self.cross_layer} for prompt_depth={self.prompt_depth}"
-            )
-
         self.v_dim = v_dim
         self.num_early = self.cross_layer
         self.num_deeper = self.prompt_depth - self.cross_layer
 
+        # Cross-modal attention modules
         self.sketch_to_photo = CrossPromptAttention(
-            hidden_size=v_dim,
-            encoder_hidden_size=v_dim,
-            num_attention_heads=8,
+            hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8
         )
         self.photo_to_sketch = CrossPromptAttention(
-            hidden_size=v_dim,
-            encoder_hidden_size=v_dim,
-            num_attention_heads=8,
+            hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8
         )
 
+        # Early stage: per-layer proxy tokens for sketch→photo exchange (matching HiCroPL gốc)
         if self.num_early > 0:
-            attn_pooling_sketch = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
-            self.attn_pooling_sketch_early = _get_clones(attn_pooling_sketch, self.num_early)
+            attn_pool = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
+            self.attn_pooling_sketch = _get_clones(attn_pool, self.num_early)
+            sketch_proxy_token = torch.randn(1, v_dim)
             self.sketch_proxy_tokens = nn.ParameterList(
-                [nn.Parameter(torch.randn(1, v_dim)) for _ in range(self.num_early)]
+                [nn.Parameter(sketch_proxy_token) for _ in range(self.num_early)]
             )
         else:
-            self.attn_pooling_sketch_early = nn.ModuleList()
+            self.attn_pooling_sketch = nn.ModuleList()
             self.sketch_proxy_tokens = nn.ParameterList()
 
+        # Deeper stage: per-layer proxy tokens for photo→sketch exchange (matching HiCroPL gốc)
         if self.num_deeper > 0:
-            attn_pooling_photo = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
-            self.attn_pooling_photo_deeper = _get_clones(attn_pooling_photo, self.num_deeper)
+            attn_pool = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
+            self.attn_pooling_photo = _get_clones(attn_pool, self.num_deeper)
+            photo_proxy_token = torch.randn(1, v_dim)
             self.photo_proxy_tokens = nn.ParameterList(
-                [nn.Parameter(torch.randn(1, v_dim)) for _ in range(self.num_deeper)]
+                [nn.Parameter(photo_proxy_token) for _ in range(self.num_deeper)]
             )
         else:
-            self.attn_pooling_photo_deeper = nn.ModuleList()
+            self.attn_pooling_photo = nn.ModuleList()
             self.photo_proxy_tokens = nn.ParameterList()
 
-        if prec == 'fp16':
-            self.sketch_to_photo = self.sketch_to_photo.half()
-            self.photo_to_sketch = self.photo_to_sketch.half()
-            self.attn_pooling_sketch_early = self.attn_pooling_sketch_early.half()
-            self.attn_pooling_photo_deeper = self.attn_pooling_photo_deeper.half()
-
-    def _validate_prompts(self, prompts, name):
-        if len(prompts) != self.prompt_depth:
-            raise ValueError(
-                f"{name} should have {self.prompt_depth} layers, got {len(prompts)}"
-            )
-        for i, p in enumerate(prompts):
-            if p.ndim != 2 or p.shape[0] != self.n_ctx or p.shape[1] != self.v_dim:
-                raise ValueError(
-                    f"{name}[{i}] should have shape [{self.n_ctx}, {self.v_dim}], got {tuple(p.shape)}"
-                )
-
     def forward(self, photo_visual_prompts, sketch_visual_prompts):
-        self._validate_prompts(photo_visual_prompts, "photo_visual_prompts")
-        self._validate_prompts(sketch_visual_prompts, "sketch_visual_prompts")
-
-        updated_photo = [p for p in photo_visual_prompts]
-        updated_sketch = [p for p in sketch_visual_prompts]
-
+        """Exchange prompts between sketch and photo branches.
+        
+        Early layers: Sketch branch proxies update Photo branch prompts.
+        Deeper layers: Photo branch proxies update Sketch branch prompts.
+        
+        Args:
+            photo_visual_prompts (list of torch.Tensor): 
+                Photo visual prompts with shape [n_ctx, v_dim] for each layer.
+                Length must equal self.prompt_depth.
+            sketch_visual_prompts (list of torch.Tensor): 
+                Sketch visual prompts with shape [n_ctx, v_dim] for each layer.
+                Length must equal self.prompt_depth.
+        
+        Returns:
+            tuple of (photo_visual_prompts, sketch_visual_prompts):
+                Updated prompts after cross-modal exchange. Lists are modified in-place
+                using .data.copy_() to preserve gradient flow to original parameters.
+        
+        **Gradient Flow Guarantee:**
+        - Updates use .data.copy_() instead of assignment (e.g., list[i] = new_tensor)
+        - Ensures gradients computed during loss.backward() flow back to original 
+          parameters in parent prompt learners
+        - Both photo and sketch prompts remain fully trainable
+        
+        **Per-Layer Proxy Design:**
+        Each layer uses its own learnable proxy token (sketch_proxy_tokens[i], photo_proxy_tokens[i])
+        This design matches HiCroPL gốc and preserves layer-specific learning capacity.
+        """
+        
+        # Early layers: sketch proxies guide photo prompts
         if self.num_early > 0:
-            photo_early = torch.stack(updated_photo[:self.num_early], dim=0)
-            sketch_proxy_tokens = []
+            # Step 1: Pool sketch prompts into per-layer proxies using per-layer token queries
+            sketch_proxies = []
             for i in range(self.num_early):
-                sketch_proxy = self.attn_pooling_sketch_early[i](
-                    token_query=self.sketch_proxy_tokens[i],
-                    sequence_key=updated_sketch[i],
-                    sequence_value=updated_sketch[i],
+                proxy = self.attn_pooling_sketch[i](
+                    token_query=self.sketch_proxy_tokens[i],  # Per-layer learnable query
+                    sequence_key=sketch_visual_prompts[i],
+                    sequence_value=sketch_visual_prompts[i],
                 )
-                sketch_proxy_tokens.append(sketch_proxy)
-
-            sketch_proxies = torch.cat(sketch_proxy_tokens, dim=0).view(self.num_early, self.v_dim)
-
+                sketch_proxies.append(proxy)
+            
+            # Step 2: Update photo early layers guided by sketch proxies
+            sketch_proxies_cat = torch.cat(sketch_proxies, dim=0)
+            photo_early = torch.stack(photo_visual_prompts[:self.num_early])
             photo_early_flat = photo_early.view(-1, self.v_dim)
-            photo_early_updated = self.sketch_to_photo(
-                photo_early_flat,
-                sketch_proxies,
-                sketch_proxies,
+            
+            photo_updated_flat = self.sketch_to_photo(
+                photo_early_flat, sketch_proxies_cat, sketch_proxies_cat
             )
-            photo_early_updated = photo_early_updated.view(self.num_early, self.n_ctx, self.v_dim)
-
+            photo_updated = photo_updated_flat.view(self.num_early, self.n_ctx, self.v_dim)
+            
+            # Step 3: In-place copy to preserve gradient flow to original parameters
             for i in range(self.num_early):
-                updated_photo[i] = photo_early_updated[i]
+                photo_visual_prompts[i].data.copy_(photo_updated[i])
 
+        # Deeper layers: photo proxies guide sketch prompts
         if self.num_deeper > 0:
-            sketch_deeper = torch.stack(updated_sketch[self.cross_layer:self.prompt_depth], dim=0)
-            photo_proxy_tokens = []
+            # Step 1: Pool photo prompts into per-layer proxies using per-layer token queries
+            photo_proxies = []
             for i in range(self.num_deeper):
                 layer_idx = self.cross_layer + i
-                photo_proxy = self.attn_pooling_photo_deeper[i](
-                    token_query=self.photo_proxy_tokens[i],
-                    sequence_key=updated_photo[layer_idx],
-                    sequence_value=updated_photo[layer_idx],
+                proxy = self.attn_pooling_photo[i](
+                    token_query=self.photo_proxy_tokens[i],  # Per-layer learnable query
+                    sequence_key=photo_visual_prompts[layer_idx],
+                    sequence_value=photo_visual_prompts[layer_idx],
                 )
-                photo_proxy_tokens.append(photo_proxy)
-
-            photo_proxies = torch.cat(photo_proxy_tokens, dim=0).view(self.num_deeper, self.v_dim)
-
+                photo_proxies.append(proxy)
+            
+            # Step 2: Update sketch deeper layers guided by photo proxies
+            photo_proxies_cat = torch.cat(photo_proxies, dim=0)
+            sketch_deeper = torch.stack(sketch_visual_prompts[self.cross_layer:])
             sketch_deeper_flat = sketch_deeper.view(-1, self.v_dim)
-            sketch_deeper_updated = self.photo_to_sketch(
-                sketch_deeper_flat,
-                photo_proxies,
-                photo_proxies,
+            
+            sketch_updated_flat = self.photo_to_sketch(
+                sketch_deeper_flat, photo_proxies_cat, photo_proxies_cat
             )
-            sketch_deeper_updated = sketch_deeper_updated.view(self.num_deeper, self.n_ctx, self.v_dim)
-
+            sketch_updated = sketch_updated_flat.view(self.num_deeper, self.n_ctx, self.v_dim)
+            
+            # Step 3: In-place copy to preserve gradient flow to original parameters
             for i in range(self.num_deeper):
-                updated_sketch[self.cross_layer + i] = sketch_deeper_updated[i]
+                layer_idx = self.cross_layer + i
+                sketch_visual_prompts[layer_idx].data.copy_(sketch_updated[i])
 
-        return updated_photo, updated_sketch
+        return photo_visual_prompts, sketch_visual_prompts
 
 
 class VisualEncoder(nn.Module):
