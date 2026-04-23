@@ -42,6 +42,7 @@ class CustomCLIP(nn.Module):
             raise ValueError(
                 f"visual_prompt_order must be 'crossmodal_first' or 'crossvisual_first', got {self.visual_prompt_order}"
             )
+        self.gate_alpha = nn.Parameter(torch.tensor(0.01))
 
         # 1. Distill branch (vanilla CLIP)
         self.clip_model_distill = clip_model_frozen
@@ -99,18 +100,13 @@ class CustomCLIP(nn.Module):
                 f"Mismatched deeper prompt depths: {len(crossmodal_deeper_prompts)} vs {len(crossvisual_deeper_prompts)}"
             )
 
-        if self.visual_prompt_order == 'crossmodal_first':
-            merged_first = torch.cat([crossmodal_first_prompt, crossvisual_first_prompt], dim=0)
-            merged_deeper = [
-                torch.cat([cm_prompt, cv_prompt], dim=0)
-                for cm_prompt, cv_prompt in zip(crossmodal_deeper_prompts, crossvisual_deeper_prompts)
-            ]
-        else:
-            merged_first = torch.cat([crossvisual_first_prompt, crossmodal_first_prompt], dim=0)
-            merged_deeper = [
-                torch.cat([cv_prompt, cm_prompt], dim=0)
-                for cm_prompt, cv_prompt in zip(crossmodal_deeper_prompts, crossvisual_deeper_prompts)
-            ]
+        # Additive fusion keeps the prompt length unchanged.
+        # visual_prompt_order is retained for compatibility, but the fusion rule is fixed.
+        merged_first = crossmodal_first_prompt + self.gate_alpha * crossvisual_first_prompt
+        merged_deeper = [
+            cm_prompt + self.gate_alpha * cv_prompt
+            for cm_prompt, cv_prompt in zip(crossmodal_deeper_prompts, crossvisual_deeper_prompts)
+        ]
 
         return merged_first, merged_deeper
 
