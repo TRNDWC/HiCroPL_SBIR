@@ -314,3 +314,136 @@ class VisualEncoder(nn.Module):
         """
         return self.vit(image.type(self.dtype), first_visual_prompt, deeper_visual_prompts)
 
+
+
+class CrossVisualPromptLearner(nn.Module):
+    def __init__(self, cfg, clip_model, clip_model_distill=None):
+        super().__init__()
+        
+        self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
+        self.cross_layer = getattr(cfg, 'cross_layer', 4)
+        n_ctx = getattr(cfg, 'n_ctx', 4)
+        self.dataset_name = getattr(cfg, 'dataset', 'sketchy')
+        prec = getattr(cfg, 'prec', "fp32")
+        
+        assert self.prompt_depth >= 1, "Visual prompt depth should be >=1"
+        
+        dtype = clip_model.dtype
+        v_dim = 768
+        self.v_dim = v_dim
+        self.dtype = dtype
+        self.clip_model = clip_model
+        self.clip_model_distill = clip_model_distill if clip_model_distill is not None else clip_model
+
+        ######## Sketch branch prompt initialization ########
+        sketch_vectors = torch.empty(n_ctx, v_dim, dtype=dtype)
+        nn.init.normal_(sketch_vectors, std=0.02)
+        cross_prompts_sketch = nn.ParameterList(
+            [nn.Parameter(sketch_vectors)] +
+            [nn.Parameter(torch.empty(n_ctx, v_dim, dtype=dtype)) for _ in range(self.prompt_depth - 1)]
+        )
+        for p in cross_prompts_sketch[1:]:
+            nn.init.normal_(p, std=0.02)
+        self.cross_prompts_sketch = cross_prompts_sketch
+
+        ######## Photo branch prompt initialization ########
+        photo_vectors = torch.empty(n_ctx, v_dim, dtype=dtype)
+        nn.init.normal_(photo_vectors, std=0.02)
+        cross_prompts_photo = nn.ParameterList(
+            [nn.Parameter(photo_vectors)] +
+            [nn.Parameter(torch.empty(n_ctx, v_dim, dtype=dtype)) for _ in range(self.prompt_depth - 1)]
+        )
+        for p in cross_prompts_photo[1:]:
+            nn.init.normal_(p, std=0.02)
+        self.cross_prompts_photo = cross_prompts_photo
+
+        ######## Knowledge mapper: Sketch ↔ Photo ########
+        self.sketch2photo_net = CrossPromptAttention(
+            hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8
+        )
+        self.photo2sketch_net = CrossPromptAttention(
+            hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8
+        )
+        if prec == "fp16":
+            self.sketch2photo_net = self.sketch2photo_net.half()
+            self.photo2sketch_net  = self.photo2sketch_net.half()
+
+        ######## Attention Pooling & Proxy Tokens ########
+        attn_pooling_sketch = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
+        self.attn_pooling_sketch_nets = _get_clones(attn_pooling_sketch, self.cross_layer)
+
+        attn_pooling_photo = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
+        self.attn_pooling_photo_nets = _get_clones(
+            attn_pooling_photo, self.prompt_depth - self.cross_layer
+        )
+
+        sketch_proxy_token = torch.randn(1, v_dim, dtype=dtype)
+        self.sketch_proxy_tokens = nn.ParameterList(
+            [nn.Parameter(sketch_proxy_token.clone()) for _ in range(self.cross_layer)]
+        )
+        photo_proxy_token = torch.randn(1, v_dim, dtype=dtype)
+        self.photo_proxy_tokens = nn.ParameterList(
+            [nn.Parameter(photo_proxy_token.clone()) for _ in range(self.cross_layer, self.prompt_depth)]
+        )
+
+        if prec == "fp16":
+            self.attn_pooling_sketch_nets = self.attn_pooling_sketch_nets.half()
+            self.attn_pooling_photo_nets  = self.attn_pooling_photo_nets.half()
+
+        ######## Distillation Image Encoder ########
+        self.ZS_image_encoder = self.clip_model_distill.visual
+
+    def get_early_sketch_proxies(self):
+        proxy_tokens = []
+        for i in range(self.cross_layer):
+            proxy = self.attn_pooling_sketch_nets[i](
+                token_query=self.sketch_proxy_tokens[i],
+                sequence_key=self.cross_prompts_sketch[i],
+                sequence_value=self.cross_prompts_sketch[i]
+            )
+            proxy_tokens.append(proxy)
+        return torch.cat(proxy_tokens, dim=0).view(self.cross_layer, self.v_dim)
+
+    def forward(self):
+        # ── Giai đoạn 1: Sketch → Photo (các layer sớm) ──────────────
+        photo_prompts_early = torch.cat(
+            [self.cross_prompts_photo[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0
+        )  # (cross_layer, n_ctx, v_dim)
+
+        proxy_sketch = self.get_early_sketch_proxies()          # (cross_layer, v_dim)
+        proxy_sketch_flat = proxy_sketch.view(-1, self.v_dim)
+
+        photo_flat = photo_prompts_early.view(-1, self.v_dim)
+        updated_photo = self.sketch2photo_net(photo_flat, proxy_sketch_flat, proxy_sketch_flat)
+        updated_photo = updated_photo.view(self.cross_layer, -1, self.v_dim)
+
+        for i in range(self.cross_layer):
+            self.cross_prompts_photo[i].data.copy_(updated_photo[i])
+
+        # ── Giai đoạn 2: Photo → Sketch (các layer sau) ───────────────
+        sketch_prompts_late = torch.cat(
+            [self.cross_prompts_sketch[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0
+        )  # (depth - cross_layer, n_ctx, v_dim)
+
+        proxy_photo_tokens = []
+        for i in range(self.cross_layer, self.prompt_depth):
+            proxy = self.attn_pooling_photo_nets[i - self.cross_layer](
+                token_query=self.photo_proxy_tokens[i - self.cross_layer],
+                sequence_key=self.cross_prompts_photo[i],
+                sequence_value=self.cross_prompts_photo[i]
+            )
+            proxy_photo_tokens.append(proxy)
+        proxy_photo_flat = torch.cat(proxy_photo_tokens, dim=0).view(-1, self.v_dim)
+
+        sketch_flat = sketch_prompts_late.view(-1, self.v_dim)
+        updated_sketch = self.photo2sketch_net(sketch_flat, proxy_photo_flat, proxy_photo_flat)
+        updated_sketch = updated_sketch.view(self.prompt_depth - self.cross_layer, -1, self.v_dim)
+
+        for i in range(self.cross_layer, self.prompt_depth):
+            self.cross_prompts_sketch[i].data.copy_(updated_sketch[i - self.cross_layer])
+
+        # ── Output: deeper prompts cho cả 2 branch ────────────────────
+        cross_prompts_sketch_deeper = [self.cross_prompts_sketch[i] for i in range(1, self.prompt_depth)]
+        cross_prompts_photo_deeper  = [self.cross_prompts_photo[i]  for i in range(1, self.prompt_depth)]
+
+        return cross_prompts_sketch_deeper, cross_prompts_photo_deeper

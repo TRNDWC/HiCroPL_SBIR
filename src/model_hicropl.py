@@ -8,6 +8,7 @@ from torchmetrics.functional.retrieval import retrieval_average_precision, retri
 
 from src.hicropl import (
     CrossModalPromptLearner,
+    CrossVisualPromptLearner,
     TextEncoder,
     VisualEncoder,
 )
@@ -36,6 +37,11 @@ class CustomCLIP(nn.Module):
     def __init__(self, cfg, clip_model, clip_model_frozen):
         super().__init__()
         self.cfg = cfg
+        self.visual_prompt_order = getattr(cfg, 'visual_prompt_order', 'crossmodal_first')
+        if self.visual_prompt_order not in {'crossmodal_first', 'crossvisual_first'}:
+            raise ValueError(
+                f"visual_prompt_order must be 'crossmodal_first' or 'crossvisual_first', got {self.visual_prompt_order}"
+            )
 
         # 1. Distill branch (vanilla CLIP)
         self.clip_model_distill = clip_model_frozen
@@ -68,23 +74,138 @@ class CustomCLIP(nn.Module):
             clip_model_distill=self.clip_model_distill
         )
 
+        print("Initializing Shared CrossVisual Prompt Learner...")
+        self.prompt_learner_crossvisual = CrossVisualPromptLearner(
+            cfg=cfg,
+            clip_model=clip_photo,
+            clip_model_distill=self.clip_model_distill,
+        )
+
         # -- Encoders --
         self.text_encoder_photo = TextEncoder(clip_photo)
         self.text_encoder_sketch = TextEncoder(clip_sketch)
         self.visual_encoder_photo = VisualEncoder(clip_photo)
         self.visual_encoder_sketch = VisualEncoder(clip_sketch)
 
+    def _merge_visual_prompt_sets(
+        self,
+        crossmodal_first_prompt,
+        crossmodal_deeper_prompts,
+        crossvisual_first_prompt,
+        crossvisual_deeper_prompts,
+    ):
+        if len(crossmodal_deeper_prompts) != len(crossvisual_deeper_prompts):
+            raise ValueError(
+                f"Mismatched deeper prompt depths: {len(crossmodal_deeper_prompts)} vs {len(crossvisual_deeper_prompts)}"
+            )
+
+        if self.visual_prompt_order == 'crossmodal_first':
+            merged_first = torch.cat([crossmodal_first_prompt, crossvisual_first_prompt], dim=0)
+            merged_deeper = [
+                torch.cat([cm_prompt, cv_prompt], dim=0)
+                for cm_prompt, cv_prompt in zip(crossmodal_deeper_prompts, crossvisual_deeper_prompts)
+            ]
+        else:
+            merged_first = torch.cat([crossvisual_first_prompt, crossmodal_first_prompt], dim=0)
+            merged_deeper = [
+                torch.cat([cv_prompt, cm_prompt], dim=0)
+                for cm_prompt, cv_prompt in zip(crossmodal_deeper_prompts, crossvisual_deeper_prompts)
+            ]
+
+        return merged_first, merged_deeper
+
+    def _expected_visual_prompt_tokens(self, image_encoder):
+        transformer = image_encoder.vit.transformer
+        for block in transformer.resblocks:
+            if hasattr(block, 'cross_prompt_nctx_visual'):
+                return block.cross_prompt_nctx_visual
+            if hasattr(block, 'cross_prompt_nctx'):
+                return block.cross_prompt_nctx
+        return None
+
+    def _expected_text_prompt_tokens(self, text_encoder):
+        transformer = text_encoder.transformer
+        for block in transformer.resblocks:
+            if hasattr(block, 'cross_prompt_nctx_text'):
+                return block.cross_prompt_nctx_text
+            if hasattr(block, 'cross_prompt_nctx'):
+                return block.cross_prompt_nctx
+        return None
+
+    def _validate_prompt_shapes(
+        self,
+        modality,
+        text_encoder,
+        image_encoder,
+        cross_prompts_text_deeper,
+        merged_first_prompt,
+        merged_deeper_prompts,
+    ):
+        expected_text_tokens = self._expected_text_prompt_tokens(text_encoder)
+        if expected_text_tokens is not None and cross_prompts_text_deeper:
+            actual_text_tokens = cross_prompts_text_deeper[0].shape[0]
+            if actual_text_tokens != expected_text_tokens:
+                raise ValueError(
+                    f"[{modality}] text prompt token mismatch: got {actual_text_tokens}, expected {expected_text_tokens}. "
+                    "Check n_ctx/language_ctx alignment."
+                )
+
+        expected_visual_tokens = self._expected_visual_prompt_tokens(image_encoder)
+        if expected_visual_tokens is not None:
+            actual_first_visual_tokens = merged_first_prompt.shape[0]
+            if actual_first_visual_tokens != expected_visual_tokens:
+                raise ValueError(
+                    f"[{modality}] visual prompt token mismatch at layer0: got {actual_first_visual_tokens}, "
+                    f"expected {expected_visual_tokens}. Check vision_ctx vs merged visual prompt size."
+                )
+
+            for i, prompt in enumerate(merged_deeper_prompts, start=1):
+                if prompt.shape[0] != expected_visual_tokens:
+                    raise ValueError(
+                        f"[{modality}] visual prompt token mismatch at layer{i}: got {prompt.shape[0]}, "
+                        f"expected {expected_visual_tokens}. Check vision_ctx vs merged visual prompt size."
+                    )
+
     def _forward_branch(
         self,
         image,
         classnames,
+        modality,
         prompt_learner,
         text_encoder,
         image_encoder,
+        crossvisual_outputs=None,
         label=None,
     ):
         text_input, tokenized_prompts, text_features_fixed_all, cross_prompts_text_deeper, cross_prompts_visual_deeper = prompt_learner(
             classnames,
+        )
+
+        if crossvisual_outputs is None:
+            cv_sketch_deeper, cv_photo_deeper = self.prompt_learner_crossvisual()
+        else:
+            cv_sketch_deeper, cv_photo_deeper = crossvisual_outputs
+
+        if modality == 'photo':
+            cv_first_prompt = self.prompt_learner_crossvisual.cross_prompts_photo[0]
+            cv_deeper_prompts = cv_photo_deeper
+        else:
+            cv_first_prompt = self.prompt_learner_crossvisual.cross_prompts_sketch[0]
+            cv_deeper_prompts = cv_sketch_deeper
+
+        merged_first_prompt, merged_deeper_prompts = self._merge_visual_prompt_sets(
+            crossmodal_first_prompt=prompt_learner.cross_prompts_visual[0],
+            crossmodal_deeper_prompts=cross_prompts_visual_deeper,
+            crossvisual_first_prompt=cv_first_prompt,
+            crossvisual_deeper_prompts=cv_deeper_prompts,
+        )
+        self._validate_prompt_shapes(
+            modality=modality,
+            text_encoder=text_encoder,
+            image_encoder=image_encoder,
+            cross_prompts_text_deeper=cross_prompts_text_deeper,
+            merged_first_prompt=merged_first_prompt,
+            merged_deeper_prompts=merged_deeper_prompts,
         )
 
         with torch.no_grad():
@@ -94,8 +215,8 @@ class CustomCLIP(nn.Module):
         text_features_all = text_encoder(text_input, tokenized_prompts, cross_prompts_text_deeper)
         image_features = image_encoder(
             image.type(self.dtype),
-            prompt_learner.cross_prompts_visual[0],
-            cross_prompts_visual_deeper,
+            merged_first_prompt,
+            merged_deeper_prompts,
         )
 
         image_features_norm1 = image_features / image_features.norm(dim=-1, keepdim=True)
@@ -133,30 +254,37 @@ class CustomCLIP(nn.Module):
         Format: [sk_tensor, img_tensor, neg_tensor, sk_aug_tensor, img_aug_tensor, label, filename]
         """
         sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
+        crossvisual_outputs = self.prompt_learner_crossvisual()
         
         # 1. Trích xuất feature qua 4 nhánh trực tiếp (không qua extractor wrapper)
         out_p = self._forward_branch(
             photo_tensor,
             classnames,
+            modality='photo',
             prompt_learner=self.prompt_learner_photo,
             text_encoder=self.text_encoder_photo,
             image_encoder=self.visual_encoder_photo,
+            crossvisual_outputs=crossvisual_outputs,
         )
         out_s = self._forward_branch(
             sk_tensor,
             classnames,
+            modality='sketch',
             prompt_learner=self.prompt_learner_sketch,
             text_encoder=self.text_encoder_sketch,
             image_encoder=self.visual_encoder_sketch,
+            crossvisual_outputs=crossvisual_outputs,
         )
         
         # Đặc trưng Negative lấy từ nhánh Photo
         out_neg = self._forward_branch(
             neg_tensor,
             classnames,
+            modality='photo',
             prompt_learner=self.prompt_learner_photo,
             text_encoder=self.text_encoder_photo,
             image_encoder=self.visual_encoder_photo,
+            crossvisual_outputs=crossvisual_outputs,
         )
         
         # 2. Use extractor outputs directly, without adapter residual mixing
@@ -249,6 +377,7 @@ class HiCroPL_SBIR(pl.LightningModule):
         prompt_params = []
         add_unique_params(self.model.prompt_learner_photo.parameters(), prompt_params, seen_ids)
         add_unique_params(self.model.prompt_learner_sketch.parameters(), prompt_params, seen_ids)
+        add_unique_params(self.model.prompt_learner_crossvisual.parameters(), prompt_params, seen_ids)
 
         ln_params = []
         for module in self.model.modules():
@@ -293,6 +422,7 @@ class HiCroPL_SBIR(pl.LightningModule):
             out = self.model._forward_branch(
                 tensor,
                 self.classnames,
+                modality='photo',
                 prompt_learner=self.model.prompt_learner_photo,
                 text_encoder=self.model.text_encoder_photo,
                 image_encoder=self.model.visual_encoder_photo,
@@ -301,6 +431,7 @@ class HiCroPL_SBIR(pl.LightningModule):
             out = self.model._forward_branch(
                 tensor,
                 self.classnames,
+                modality='sketch',
                 prompt_learner=self.model.prompt_learner_sketch,
                 text_encoder=self.model.text_encoder_sketch,
                 image_encoder=self.model.visual_encoder_sketch,

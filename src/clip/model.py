@@ -276,7 +276,8 @@ class ResidualAttentionBlock_HiCroPL(nn.Module):
         # and the visual branch
         self.text_layer = text_layer
         self.attn_mask = attn_mask
-        self.cross_prompt_nctx = design_details['vision_ctx']
+        self.cross_prompt_nctx_visual = design_details['vision_ctx']
+        self.cross_prompt_nctx_text = design_details.get('language_ctx', design_details['vision_ctx'])
         self.i = i
         if self.i != 0:
             self.add_prompt = add_prompt
@@ -297,7 +298,7 @@ class ResidualAttentionBlock_HiCroPL(nn.Module):
             # Also see if this is textual transformer layer or not
             if not self.text_layer:  # visual
                 # Remove the outputs produced by learnable tokens of previous layer
-                prefix = x[0:x.shape[0] - self.cross_prompt_nctx, :, :]
+                prefix = x[0:x.shape[0] - self.cross_prompt_nctx_visual, :, :]
                 # Create/configure learnable tokens of this layer
                 visual_context = cross_prompts_deeper[self.i-1]
                 visual_context = visual_context.expand(x.shape[1], -1, -1).permute(1, 0, 2).half()
@@ -309,7 +310,7 @@ class ResidualAttentionBlock_HiCroPL(nn.Module):
                 # x -> [77, NCLS, DIM]
                 # First remove the learnable tokens from previous layer
                 prefix = x[:1, :, :]
-                suffix = x[1 + self.cross_prompt_nctx:, :, :]
+                suffix = x[1 + self.cross_prompt_nctx_text:, :, :]
                 # Create/configure learnable tokens of this layer
                 textual_context = cross_prompts_deeper[self.i-1]
                 textual_context = textual_context.expand(x.shape[1], -1, -1).permute(1, 0, 2).half()
