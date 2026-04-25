@@ -1,3 +1,5 @@
 pytorch-lightning
 torchmetrics
 ftfy
+matplotlib
+tensorboard

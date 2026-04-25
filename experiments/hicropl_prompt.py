@@ -16,6 +16,33 @@ from experiments.options import opts
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
+def resolve_output_paths(run_opts):
+    is_kaggle = os.path.exists('/kaggle/working')
+    base_root = '/kaggle/working' if is_kaggle else os.getcwd()
+
+    log_root = run_opts.log_root if run_opts.log_root else os.path.join(base_root, 'tb_logs')
+    ckpt_root = run_opts.ckpt_root if run_opts.ckpt_root else os.path.join(base_root, 'saved_models')
+    report_root = run_opts.report_root if run_opts.report_root else os.path.join(base_root, 'reports')
+
+    exp_log_dir = os.path.join(log_root, run_opts.exp_name)
+    exp_ckpt_dir = os.path.join(ckpt_root, run_opts.exp_name)
+    exp_report_dir = os.path.join(report_root, run_opts.exp_name)
+
+    os.makedirs(exp_log_dir, exist_ok=True)
+    os.makedirs(exp_ckpt_dir, exist_ok=True)
+    os.makedirs(exp_report_dir, exist_ok=True)
+
+    return {
+        'log_root': log_root,
+        'ckpt_root': ckpt_root,
+        'report_root': report_root,
+        'exp_log_dir': exp_log_dir,
+        'exp_ckpt_dir': exp_ckpt_dir,
+        'exp_report_dir': exp_report_dir,
+        'is_kaggle': is_kaggle,
+    }
+
 if __name__ == '__main__':
     SEED = 42
     # Set seed for reproducibility — bao gồm Python, NumPy, PyTorch, CUDA
@@ -39,6 +66,12 @@ if __name__ == '__main__':
     print(f"[CONFIG] Adapters ALWAYS enabled | adapter_reduction={opts.adapter_reduction}, image_adapter_m={opts.image_adapter_m}, text_adapter_m={opts.text_adapter_m}")
 
     # 1. Prepare Datasets
+    output_paths = resolve_output_paths(opts)
+    print(f"[PATHS] Kaggle mode: {output_paths['is_kaggle']}")
+    print(f"[PATHS] TensorBoard root: {output_paths['log_root']}")
+    print(f"[PATHS] Checkpoint root: {output_paths['ckpt_root']}")
+    print(f"[PATHS] Report root: {output_paths['report_root']}")
+
     dataset_transforms = Sketchy.data_transform(opts)
     
     train_dataset = Sketchy(opts, dataset_transforms, mode='train', return_orig=False)
@@ -86,16 +119,16 @@ if __name__ == '__main__':
     classnames = list(train_dataset.all_categories)
 
     # 4. Setup Checkpointing and Logger
-    logger = TensorBoardLogger('tb_logs', name=opts.exp_name)
+    logger = TensorBoardLogger(output_paths['log_root'], name=opts.exp_name)
 
     checkpoint_callback = ModelCheckpoint(
         monitor='val_map_all' if opts.dataset != 'sketchy_ext' else 'val_map_200',
-        dirpath='saved_models/%s'%opts.exp_name,
+        dirpath=output_paths['exp_ckpt_dir'],
         filename="{epoch:02d}-{val_map_200:.4f}" if opts.dataset == 'sketchy_ext' else "{epoch:02d}-{val_map_all:.4f}",
         mode='max',
         save_last=True)
 
-    ckpt_path = os.path.join('saved_models/%s'%opts.exp_name, 'last.ckpt')
+    ckpt_path = os.path.join(output_paths['exp_ckpt_dir'], 'last.ckpt')
     if not os.path.exists(ckpt_path):
         ckpt_path = None
     else:
@@ -129,3 +162,7 @@ if __name__ == '__main__':
 
     print ('\nBeginning training HiCroPL-SBIR... Good luck!')
     trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader], ckpt_path=ckpt_path)
+
+    print('\n[TRAINING COMPLETE]')
+    print(f"[LOGDIR] {logger.log_dir}")
+    print(f"[PLOT COMMAND] python read_output.py --logdir {logger.log_dir} --report_dir {output_paths['exp_report_dir']} --smooth 0.6")

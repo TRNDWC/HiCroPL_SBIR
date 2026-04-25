@@ -3,6 +3,9 @@ import argparse
 parser = argparse.ArgumentParser(description='Sketch-based OD')
 
 parser.add_argument('--exp_name', type=str, default='LN_prompt')
+parser.add_argument('--log_root', type=str, default='', help='Root folder for TensorBoard logs; empty means auto (Kaggle: /kaggle/working/tb_logs)')
+parser.add_argument('--ckpt_root', type=str, default='', help='Root folder for checkpoints; empty means auto (Kaggle: /kaggle/working/saved_models)')
+parser.add_argument('--report_root', type=str, default='', help='Root folder for generated reports/curves; empty means auto (Kaggle: /kaggle/working/reports)')
 
 # --------------------
 # DataLoader Options
