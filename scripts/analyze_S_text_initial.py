@@ -5,6 +5,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import json
+import numpy as np
+from scipy.stats import describe
+from sklearn.metrics.pairwise import cosine_similarity
 
 from src.clip import clip as _clip
 
@@ -129,6 +132,23 @@ def visualize_initial_S_text(matrices, block_stats, design2_corr, out_dir):
     plt.savefig(os.path.join(out_dir, '3_key_metrics_summary.png'), dpi=120)
     plt.close()
 
+def convert_to_native_types(obj):
+    """Recursively convert numpy types to native Python types for JSON serialization."""
+    if isinstance(obj, (np.int_, np.intc, np.intp, np.int8,
+                        np.int16, np.int32, np.int64, np.uint8,
+                        np.uint16, np.uint32, np.uint64)):
+        return int(obj)
+    elif isinstance(obj, (np.float_, np.float16, np.float32, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (np.ndarray,)):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: convert_to_native_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_native_types(i) for i in obj]
+    return obj
+
+
 def main():
     parser = argparse.ArgumentParser(description='Analyze initial S_text matrix designs')
     parser.add_argument('--classnames-file', required=True, help='Path to file with class names, one per line.')
@@ -190,8 +210,14 @@ def main():
         'design1_blocks': design1_blocks,
         'design2_sketch_photo_correlation': design2_corr,
     }
-    with open(os.path.join(args.out_dir, 'initial_metrics.json'), 'w') as f:
-        json.dump(metrics, f, indent=2)
+    # 5. Save metrics
+    # ---------------------------------
+    metrics_path = out_dir / "initial_metrics.json"
+    print(f"[INFO] Saving metrics to {metrics_path}")
+    with open(metrics_path, "w") as f:
+        # Convert numpy types to native python types before dumping
+        native_metrics = convert_to_native_types(metrics)
+        json.dump(native_metrics, f, indent=2)
         
     # --- Visualize ---
     print('[INFO] Generating visualizations...')
