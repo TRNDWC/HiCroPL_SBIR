@@ -35,15 +35,42 @@ except Exception:
     KMeans = None
     silhouette_score = None
 
+try:
+    from scipy.stats import pearsonr, spearmanr
+except Exception:
+    pearsonr = None
+    spearmanr = None
+
 
 def clean_name(s):
     return s.replace('_', ' ')
 
 
 def load_classnames(path):
-    with open(path, 'r') as f:
-        lines = [l.strip() for l in f if l.strip()]
-    return lines
+    """Load from file, or auto-detect from folder if path is a directory."""
+    if os.path.isdir(path):
+        # Auto-detect from folder structure (photo/sketch style)
+        p = Path(path)
+        # Look for class folders directly under path, or under photo/ or sketch/ subdir
+        candidates = []
+        for item in p.iterdir():
+            if item.is_dir() and not item.name.startswith('.'):
+                candidates.append(item.name)
+        if not candidates:
+            # Try photo/ and sketch/ subdirs
+            photo_dir = p / 'photo'
+            sketch_dir = p / 'sketch'
+            if photo_dir.exists():
+                candidates = [c.name for c in photo_dir.iterdir() if c.is_dir() and not c.name.startswith('.')]
+        if candidates:
+            print(f'Auto-detected {len(candidates)} classes from {path}')
+            return sorted(candidates)
+        raise RuntimeError(f'No classes found in {path}')
+    else:
+        # Load from file
+        with open(path, 'r') as f:
+            lines = [l.strip() for l in f if l.strip()]
+        return lines
 
 
 def compute_text_embeddings(model, device, classnames, templates):
@@ -137,14 +164,15 @@ def quick_stats(arr):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--classnames-file', required=True)
-    parser.add_argument('--image-root', default=None)
+    parser.add_argument('--classnames-file', default=None, help='Path to classnames.txt or auto-detect from image-root folder')
+    parser.add_argument('--image-root', default=None, help='Root directory with class subdirectories. Auto-detects classnames if not provided.')
     parser.add_argument('--out-dir', default='results/struct_text_analysis')
     parser.add_argument('--model', default='ViT-B/32')
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--max-classes', type=int, default=100)
     parser.add_argument('--samples-per-class', type=int, default=5)
-    parser.add_argument('--templates', default='a photo of a {},a sketch of a {},a drawing of a {}')
+    parser.add_argument('--templates', default='a photo of a {},a sketch of a {}', 
+                        help='Comma-separated templates, e.g. "a photo of a {},a sketch of a {}"')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 
@@ -153,7 +181,14 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    classnames = load_classnames(args.classnames_file)
+    # Load classnames: from file, or auto-detect from image_root
+    if args.classnames_file:
+        classnames = load_classnames(args.classnames_file)
+    elif args.image_root:
+        classnames = load_classnames(args.image_root)
+    else:
+        raise RuntimeError('Must provide either --classnames-file or --image-root')
+    
     K = len(classnames)
     print(f"Loaded {K} classnames, sampling up to {args.max_classes}")
 
@@ -223,10 +258,14 @@ def main():
             S_text_sub = S_text[np.ix_(indices, indices)]
             v_text = flatten_upper_tri(S_text_sub)
             v_photo = flatten_upper_tri(S_photo)
-            from scipy.stats import pearsonr, spearmanr
-            pr, _ = pearsonr(v_text, v_photo)
-            sr, _ = spearmanr(v_text, v_photo)
-            print(f'Correlation S_text vs S_photo: Pearson={pr:.4f}, Spearman={sr:.4f}')
+            if pearsonr and spearmanr:
+                pr, _ = pearsonr(v_text, v_photo)
+                sr, _ = spearmanr(v_text, v_photo)
+                print(f'Correlation S_text vs S_photo: Pearson={pr:.4f}, Spearman={sr:.4f}')
+            else:
+                # fallback numpy correlation if scipy not available
+                pr = np.corrcoef(v_text, v_photo)[0, 1]
+                print(f'Correlation S_text vs S_photo: Pearson={pr:.4f}')
 
             # Scatter plot
             plt.figure(figsize=(5,4))
