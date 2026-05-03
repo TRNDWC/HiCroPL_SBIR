@@ -158,7 +158,8 @@ def main():
     parser.add_argument('--max-classes', type=int, default=125)
     args = parser.parse_args()
     
-    os.makedirs(args.out_dir, exist_ok=True)
+    out_dir = Path(args.out_dir)
+    os.makedirs(out_dir, exist_ok=True)
     
     classnames = load_classnames(args.classnames_file)[:args.max_classes]
     K = len(classnames)
@@ -221,7 +222,7 @@ def main():
         
     # --- Visualize ---
     print('[INFO] Generating visualizations...')
-    visualize_initial_S_text(matrices_for_viz, design1_blocks, design2_corr, args.out_dir)
+    visualize_initial_S_text(matrices_for_viz, design1_blocks, design2_corr, str(out_dir))
     
     print(f'\n[SUCCESS] Analysis complete. Results saved to: {args.out_dir}')
     print(f'  - Design 1 Block Stats: {design1_blocks}')
