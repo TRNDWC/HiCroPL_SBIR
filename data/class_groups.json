@@ -1,0 +1,58 @@
+{
+  "animal": {
+    "mammal": [
+      "ape", "bear", "camel", "cat", "deer", "dog", "elephant",
+      "hedgehog", "horse", "kangaroo", "lion", "pig",
+      "rabbit", "seal", "sheep", "squirrel", "tiger", "zebra"
+    ],
+    "bird": [
+      "duck", "owl", "parrot", "penguin", "swan", "wading_bird"
+    ],
+    "reptile_amphibian": [
+      "crocodilian", "frog", "lizard", "snake", "turtle", "sea_turtle"
+    ],
+    "marine": [
+      "crab", "fish", "jellyfish", "lobster", "ray", "shark", "starfish"
+    ],
+    "insect": [
+      "ant", "bee", "beetle", "butterfly"
+    ],
+    "other": [
+      "snail", "spider", "scorpion", "hermit_crab"
+    ]
+  },
+  "food_plant": {
+    "plant": [
+      "apple", "banana", "flower", "mushroom", "pineapple", "strawberry"
+    ],
+    "prepared_food": [
+      "bread", "hamburger", "hotdog", "pizza", "pretzel"
+    ]
+  },
+  "vehicle": [
+    "airplane", "bicycle", "blimp", "car_(sedan)",
+    "motorcycle", "pickup_truck", "rocket",
+    "sailboat", "tank"
+  ],
+  "weapon": [
+    "axe", "cannon", "knife", "pistol", "rifle"
+  ],
+  "household_object": [
+    "alarm_clock", "bell", "bench", "candle", "chair", "couch",
+    "cup", "eyeglasses", "fan", "hat", "hourglass", "shoe",
+    "spoon", "table", "teapot", "umbrella", "wine_bottle"
+  ],
+  "instrument": [
+    "guitar", "harp", "piano", "saxophone", "trumpet", "violin"
+  ],
+  "building": [
+    "castle", "church"
+  ],
+  "nature": [
+    "geyser", "volcano"
+  ],
+  "misc": [
+    "armor", "hot-air_balloon", "jack-o-lantern",
+    "teddy_bear", "racket", "hammer"
+  ]
+}
