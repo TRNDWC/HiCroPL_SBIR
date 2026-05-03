@@ -3,17 +3,24 @@ Lightweight analysis for S_text vs visual geometry, designed for quick runs on K
 Produces: S_text (.pt/.csv), histograms, heatmap, S_text vs S_photo correlation and scatter,
 clustering summary, and zero-shot neighbor probe.
 
-Usage (example):
+Usage (example for Sketchy dataset):
 python scripts/struct_text_analysis.py \
-    --classnames-file data/classnames.txt \
-    --image-root data/images/ \
+    --image-root /kaggle/input/.../Sketchy \
+    --out-dir results/struct_text_analysis \
     --model ViT-B/32 \
+    --templates "a photo of a {},a sketch of a {}" \
     --max-classes 100 --samples-per-class 5 --device cuda
 
-The script expects an image folder structure: <image-root>/<class_name>/*.jpg
-Classname strings in classnames-file should match folder names (underscores allowed).
+The script expects an image folder structure: <image-root>/photo/<class_name>/*.jpg
+                                            <image-root>/sketch/<class_name>/*.jpg
 
-Designed for speed: samples classes/images, batches encodings, optional template ensemble.
+Key feature: Automatically samples from BOTH photo and sketch folders (if available) to compute
+S_photo and S_sketch separately, then correlates each against S_text to validate the anchor quality
+for both modalities.
+
+Classname strings should match folder names (underscores allowed, converted to spaces).
+
+Designed for speed: samples classes/images, batches encodings, template ensemble.
 """
 
 import os
@@ -100,8 +107,19 @@ def compute_similarity_matrix(embeds):
     return sim
 
 
-def sample_images_per_class(image_root, classnames, max_classes, samples_per_class):
+def sample_images_per_class(image_root, classnames, max_classes, samples_per_class, modality=None):
+    """
+    Sample images per class from image_root.
+    If modality is provided (e.g. 'photo', 'sketch'), look for that subfolder.
+    Otherwise try both photo/ and sketch/ subdirs.
+    Returns list of (classname, [paths]).
+    """
     image_root = Path(image_root)
+    
+    # If modality specified, use that subfolder
+    if modality:
+        image_root = image_root / modality
+    
     available = []
     for cname in classnames:
         folder = image_root / cname
@@ -239,41 +257,57 @@ def main():
 
     # If image_root provided, compute visual centroids and compare
     if args.image_root:
-        sampled = sample_images_per_class(args.image_root, classnames[:args.max_classes], args.max_classes, args.samples_per_class)
-        if not sampled:
-            print('No images found under image_root; skipping visual comparison')
-        else:
-            print(f'Sampled {len(sampled)} classes for visual centroids (up to {args.samples_per_class} images each)')
+        # Try to sample from both photo and sketch modalities
+        for modality_name in ['photo', 'sketch']:
+            print(f'\n--- Analyzing {modality_name.upper()} modality ---')
+            sampled = sample_images_per_class(args.image_root, classnames[:args.max_classes], 
+                                              args.max_classes, args.samples_per_class, 
+                                              modality=modality_name)
+            if not sampled:
+                print(f'No {modality_name} images found; skipping')
+                continue
+            
+            print(f'Sampled {len(sampled)} {modality_name} classes (up to {args.samples_per_class} images each)')
             centroids = compute_visual_class_centroids(clip_model, preprocess, device, sampled)
+            
             # align order with classnames subset
             names = [c for c,_ in sampled if c in centroids]
             C = np.stack([centroids[n] for n in names], axis=0)
-            S_photo = np.matmul(C, C.T)
-            np.savetxt(os.path.join(args.out_dir, 'S_photo.csv'), S_photo, delimiter=',')
-            torch.save(torch.from_numpy(S_photo), os.path.join(args.out_dir, 'S_photo.pt'))
+            S_visual = np.matmul(C, C.T)
+            
+            # save
+            np.savetxt(os.path.join(args.out_dir, f'S_{modality_name}.csv'), S_visual, delimiter=',')
+            torch.save(torch.from_numpy(S_visual), os.path.join(args.out_dir, f'S_{modality_name}.pt'))
 
-            # compute correlation between S_text (restricted to sampled names) and S_photo
+            # compute correlation between S_text (restricted to sampled names) and S_visual
             idx_map = {name:i for i,name in enumerate(classnames[:args.max_classes])}
             indices = [idx_map[n] for n in names]
             S_text_sub = S_text[np.ix_(indices, indices)]
             v_text = flatten_upper_tri(S_text_sub)
-            v_photo = flatten_upper_tri(S_photo)
+            v_visual = flatten_upper_tri(S_visual)
+            
             if pearsonr and spearmanr:
-                pr, _ = pearsonr(v_text, v_photo)
-                sr, _ = spearmanr(v_text, v_photo)
-                print(f'Correlation S_text vs S_photo: Pearson={pr:.4f}, Spearman={sr:.4f}')
+                pr, _ = pearsonr(v_text, v_visual)
+                sr, _ = spearmanr(v_text, v_visual)
+                print(f'Correlation S_text vs S_{modality_name}: Pearson={pr:.4f}, Spearman={sr:.4f}')
             else:
                 # fallback numpy correlation if scipy not available
-                pr = np.corrcoef(v_text, v_photo)[0, 1]
-                print(f'Correlation S_text vs S_photo: Pearson={pr:.4f}')
+                pr = np.corrcoef(v_text, v_visual)[0, 1]
+                print(f'Correlation S_text vs S_{modality_name}: Pearson={pr:.4f}')
 
             # Scatter plot
             plt.figure(figsize=(5,4))
-            plt.scatter(v_text, v_photo, s=4, alpha=0.6)
+            plt.scatter(v_text, v_visual, s=4, alpha=0.6)
             plt.xlabel('S_text (upper tri)')
-            plt.ylabel('S_photo (upper tri)')
-            plt.title(f'S_text vs S_photo: Pearson={pr:.3f}, Spearman={sr:.3f}')
-            plt.savefig(os.path.join(args.out_dir, 'S_text_vs_S_photo_scatter.png'))
+            plt.ylabel(f'S_{modality_name} (upper tri)')
+            if pearsonr and spearmanr:
+                pr_title, _ = pearsonr(v_text, v_visual)
+                sr_title, _ = spearmanr(v_text, v_visual)
+                plt.title(f'S_text vs S_{modality_name}: Pearson={pr_title:.3f}, Spearman={sr_title:.3f}')
+            else:
+                pr_title = np.corrcoef(v_text, v_visual)[0, 1]
+                plt.title(f'S_text vs S_{modality_name}: Pearson={pr_title:.3f}')
+            plt.savefig(os.path.join(args.out_dir, f'S_text_vs_S_{modality_name}_scatter.png'))
             plt.close()
 
     # Zero-shot probe: if user provided unseen list file 'unseen.txt' in same dir as classnames-file
