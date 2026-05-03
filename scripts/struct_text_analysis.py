@@ -1,0 +1,271 @@
+"""
+Lightweight analysis for S_text vs visual geometry, designed for quick runs on Kaggle.
+Produces: S_text (.pt/.csv), histograms, heatmap, S_text vs S_photo correlation and scatter,
+clustering summary, and zero-shot neighbor probe.
+
+Usage (example):
+python scripts/struct_text_analysis.py \
+    --classnames-file data/classnames.txt \
+    --image-root data/images/ \
+    --model ViT-B/32 \
+    --max-classes 100 --samples-per-class 5 --device cuda
+
+The script expects an image folder structure: <image-root>/<class_name>/*.jpg
+Classname strings in classnames-file should match folder names (underscores allowed).
+
+Designed for speed: samples classes/images, batches encodings, optional template ensemble.
+"""
+
+import os
+import argparse
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
+from tqdm import tqdm
+from collections import defaultdict
+
+# local CLIP wrapper in repo
+from src.clip import clip as _clip
+
+try:
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score
+except Exception:
+    KMeans = None
+    silhouette_score = None
+
+
+def clean_name(s):
+    return s.replace('_', ' ')
+
+
+def load_classnames(path):
+    with open(path, 'r') as f:
+        lines = [l.strip() for l in f if l.strip()]
+    return lines
+
+
+def compute_text_embeddings(model, device, classnames, templates):
+    # templates: list of format strings with a single {} placeholder
+    model.eval()
+    all_embeds = []
+    with torch.no_grad():
+        for tmpl in templates:
+            texts = [tmpl.format(clean_name(c)) for c in classnames]
+            tokenized = _clip.tokenize(texts).to(device)
+            emb = model.encode_text(tokenized)
+            emb = emb / emb.norm(dim=-1, keepdim=True)
+            all_embeds.append(emb.cpu())
+    # ensemble by mean (if multiple templates)
+    embeds = torch.stack(all_embeds, dim=0).mean(dim=0)
+    embeds = embeds / embeds.norm(dim=-1, keepdim=True)
+    return embeds
+
+
+def compute_similarity_matrix(embeds):
+    # embeds: [K, D] numpy or torch
+    if isinstance(embeds, torch.Tensor):
+        with torch.no_grad():
+            sim = (embeds @ embeds.t()).cpu().numpy()
+    else:
+        sim = np.matmul(embeds, embeds.T)
+    return sim
+
+
+def sample_images_per_class(image_root, classnames, max_classes, samples_per_class):
+    image_root = Path(image_root)
+    available = []
+    for cname in classnames:
+        folder = image_root / cname
+        if folder.exists() and folder.is_dir():
+            files = list(folder.glob('*'))
+            files = [p for p in files if p.suffix.lower() in ['.jpg', '.jpeg', '.png', '.bmp']]
+            if files:
+                available.append((cname, files))
+    if not available:
+        return []
+    sampled = []
+    for cname, files in available[:max_classes]:
+        if len(files) <= samples_per_class:
+            picks = files
+        else:
+            picks = list(np.random.choice(files, samples_per_class, replace=False))
+        sampled.append((cname, picks))
+    return sampled
+
+
+def compute_visual_class_centroids(model, preprocess, device, sampled, batch_size=32):
+    # sampled: list of (classname, [paths])
+    model.eval()
+    centroids = {}
+    from PIL import Image
+    with torch.no_grad():
+        for cname, files in sampled:
+            imgs = []
+            for p in files:
+                try:
+                    im = Image.open(p).convert('RGB')
+                    imgs.append(preprocess(im))
+                except Exception:
+                    continue
+            if not imgs:
+                continue
+            imgs = torch.stack(imgs, dim=0).to(device)
+            # encode in batches
+            feats = []
+            for i in range(0, len(imgs), batch_size):
+                batch = imgs[i:i+batch_size]
+                f = model.encode_image(batch)
+                f = f / f.norm(dim=-1, keepdim=True)
+                feats.append(f.cpu())
+            feats = torch.cat(feats, dim=0)
+            centroids[cname] = feats.mean(dim=0).numpy()
+    return centroids
+
+
+def flatten_upper_tri(mat):
+    # return vector of upper-triangle (i<j)
+    k = mat.shape[0]
+    idx = np.triu_indices(k, k=1)
+    return mat[idx]
+
+
+def quick_stats(arr):
+    return dict(mean=float(arr.mean()), std=float(arr.std()), min=float(arr.min()), max=float(arr.max()))
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--classnames-file', required=True)
+    parser.add_argument('--image-root', default=None)
+    parser.add_argument('--out-dir', default='results/struct_text_analysis')
+    parser.add_argument('--model', default='ViT-B/32')
+    parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
+    parser.add_argument('--max-classes', type=int, default=100)
+    parser.add_argument('--samples-per-class', type=int, default=5)
+    parser.add_argument('--templates', default='a photo of a {},a sketch of a {},a drawing of a {}')
+    parser.add_argument('--seed', type=int, default=42)
+    args = parser.parse_args()
+
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    classnames = load_classnames(args.classnames_file)
+    K = len(classnames)
+    print(f"Loaded {K} classnames, sampling up to {args.max_classes}")
+
+    device = torch.device(args.device)
+    print(f"Loading CLIP model {args.model} on {device}")
+    clip_model, preprocess = _clip.load(args.model, device=device, jit=False)
+
+    templates = [t.strip() for t in args.templates.split(',') if '{}' in t]
+    if not templates:
+        raise RuntimeError('Provide at least one template with {} placeholder')
+
+    # Compute text embeddings (fast)
+    print('Computing text embeddings (templates:', templates, ')')
+    text_embeds = compute_text_embeddings(clip_model, device, classnames[:args.max_classes], templates)
+    S_text = compute_similarity_matrix(text_embeds)
+    torch.save(torch.from_numpy(S_text), os.path.join(args.out_dir, 'S_text.pt'))
+    np.savetxt(os.path.join(args.out_dir, 'S_text.csv'), S_text, delimiter=',')
+
+    # Diagnostics: histogram of off-diagonal
+    offdiag = S_text[np.triu_indices(S_text.shape[0], k=1)]
+    stats = quick_stats(offdiag)
+    print('S_text off-diagonal stats:', stats)
+    plt.figure(figsize=(6,4))
+    plt.hist(offdiag, bins=60)
+    plt.title('Histogram of S_text off-diagonal similarities')
+    plt.savefig(os.path.join(args.out_dir, 'S_text_hist.png'))
+    plt.close()
+
+    # Heatmap (clipped)
+    plt.figure(figsize=(6,6))
+    plt.imshow(S_text, cmap='viridis', vmin=-1, vmax=1)
+    plt.colorbar()
+    plt.title('S_text heatmap')
+    plt.savefig(os.path.join(args.out_dir, 'S_text_heatmap.png'))
+    plt.close()
+
+    # Optional clustering analysis
+    if K <= args.max_classes and K >= 3 and KMeans is not None:
+        try:
+            k = min(10, max(2, K//10))
+            X = text_embeds.numpy()
+            km = KMeans(n_clusters=k, random_state=args.seed).fit(X)
+            sil = silhouette_score(X, km.labels_)
+            print(f'KMeans k={k}, silhouette={sil:.4f}')
+            np.savetxt(os.path.join(args.out_dir, 'kmeans_labels.txt'), km.labels_.astype(int), fmt='%d')
+        except Exception as e:
+            print('Clustering failed:', e)
+
+    # If image_root provided, compute visual centroids and compare
+    if args.image_root:
+        sampled = sample_images_per_class(args.image_root, classnames[:args.max_classes], args.max_classes, args.samples_per_class)
+        if not sampled:
+            print('No images found under image_root; skipping visual comparison')
+        else:
+            print(f'Sampled {len(sampled)} classes for visual centroids (up to {args.samples_per_class} images each)')
+            centroids = compute_visual_class_centroids(clip_model, preprocess, device, sampled)
+            # align order with classnames subset
+            names = [c for c,_ in sampled if c in centroids]
+            C = np.stack([centroids[n] for n in names], axis=0)
+            S_photo = np.matmul(C, C.T)
+            np.savetxt(os.path.join(args.out_dir, 'S_photo.csv'), S_photo, delimiter=',')
+            torch.save(torch.from_numpy(S_photo), os.path.join(args.out_dir, 'S_photo.pt'))
+
+            # compute correlation between S_text (restricted to sampled names) and S_photo
+            idx_map = {name:i for i,name in enumerate(classnames[:args.max_classes])}
+            indices = [idx_map[n] for n in names]
+            S_text_sub = S_text[np.ix_(indices, indices)]
+            v_text = flatten_upper_tri(S_text_sub)
+            v_photo = flatten_upper_tri(S_photo)
+            from scipy.stats import pearsonr, spearmanr
+            pr, _ = pearsonr(v_text, v_photo)
+            sr, _ = spearmanr(v_text, v_photo)
+            print(f'Correlation S_text vs S_photo: Pearson={pr:.4f}, Spearman={sr:.4f}')
+
+            # Scatter plot
+            plt.figure(figsize=(5,4))
+            plt.scatter(v_text, v_photo, s=4, alpha=0.6)
+            plt.xlabel('S_text (upper tri)')
+            plt.ylabel('S_photo (upper tri)')
+            plt.title(f'S_text vs S_photo: Pearson={pr:.3f}, Spearman={sr:.3f}')
+            plt.savefig(os.path.join(args.out_dir, 'S_text_vs_S_photo_scatter.png'))
+            plt.close()
+
+    # Zero-shot probe: if user provided unseen list file 'unseen.txt' in same dir as classnames-file
+    unseen_path = os.path.join(os.path.dirname(args.classnames_file), 'unseen.txt')
+    if os.path.exists(unseen_path):
+        with open(unseen_path, 'r') as f:
+            unseen = [l.strip() for l in f if l.strip()]
+        if unseen:
+            print(f'Found {len(unseen)} unseen classes; probing nearest seen neighbors')
+            with torch.no_grad():
+                tok = _clip.tokenize([t.format(clean_name(u)) for t in templates for u in unseen]).to(device)
+                emb = clip_model.encode_text(tok)
+                emb = emb / emb.norm(dim=-1, keepdim=True)
+                # if multiple templates, embeddings are consecutive blocks; average per unseen
+                T = len(templates)
+                emb = emb.view(T, len(unseen), -1).mean(dim=0)
+                emb = emb.cpu().numpy()
+            seen_emb = text_embeds.numpy()
+            sims = emb @ seen_emb.T
+            # for each unseen, list top-5 seen
+            topk = 5
+            neighbors = {u: [classnames[i] for i in sims[idx].argsort()[::-1][:topk]] for idx,u in enumerate(unseen)}
+            for u, neigh in neighbors.items():
+                print(f'unseen {u} -> neighbors: {neigh}')
+            # save neighbors
+            with open(os.path.join(args.out_dir, 'unseen_neighbors.txt'), 'w') as f:
+                for u, neigh in neighbors.items():
+                    f.write(u + '\t' + ','.join(neigh) + '\n')
+
+    print('Done. Results saved to', args.out_dir)
+
+
+if __name__ == '__main__':
+    main()
