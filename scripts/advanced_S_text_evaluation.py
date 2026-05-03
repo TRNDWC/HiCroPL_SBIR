@@ -23,16 +23,35 @@ def load_data(results_dir, design_name):
     df.columns = [c.split(': ')[-1] for c in df.columns]
     return df
 
+def flatten_groups(obj, parent_name=""):
+    """
+    Recursively flatten nested group structure.
+    Returns: (flat_class_list, class_to_group_map)
+    """
+    flat_classes = []
+    class_to_group = {}
+    
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if isinstance(value, list):
+                # Đây là danh sách classes
+                flat_classes.extend(value)
+                for cls in value:
+                    class_to_group[cls] = key if parent_name == "" else parent_name
+            elif isinstance(value, dict):
+                # Đây là nested group, đệ quy
+                sub_classes, sub_map = flatten_groups(value, key)
+                flat_classes.extend(sub_classes)
+                class_to_group.update(sub_map)
+    return flat_classes, class_to_group
+
 def load_groups(groups_file):
-    """Tải file JSON chứa thông tin nhóm lớp."""
+    """Tải file JSON chứa thông tin nhóm lớp (hỗ trợ nested structure)."""
     with open(groups_file, 'r') as f:
         groups = json.load(f)
     
-    # Tạo một map từ class -> group để dễ tra cứu
-    class_to_group = {}
-    for group_name, classes in groups.items():
-        for class_name in classes:
-            class_to_group[class_name] = group_name
+    # Flatten nested structure và tạo map
+    flat_classes, class_to_group = flatten_groups(groups)
     return groups, class_to_group
 
 def reorder_matrix(df, class_order):
@@ -201,8 +220,10 @@ def main():
     class_order = None
     if args.groups_file:
         groups, class_to_group = load_groups(args.groups_file)
-        # Tạo một thứ tự lớp nhất quán dựa trên nhóm
-        class_order = [cls for group_classes in groups.values() for cls in sorted(group_classes)]
+        # Tạo một thứ tự lớp nhất quán bằng cách flatten nested structure
+        _, flat_classes = flatten_groups(groups)
+        class_order = sorted(list(set(flat_classes)))  # unique + sorted
+        print(f"[INFO] Loaded {len(class_order)} classes from groups file.")
     else:
         print("[INFO] No groups file provided. Heatmaps will use automatic clustering order.")
 
