@@ -58,17 +58,32 @@ def load_classnames(path):
     if os.path.isdir(path):
         # Auto-detect from folder structure (photo/sketch style)
         p = Path(path)
-        # Look for class folders directly under path, or under photo/ or sketch/ subdir
-        candidates = []
-        for item in p.iterdir():
-            if item.is_dir() and not item.name.startswith('.'):
-                candidates.append(item.name)
-        if not candidates:
-            # Try photo/ and sketch/ subdirs
-            photo_dir = p / 'photo'
-            sketch_dir = p / 'sketch'
-            if photo_dir.exists():
-                candidates = [c.name for c in photo_dir.iterdir() if c.is_dir() and not c.name.startswith('.')]
+        
+        # Check for photo/sketch structure FIRST (most common for ZS-SBIR)
+        photo_dir = p / 'photo'
+        sketch_dir = p / 'sketch'
+        
+        print(f'[DEBUG] Checking for photo/sketch structure in: {path}')
+        print(f'[DEBUG] photo/ exists: {photo_dir.exists()}, sketch/ exists: {sketch_dir.exists()}')
+        
+        if photo_dir.exists() and sketch_dir.exists():
+            # Standard ZS-SBIR structure: get classes from photo/ folder
+            candidates = sorted([c.name for c in photo_dir.iterdir() 
+                               if c.is_dir() and not c.name.startswith('.')])
+            print(f'[DEBUG] Found {len(candidates)} classes from photo/ subdirectory')
+            if candidates:
+                return candidates
+        
+        # Fallback: look for class folders directly under path
+        print(f'[DEBUG] Trying direct subfolders (fallback)...')
+        candidates = sorted([item.name for item in p.iterdir() 
+                            if item.is_dir() and not item.name.startswith('.')])
+        
+        print(f'[DEBUG] Found direct folders: {len(candidates)} items: {candidates[:3]}...')
+        
+        # Filter out 'photo' and 'sketch' if they exist (not class folders)
+        candidates = [c for c in candidates if c not in ['photo', 'sketch']]
+        
         if candidates:
             print(f'Auto-detected {len(candidates)} classes from {path}')
             return sorted(candidates)
@@ -115,19 +130,41 @@ def sample_images_per_class(image_root, classnames, max_classes, samples_per_cla
     Returns list of (classname, [paths]).
     """
     image_root = Path(image_root)
+    p = image_root
     
-    # If modality specified, use that subfolder
+    # Determine which modality folder(s) to search
     if modality:
-        image_root = image_root / modality
+        # Explicit modality requested
+        search_roots = [image_root / modality]
+    else:
+        # Try standard photo/sketch structure
+        if (image_root / 'photo').exists() or (image_root / 'sketch').exists():
+            search_roots = [image_root / 'photo', image_root / 'sketch']
+        else:
+            # Fall back to image_root directly
+            search_roots = [image_root]
+    
+    print(f'  [DEBUG] Looking for images in {len(search_roots)} location(s):')
+    for sr in search_roots:
+        print(f'    - {sr} (exists: {sr.exists()})')
     
     available = []
-    for cname in classnames:
-        folder = image_root / cname
-        if folder.exists() and folder.is_dir():
-            files = list(folder.glob('*'))
-            files = [p for p in files if p.suffix.lower() in ['.jpg', '.jpeg', '.png', '.bmp']]
-            if files:
-                available.append((cname, files))
+    for search_root in search_roots:
+        if not search_root.exists():
+            print(f'  [DEBUG] Path does not exist: {search_root}')
+            continue
+            
+        print(f'  [DEBUG] Scanning {search_root} for class folders...')
+        for cname in classnames[:max_classes]:
+            folder = search_root / cname
+            if folder.exists() and folder.is_dir():
+                files = list(folder.glob('*'))
+                files = [p for p in files if p.suffix.lower() in ['.jpg', '.jpeg', '.png', '.bmp']]
+                if files:
+                    available.append((cname, files))
+        
+        print(f'  [DEBUG] Found {len(available)} classes with image files')
+    
     if not available:
         return []
     sampled = []
@@ -198,6 +235,8 @@ def main():
     torch.manual_seed(args.seed)
 
     os.makedirs(args.out_dir, exist_ok=True)
+    
+    print(f'DEBUG: args.templates = "{args.templates}"')
 
     # Load classnames: from file, or auto-detect from image_root
     if args.classnames_file:
@@ -214,9 +253,11 @@ def main():
     print(f"Loading CLIP model {args.model} on {device}")
     clip_model, preprocess = _clip.load(args.model, device=device, jit=False)
 
-    templates = [t.strip() for t in args.templates.split(',') if '{}' in t]
+    templates = [t.strip() for t in args.templates.split(',')]
+    templates = [t for t in templates if '{}' in t]
     if not templates:
-        raise RuntimeError('Provide at least one template with {} placeholder')
+        raise RuntimeError(f'Provide at least one template with {{}} placeholder. Got: {args.templates}')
+    print(f'Using {len(templates)} templates: {templates}')
 
     # Compute text embeddings (fast)
     print('Computing text embeddings (templates:', templates, ')')
@@ -311,8 +352,10 @@ def main():
             plt.close()
 
     # Zero-shot probe: if user provided unseen list file 'unseen.txt' in same dir as classnames-file
-    unseen_path = os.path.join(os.path.dirname(args.classnames_file), 'unseen.txt')
-    if os.path.exists(unseen_path):
+    unseen_path = None
+    if args.classnames_file:
+        unseen_path = os.path.join(os.path.dirname(args.classnames_file), 'unseen.txt')
+    if unseen_path and os.path.exists(unseen_path):
         with open(unseen_path, 'r') as f:
             unseen = [l.strip() for l in f if l.strip()]
         if unseen:
