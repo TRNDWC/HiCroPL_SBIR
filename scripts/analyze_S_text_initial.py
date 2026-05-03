@@ -12,6 +12,13 @@ from sklearn.metrics.pairwise import cosine_similarity
 from src.clip import clip as _clip
 
 try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
+    print("[WARNING] pandas is not installed. CSV matrix logging will be skipped. Install with 'pip install pandas'")
+
+try:
     from scipy.stats import pearsonr
 except:
     pearsonr = None
@@ -198,6 +205,35 @@ def main():
     S_text_shared = compute_similarity_matrix(emb_shared)
     
     # --- Save matrices and metrics ---
+    print('[INFO] Saving detailed matrices to CSV...')
+    if PANDAS_AVAILABLE:
+        # Create labels for rows/columns
+        sketch_labels = [f"sketch: {c}" for c in classnames]
+        photo_labels = [f"photo: {c}" for c in classnames]
+        shared_labels = [f"shared: {c}" for c in classnames]
+        
+        # Design 1
+        d1_labels = sketch_labels + photo_labels
+        df_d1 = pd.DataFrame(S_text_2C, index=d1_labels, columns=d1_labels)
+        df_d1.to_csv(out_dir / 'design1_S_text_2Cx2C.csv')
+        
+        # Design 2
+        df_d2_sketch = pd.DataFrame(S_text_sketch, index=sketch_labels, columns=sketch_labels)
+        df_d2_sketch.to_csv(out_dir / 'design2_S_text_sketch.csv')
+        
+        df_d2_photo = pd.DataFrame(S_text_photo, index=photo_labels, columns=photo_labels)
+        df_d2_photo.to_csv(out_dir / 'design2_S_text_photo.csv')
+        
+        # Design 3
+        df_d3 = pd.DataFrame(S_text_shared, index=shared_labels, columns=shared_labels)
+        df_d3.to_csv(out_dir / 'design3_S_text_shared.csv')
+    else:
+        # Fallback to numpy save if pandas is not available
+        np.save(out_dir / 'design1_S_text_2Cx2C.npy', S_text_2C)
+        np.save(out_dir / 'design2_S_text_sketch.npy', S_text_sketch)
+        np.save(out_dir / 'design2_S_text_photo.npy', S_text_photo)
+        np.save(out_dir / 'design3_S_text_shared.npy', S_text_shared)
+
     matrices_for_viz = {
         'design1': S_text_2C,
         'design2_sketch': S_text_sketch,
