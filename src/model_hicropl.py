@@ -106,7 +106,6 @@ class CustomCLIP(nn.Module):
         self.adapter_aug_photo = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
         self.adapter_aug_sketch = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
         self.image_adapter_m = float(getattr(cfg, 'image_adapter_m', 0.5))
-        self.text_adapter_m = float(getattr(cfg, 'text_adapter_m', 0.5))
         
         # Freeze adapter params if not enabled
         if not self.use_adapter:
@@ -115,7 +114,7 @@ class CustomCLIP(nn.Module):
             for p in self.adapter_aug_sketch.parameters():
                 p.requires_grad_(False)
         
-        print(f"Augment adapters: enabled={self.use_adapter} | reduction={adapter_reduction}, image_m={self.image_adapter_m}, text_m={self.text_adapter_m}")
+        print(f"Augment adapters: enabled={self.use_adapter} | reduction={adapter_reduction}, image_m={self.image_adapter_m}")
 
     def apply_adapter_residual(self, feat_prenorm):
         """Normalize prenorm features; adapter removed so just normalize."""
