@@ -61,7 +61,9 @@ parser.add_argument('--mcc_sk', type=float, default=0.1, help='Target mean simil
 parser.add_argument('--mcc_ph', type=float, default=0.0, help='Target mean similarity for photo-to-photo (MCC center)')
 parser.add_argument('--triplet_margin', type=float, default=0.3, help='Margin for Triplet Loss')
 parser.add_argument('--temperature', type=float, default=0.07, help='Temperature for InfoNCE Loss')
-# Adapter-related options removed — adapters are no longer used in the codebase.
+parser.add_argument('--adapter_reduction', type=int, default=4, help='Bottleneck reduction ratio for augment adapters')
+parser.add_argument('--image_adapter_m', type=float, default=0.1, help='Residual mixing ratio for image augment adapter output')
+parser.add_argument('--use_adapter', action='store_true', default=False, help='Enable adapters on augmentation branches (disabled by default)')
 parser.add_argument('--lambda_distill', type=float, default=1.0, help='Legacy option, currently unused in the active HiCroPL loss')
 
 # CLIP design_details (CoPrompt-style builder config)

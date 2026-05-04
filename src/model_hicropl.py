@@ -10,6 +10,7 @@ from src.hicropl import (
     CrossModalPromptLearner,
     TextEncoder,
     VisualEncoder,
+    Adapter,
 )
 from src.hicropl_extractor import HiCroPLFeatureExtractor
 
@@ -54,8 +55,12 @@ class CustomCLIP(nn.Module):
         self.dtype = clip_model.dtype
 
         # Local deepcopies for per-modality branches (photo/sketch)
-        clip_photo = copy.deepcopy(clip_model)
-        clip_sketch = copy.deepcopy(clip_model)
+        # Move to CPU first to avoid CUDA kernel incompatibility during deepcopy
+        original_device = next(clip_model.parameters()).device
+        clip_model_cpu = clip_model.cpu()
+        clip_photo = copy.deepcopy(clip_model_cpu).to(original_device)
+        clip_sketch = copy.deepcopy(clip_model_cpu).to(original_device)
+        clip_model = clip_model_cpu.to(original_device)
 
         # -- Prompt Learners --
         print("Initializing Photo Prompt Learner...")
@@ -94,7 +99,23 @@ class CustomCLIP(nn.Module):
             dtype=self.dtype
         )
 
-        # Adapter logic removed: no adapter modules or related flags.
+        # --- 4. Augmentation Adapters ---
+        self.use_adapter = bool(getattr(cfg, 'use_adapter', False))
+        adapter_reduction = getattr(cfg, 'adapter_reduction', 4)
+        embed_dim = int(clip_photo.text_projection.shape[1])
+        self.adapter_aug_photo = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
+        self.adapter_aug_sketch = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
+        self.image_adapter_m = float(getattr(cfg, 'image_adapter_m', 0.5))
+        self.text_adapter_m = float(getattr(cfg, 'text_adapter_m', 0.5))
+        
+        # Freeze adapter params if not enabled
+        if not self.use_adapter:
+            for p in self.adapter_aug_photo.parameters():
+                p.requires_grad_(False)
+            for p in self.adapter_aug_sketch.parameters():
+                p.requires_grad_(False)
+        
+        print(f"Augment adapters: enabled={self.use_adapter} | reduction={adapter_reduction}, image_m={self.image_adapter_m}, text_m={self.text_adapter_m}")
 
     def apply_adapter_residual(self, feat_prenorm):
         """Normalize prenorm features; adapter removed so just normalize."""
@@ -130,11 +151,21 @@ class CustomCLIP(nn.Module):
         text_feat_fixed_photo = out_p["text_features_fixed"]
         text_feat_fixed_sketch = out_s["text_features_fixed"]
 
-        # 3. Aug Visual Features: shared distill branch (Không qua Adapter)
-        photo_aug_feat = self.distill_visual_encoder(photo_aug_tensor.type(self.dtype))
+        # 3. Aug Visual Features: run distill encoder, apply adapters (if enabled) with residual mixing, then normalize
+        photo_aug_prenorm = self.distill_visual_encoder(photo_aug_tensor.type(self.dtype))
+        if self.use_adapter:
+            photo_aug_adapted = self.adapter_aug_photo(photo_aug_prenorm)
+            photo_aug_feat = self.image_adapter_m * photo_aug_adapted + (1 - self.image_adapter_m) * photo_aug_prenorm
+        else:
+            photo_aug_feat = photo_aug_prenorm
         photo_aug_feat = photo_aug_feat / photo_aug_feat.norm(dim=-1, keepdim=True)
 
-        sketch_aug_feat = self.distill_visual_encoder(sk_aug_tensor.type(self.dtype))
+        sketch_aug_prenorm = self.distill_visual_encoder(sk_aug_tensor.type(self.dtype))
+        if self.use_adapter:
+            sketch_aug_adapted = self.adapter_aug_sketch(sketch_aug_prenorm)
+            sketch_aug_feat = self.image_adapter_m * sketch_aug_adapted + (1 - self.image_adapter_m) * sketch_aug_prenorm
+        else:
+            sketch_aug_feat = sketch_aug_prenorm
         sketch_aug_feat = sketch_aug_feat / sketch_aug_feat.norm(dim=-1, keepdim=True)
             
         # 4. Compute Logits
