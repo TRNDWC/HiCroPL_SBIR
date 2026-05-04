@@ -43,7 +43,7 @@ class CustomCLIP(nn.Module):
 
         # 1. Distill branch (vanilla CLIP)
         self.clip_model_distill = clip_model_frozen
-        freeze_model(self.clip_model_distill)
+        self.clip_model_distill.apply(freeze_all_but_bn)
         self.distill_visual_encoder = self.clip_model_distill.visual
 
         # 2. Shared Logit Scale
