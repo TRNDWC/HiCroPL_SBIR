@@ -70,6 +70,8 @@ class CustomCLIP(nn.Module):
         print("Initializing Photo Prompt Learner...")
         cfg_photo = copy.copy(cfg)
         cfg_photo.ctx_init = getattr(cfg, 'ctx_init', 'a photo of a')
+        cfg_photo.modality = 'photo'
+        cfg_photo.gpt_file = getattr(cfg, 'gpt_file', 'gpt_file/sketchy_ext.json')
         self.prompt_learner_photo = CrossModalPromptLearner(
             cfg=cfg_photo,
             clip_model=clip_photo,
@@ -79,6 +81,8 @@ class CustomCLIP(nn.Module):
         print("Initializing Sketch Prompt Learner...")
         cfg_sketch = copy.copy(cfg)
         cfg_sketch.ctx_init = getattr(cfg, 'ctx_init_sketch', 'a sketch of a')
+        cfg_sketch.modality = 'sketch'
+        cfg_sketch.gpt_file = getattr(cfg, 'gpt_file', 'gpt_file/sketchy_ext.json')
         self.prompt_learner_sketch = CrossModalPromptLearner(
             cfg=cfg_sketch,
             clip_model=clip_sketch,

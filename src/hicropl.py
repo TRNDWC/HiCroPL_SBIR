@@ -11,6 +11,8 @@ Components:
 """
 
 import copy
+import os
+import json
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -181,6 +183,12 @@ class CrossModalPromptLearner(nn.Module):
         self._cached_tokenized_prompts = None
         self._cached_fixed_embeddings = None
 
+        # modality and gpt mapping
+        self.modality = getattr(cfg, 'modality', None)
+        self.gpt_file = getattr(cfg, 'gpt_file', 'gpt_file/sketchy_ext.json')
+        self._gpt_mapping = self._load_gpt_file(self.gpt_file)
+        self._logged_missing = False
+
     def construct_prompts(self, ctx, prefix, suffix, label=None):
         if label is not None:
             prefix = prefix[label]
@@ -201,7 +209,31 @@ class CrossModalPromptLearner(nn.Module):
         
         classnames_clean = [name.replace("_", " ") for name in classnames]
         prompt_prefix = self.ctx_init_text if self.ctx_init_text else " ".join(["X"] * self.n_ctx)
-        raw_prompts = [prompt_prefix + " " + name + "." for name in classnames_clean]
+
+        raw_prompts = []
+        missing = []
+        for orig_name, clean_name in zip(classnames, classnames_clean):
+            desc = None
+            if self._gpt_mapping:
+                # try several key normalizations
+                keys_to_try = [orig_name, clean_name, orig_name.replace(" ", "_"), clean_name.replace(" ", "_")]
+                for k in keys_to_try:
+                    if k in self._gpt_mapping and self.modality in self._gpt_mapping[k]:
+                        desc = self._gpt_mapping[k][self.modality]
+                        break
+            if desc is not None:
+                # ensure it ends with a period
+                if not desc.endswith('.'):
+                    desc = desc + '.'
+                raw_prompts.append(desc)
+            else:
+                missing.append(orig_name)
+                raw_prompts.append(prompt_prefix + " " + clean_name + ".")
+
+        # Log missing classes once so user can fix GPT file if needed
+        if missing and not self._logged_missing:
+            print(f"Warning: missing GPT descriptions for classes (modality={self.modality}): {missing}")
+            self._logged_missing = True
         
         from src.clip import clip as _clip
         tokenized_prompts = torch.cat([_clip.tokenize(p) for p in raw_prompts]).to(device)
@@ -230,6 +262,34 @@ class CrossModalPromptLearner(nn.Module):
         self._cached_fixed_embeddings = fixed_embeddings
 
         return text_input, tokenized_prompts, fixed_embeddings
+
+    def _load_gpt_file(self, path):
+        """Load JSON file mapping class -> { 'photo': desc, 'sketch': desc }"""
+        if path is None:
+            return {}
+        try:
+            if not os.path.exists(path):
+                return {}
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            return {}
+
+        mapping = {}
+        for item in data:
+            cls = item.get('class')
+            inp = item.get('input', '').lower()
+            out = item.get('output', '').strip()
+            if not cls or not out:
+                continue
+            # detect modality from input field
+            modality = 'photo' if 'photo' in inp else ('sketch' if 'sketch' in inp else None)
+            if modality is None:
+                continue
+            if cls not in mapping:
+                mapping[cls] = {}
+            mapping[cls][modality] = out
+        return mapping
 
     def forward(self, classnames):
         text_input, tokenized_prompts, fixed_embeddings = self._prepare_dynamic_classnames(classnames)

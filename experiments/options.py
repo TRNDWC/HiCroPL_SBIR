@@ -49,6 +49,7 @@ parser.add_argument('--prompt_depth', type=int, default=9, help='Depth of deep p
 parser.add_argument('--cross_layer', type=int, default=4, help='Layer at which bidirectional flow switches direction')
 parser.add_argument('--ctx_init', type=str, default='a photo of a', help='Initial text context for photo prompt learner')
 parser.add_argument('--ctx_init_sketch', type=str, default='a sketch of a', help='Initial text context for sketch prompt learner')
+parser.add_argument('--gpt_file', type=str, default='gpt_file/sketchy_ext.json', help='Path to GPT JSON descriptions for classes')
 parser.add_argument('--lambda_triplet', type=float, default=1.0, help='Weight for L1: Triplet Loss')
 parser.add_argument('--lambda_cross_modal', type=float, default=1.0, help='Weight for L1: InfoNCE (sketch-photo)')
 parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for L2: Cross-Entropy Loss on prompted branches')
