@@ -42,39 +42,47 @@ class CustomCLIP(nn.Module):
         super().__init__()
         self.cfg = cfg
 
-        # 1. Distill branch (vanilla CLIP)
-        self.clip_model_distill = clip_model_frozen
-        self.clip_model_distill.apply(freeze_all_but_bn)
-        self.distill_visual_encoder = self.clip_model_distill.visual
-
-        # 2. Shared Logit Scale
-        self.logit_scale = clip_model.logit_scale
-
-        # 3. Prompted Branches (HiCroPL)
+        # 1. Prompted Branches (HiCroPL)
         clip_model.apply(freeze_all_but_bn)
         self.dtype = clip_model.dtype
+        original_device = next(clip_model.parameters()).device
 
         # Local deepcopies for per-modality branches (photo/sketch)
         # Move to CPU first to avoid CUDA kernel incompatibility during deepcopy
-        original_device = next(clip_model.parameters()).device
         clip_model_cpu = clip_model.cpu()
         clip_photo = copy.deepcopy(clip_model_cpu).to(original_device)
         clip_sketch = copy.deepcopy(clip_model_cpu).to(original_device)
         clip_model = clip_model_cpu.to(original_device)
 
+        # 2. Branch-specific distill branches (vanilla CLIP)
+        self.clip_model_distill_photo = copy.deepcopy(clip_model_frozen).to(original_device)
+        self.clip_model_distill_sketch = copy.deepcopy(clip_model_frozen).to(original_device)
+        self.clip_model_distill_photo.apply(freeze_all_but_bn)
+        self.clip_model_distill_sketch.apply(freeze_all_but_bn)
+        self.distill_visual_encoder_photo = self.clip_model_distill_photo.visual
+        self.distill_visual_encoder_sketch = self.clip_model_distill_sketch.visual
+
+        # 3. Branch-specific logit scales
+        self.logit_scale_photo = clip_photo.logit_scale
+        self.logit_scale_sketch = clip_sketch.logit_scale
+
         # -- Prompt Learners --
         print("Initializing Photo Prompt Learner...")
+        cfg_photo = copy.copy(cfg)
+        cfg_photo.ctx_init = getattr(cfg, 'ctx_init', 'a photo of a')
         self.prompt_learner_photo = CrossModalPromptLearner(
-            cfg=cfg,
+            cfg=cfg_photo,
             clip_model=clip_photo,
-            clip_model_distill=self.clip_model_distill
+            clip_model_distill=self.clip_model_distill_photo
         )
 
         print("Initializing Sketch Prompt Learner...")
+        cfg_sketch = copy.copy(cfg)
+        cfg_sketch.ctx_init = getattr(cfg, 'ctx_init_sketch', 'a sketch of a')
         self.prompt_learner_sketch = CrossModalPromptLearner(
-            cfg=cfg,
+            cfg=cfg_sketch,
             clip_model=clip_sketch,
-            clip_model_distill=self.clip_model_distill
+            clip_model_distill=self.clip_model_distill_sketch
         )
 
         # -- Encoders --
@@ -88,14 +96,14 @@ class CustomCLIP(nn.Module):
             prompt_learner=self.prompt_learner_photo,
             text_encoder=self.text_encoder_photo,
             image_encoder=self.visual_encoder_photo,
-            logit_scale=self.logit_scale,
+            logit_scale=self.logit_scale_photo,
             dtype=self.dtype
         )
         self.extractor_sketch = HiCroPLFeatureExtractor(
             prompt_learner=self.prompt_learner_sketch,
             text_encoder=self.text_encoder_sketch,
             image_encoder=self.visual_encoder_sketch,
-            logit_scale=self.logit_scale,
+            logit_scale=self.logit_scale_sketch,
             dtype=self.dtype
         )
 
@@ -151,7 +159,7 @@ class CustomCLIP(nn.Module):
         text_feat_fixed_sketch = out_s["text_features_fixed"]
 
         # 3. Aug Visual Features: run distill encoder, apply adapters (if enabled) with residual mixing, then normalize
-        photo_aug_prenorm = self.distill_visual_encoder(photo_aug_tensor.type(self.dtype))
+        photo_aug_prenorm = self.distill_visual_encoder_photo(photo_aug_tensor.type(self.dtype))
         if self.use_adapter:
             photo_aug_adapted = self.adapter_aug_photo(photo_aug_prenorm)
             photo_aug_feat = self.image_adapter_m * photo_aug_adapted + (1 - self.image_adapter_m) * photo_aug_prenorm
@@ -159,7 +167,7 @@ class CustomCLIP(nn.Module):
             photo_aug_feat = photo_aug_prenorm
         photo_aug_feat = photo_aug_feat / photo_aug_feat.norm(dim=-1, keepdim=True)
 
-        sketch_aug_prenorm = self.distill_visual_encoder(sk_aug_tensor.type(self.dtype))
+        sketch_aug_prenorm = self.distill_visual_encoder_sketch(sk_aug_tensor.type(self.dtype))
         if self.use_adapter:
             sketch_aug_adapted = self.adapter_aug_sketch(sketch_aug_prenorm)
             sketch_aug_feat = self.image_adapter_m * sketch_aug_adapted + (1 - self.image_adapter_m) * sketch_aug_prenorm
@@ -222,7 +230,8 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.model.visual_encoder_sketch.eval()
         self.model.text_encoder_photo.eval()
         self.model.text_encoder_sketch.eval()
-        self.model.clip_model_distill.eval()
+        self.model.clip_model_distill_photo.eval()
+        self.model.clip_model_distill_sketch.eval()
 
     def configure_optimizers(self):
         def add_unique_params(candidates, out_list, seen_ids):
@@ -278,7 +287,6 @@ class HiCroPL_SBIR(pl.LightningModule):
         """Extract visual features: Adapter trước normalize (giống CoPrompt)"""
         extractor = self.model.extractor_photo if modality == 'photo' else self.model.extractor_sketch
         out = extractor(tensor, self.classnames)
-        # dùng prenorm làm input và normalize (adapter removed)
         return self.model.apply_adapter_residual(out["image_features_prenorm"])
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
