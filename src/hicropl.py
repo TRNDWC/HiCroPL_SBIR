@@ -186,7 +186,8 @@ class CrossModalPromptLearner(nn.Module):
         # modality and gpt mapping
         self.modality = getattr(cfg, 'modality', None)
         self.gpt_file = getattr(cfg, 'gpt_file', 'gpt_file/sketchy_ext.json')
-        self._gpt_mapping = self._load_gpt_file(self.gpt_file)
+        self.prompt_source = getattr(cfg, 'prompt_source', 'gpt')
+        self._gpt_mapping = self._load_gpt_file(self.gpt_file) if self.prompt_source == 'gpt' else {}
         self._logged_missing = False
 
     def construct_prompts(self, ctx, prefix, suffix, label=None):
@@ -213,25 +214,27 @@ class CrossModalPromptLearner(nn.Module):
         raw_prompts = []
         missing = []
         for orig_name, clean_name in zip(classnames, classnames_clean):
-            desc = None
-            if self._gpt_mapping:
-                # try several key normalizations
-                keys_to_try = [orig_name, clean_name, orig_name.replace(" ", "_"), clean_name.replace(" ", "_")]
-                for k in keys_to_try:
-                    if k in self._gpt_mapping and self.modality in self._gpt_mapping[k]:
-                        desc = self._gpt_mapping[k][self.modality]
-                        break
-            if desc is not None:
-                # ensure it ends with a period
-                if not desc.endswith('.'):
-                    desc = desc + '.'
-                raw_prompts.append(desc)
+            if self.prompt_source == 'gpt':
+                desc = None
+                if self._gpt_mapping:
+                    # try several key normalizations
+                    keys_to_try = [orig_name, clean_name, orig_name.replace(" ", "_"), clean_name.replace(" ", "_")]
+                    for k in keys_to_try:
+                        if k in self._gpt_mapping and self.modality in self._gpt_mapping[k]:
+                            desc = self._gpt_mapping[k][self.modality]
+                            break
+                if desc is not None:
+                    if not desc.endswith('.'):
+                        desc = desc + '.'
+                    raw_prompts.append(desc)
+                else:
+                    missing.append(orig_name)
+                    raw_prompts.append(prompt_prefix + " " + clean_name + ".")
             else:
-                missing.append(orig_name)
                 raw_prompts.append(prompt_prefix + " " + clean_name + ".")
 
         # Log missing classes once so user can fix GPT file if needed
-        if missing and not self._logged_missing:
+        if self.prompt_source == 'gpt' and missing and not self._logged_missing:
             print(f"Warning: missing GPT descriptions for classes (modality={self.modality}): {missing}")
             self._logged_missing = True
         
@@ -361,20 +364,4 @@ class VisualEncoder(nn.Module):
         """
         return self.vit(image.type(self.dtype), first_visual_prompt, deeper_visual_prompts)
 
-
-
-class Adapter(nn.Module):
-    def __init__(self, c_in, reduction=4):
-        super(Adapter, self).__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(c_in, c_in // reduction, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(c_in // reduction, c_in, bias=False),
-            # nn.ReLU(inplace=True),
-        )
-
-    def forward(self, x):
-        x = self.fc(x)
-        return x
-    
     

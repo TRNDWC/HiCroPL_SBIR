@@ -10,7 +10,6 @@ from src.hicropl import (
     CrossModalPromptLearner,
     TextEncoder,
     VisualEncoder,
-    Adapter,
 )
 from src.hicropl_extractor import HiCroPLFeatureExtractor
 
@@ -27,9 +26,6 @@ def freeze_all_but_bn(m):
             m.weight.requires_grad_(False)
         if hasattr(m, 'bias') and m.bias is not None:
             m.bias.requires_grad_(False)
-
-
-# Adapter module removed — adapter logic eliminated project-wide.
 
 
 class CustomCLIP(nn.Module):
@@ -72,6 +68,7 @@ class CustomCLIP(nn.Module):
         cfg_photo.ctx_init = getattr(cfg, 'ctx_init', 'a photo of a')
         cfg_photo.modality = 'photo'
         cfg_photo.gpt_file = getattr(cfg, 'gpt_file', 'gpt_file/sketchy_ext.json')
+        cfg_photo.prompt_source = getattr(cfg, 'prompt_source', 'gpt')
         self.prompt_learner_photo = CrossModalPromptLearner(
             cfg=cfg_photo,
             clip_model=clip_photo,
@@ -83,6 +80,7 @@ class CustomCLIP(nn.Module):
         cfg_sketch.ctx_init = getattr(cfg, 'ctx_init_sketch', 'a sketch of a')
         cfg_sketch.modality = 'sketch'
         cfg_sketch.gpt_file = getattr(cfg, 'gpt_file', 'gpt_file/sketchy_ext.json')
+        cfg_sketch.prompt_source = getattr(cfg, 'prompt_source', 'gpt')
         self.prompt_learner_sketch = CrossModalPromptLearner(
             cfg=cfg_sketch,
             clip_model=clip_sketch,
@@ -111,25 +109,8 @@ class CustomCLIP(nn.Module):
             dtype=self.dtype
         )
 
-        # --- 4. Augmentation Adapters ---
-        self.use_adapter = bool(getattr(cfg, 'use_adapter', False))
-        adapter_reduction = getattr(cfg, 'adapter_reduction', 4)
-        embed_dim = int(clip_photo.text_projection.shape[1])
-        self.adapter_aug_photo = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
-        self.adapter_aug_sketch = Adapter(embed_dim, adapter_reduction).to(dtype=self.dtype)
-        self.image_adapter_m = float(getattr(cfg, 'image_adapter_m', 0.5))
-        
-        # Freeze adapter params if not enabled
-        if not self.use_adapter:
-            for p in self.adapter_aug_photo.parameters():
-                p.requires_grad_(False)
-            for p in self.adapter_aug_sketch.parameters():
-                p.requires_grad_(False)
-        
-        print(f"Augment adapters: enabled={self.use_adapter} | reduction={adapter_reduction}, image_m={self.image_adapter_m}")
-
-    def apply_adapter_residual(self, feat_prenorm):
-        """Normalize prenorm features; adapter removed so just normalize."""
+    def normalize_features(self, feat_prenorm):
+        """L2-normalize feature tensors."""
         return feat_prenorm / feat_prenorm.norm(dim=-1, keepdim=True)
 
     def forward(self, x, classnames):
@@ -147,14 +128,14 @@ class CustomCLIP(nn.Module):
         # Đặc trưng Negative lấy từ nhánh Photo
         out_neg = self.extractor_photo(neg_tensor, classnames)
         
-        # 2. Visual features: normalize prenorm features (adapter removed)
-        photo_feat  = self.apply_adapter_residual(out_p["image_features_prenorm"])
-        sketch_feat = self.apply_adapter_residual(out_s["image_features_prenorm"])
-        neg_feat    = self.apply_adapter_residual(out_neg["image_features_prenorm"])
+        # 2. Visual features: normalize prenorm features
+        photo_feat  = self.normalize_features(out_p["image_features_prenorm"])
+        sketch_feat = self.normalize_features(out_s["image_features_prenorm"])
+        neg_feat    = self.normalize_features(out_neg["image_features_prenorm"])
 
         # Text features: normalize prenorm features
-        text_feat_photo  = self.apply_adapter_residual(out_p["text_features_prenorm"])
-        text_feat_sketch = self.apply_adapter_residual(out_s["text_features_prenorm"])
+        text_feat_photo  = self.normalize_features(out_p["text_features_prenorm"])
+        text_feat_sketch = self.normalize_features(out_s["text_features_prenorm"])
 
         # Trích xuất Fixed reference targets
         photo_feat_fixed = out_p["image_features_fixed"]
@@ -162,21 +143,13 @@ class CustomCLIP(nn.Module):
         text_feat_fixed_photo = out_p["text_features_fixed"]
         text_feat_fixed_sketch = out_s["text_features_fixed"]
 
-        # 3. Aug Visual Features: run distill encoder, apply adapters (if enabled) with residual mixing, then normalize
+        # 3. Aug Visual Features: run distill encoder, then normalize
         photo_aug_prenorm = self.distill_visual_encoder_photo(photo_aug_tensor.type(self.dtype))
-        if self.use_adapter:
-            photo_aug_adapted = self.adapter_aug_photo(photo_aug_prenorm)
-            photo_aug_feat = self.image_adapter_m * photo_aug_adapted + (1 - self.image_adapter_m) * photo_aug_prenorm
-        else:
-            photo_aug_feat = photo_aug_prenorm
+        photo_aug_feat = photo_aug_prenorm
         photo_aug_feat = photo_aug_feat / photo_aug_feat.norm(dim=-1, keepdim=True)
 
         sketch_aug_prenorm = self.distill_visual_encoder_sketch(sk_aug_tensor.type(self.dtype))
-        if self.use_adapter:
-            sketch_aug_adapted = self.adapter_aug_sketch(sketch_aug_prenorm)
-            sketch_aug_feat = self.image_adapter_m * sketch_aug_adapted + (1 - self.image_adapter_m) * sketch_aug_prenorm
-        else:
-            sketch_aug_feat = sketch_aug_prenorm
+        sketch_aug_feat = sketch_aug_prenorm
         sketch_aug_feat = sketch_aug_feat / sketch_aug_feat.norm(dim=-1, keepdim=True)
             
         # 4. Compute Logits
@@ -291,7 +264,7 @@ class HiCroPL_SBIR(pl.LightningModule):
         """Extract visual features: Adapter trước normalize (giống CoPrompt)"""
         extractor = self.model.extractor_photo if modality == 'photo' else self.model.extractor_sketch
         out = extractor(tensor, self.classnames)
-        return self.model.apply_adapter_residual(out["image_features_prenorm"])
+        return self.model.normalize_features(out["image_features_prenorm"])
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         if self.eval_mode == 'fine_grained':

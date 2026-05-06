@@ -50,6 +50,7 @@ parser.add_argument('--cross_layer', type=int, default=4, help='Layer at which b
 parser.add_argument('--ctx_init', type=str, default='a photo of a', help='Initial text context for photo prompt learner')
 parser.add_argument('--ctx_init_sketch', type=str, default='a sketch of a', help='Initial text context for sketch prompt learner')
 parser.add_argument('--gpt_file', type=str, default='gpt_file/sketchy_ext.json', help='Path to GPT JSON descriptions for classes')
+parser.add_argument('--prompt_source', type=str, default='gpt', choices=['gpt', 'template'], help='Use GPT descriptions or template prompts')
 parser.add_argument('--lambda_triplet', type=float, default=1.0, help='Weight for L1: Triplet Loss')
 parser.add_argument('--lambda_cross_modal', type=float, default=1.0, help='Weight for L1: InfoNCE (sketch-photo)')
 parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for L2: Cross-Entropy Loss on prompted branches')
@@ -62,9 +63,6 @@ parser.add_argument('--mcc_sk', type=float, default=0.1, help='Target mean simil
 parser.add_argument('--mcc_ph', type=float, default=0.0, help='Target mean similarity for photo-to-photo (MCC center)')
 parser.add_argument('--triplet_margin', type=float, default=0.3, help='Margin for Triplet Loss')
 parser.add_argument('--temperature', type=float, default=0.07, help='Temperature for InfoNCE Loss')
-parser.add_argument('--adapter_reduction', type=int, default=4, help='Bottleneck reduction ratio for augment adapters')
-parser.add_argument('--image_adapter_m', type=float, default=0.1, help='Residual mixing ratio for image augment adapter output')
-parser.add_argument('--use_adapter', action='store_true', default=False, help='Enable adapters on augmentation branches (disabled by default)')
 parser.add_argument('--lambda_distill', type=float, default=1.0, help='Legacy option, currently unused in the active HiCroPL loss')
 
 # CLIP design_details (CoPrompt-style builder config)
