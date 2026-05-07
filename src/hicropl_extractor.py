@@ -47,11 +47,10 @@ class HiCroPLFeatureExtractor(nn.Module):
         # 2. Compute GPT text distill embeddings with trainable distill LayerNorm.
         text_features_fixed_all = self.encode_text_distill()
         
-        # 3. Đặc trưng Zero-Shot Fixed Image
+        # 3. Distill image features. Keep gradients so trainable distill LayerNorm can update.
         image_distill = image if image_distill is None else image_distill
-        with torch.no_grad():
-            image_features_fixed = self.prompt_learner.ZS_image_encoder(image_distill.type(self.dtype))
-            image_features_fixed = image_features_fixed / image_features_fixed.norm(dim=-1, keepdim=True)
+        image_features_fixed = self.prompt_learner.ZS_image_encoder(image_distill.type(self.dtype))
+        image_features_fixed = image_features_fixed / image_features_fixed.norm(dim=-1, keepdim=True)
 
         # 4. Trích xuất Đặc trưng (Có học)
         text_features_all = self.text_encoder(text_input, self.prompt_learner.tokenized_prompts, cross_prompts_text_deeper)
