@@ -224,13 +224,14 @@ class CustomCLIP(nn.Module):
         sketch_aug_feat = sketch_aug_feat / sketch_aug_feat.norm(dim=-1, keepdim=True)
             
         # 4. Compute Logits
-        logit_scale = out_p["logit_scale"]
-        logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
-        logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
+        logit_scale_photo = out_p["logit_scale"]
+        logit_scale_sketch = out_s["logit_scale"]
+        logits_photo = logit_scale_photo * photo_feat @ text_feat_photo.t()
+        logits_sketch = logit_scale_sketch * sketch_feat @ text_feat_sketch.t()
         
         # 5. Compute Logits for Augmented Images
-        logits_photo_aug = logit_scale * photo_aug_feat @ text_feat_photo.t()
-        logits_sketch_aug = logit_scale * sketch_aug_feat @ text_feat_sketch.t()
+        logits_photo_aug = logit_scale_photo * photo_aug_feat @ text_feat_photo.t()
+        logits_sketch_aug = logit_scale_sketch * sketch_aug_feat @ text_feat_sketch.t()
         
         return (
             photo_feat, logits_photo,
@@ -396,6 +397,11 @@ class HiCroPL_SBIR(pl.LightningModule):
         all_photo_category  = torch.cat(self.test_photo_labels, dim=0)  
         all_sketch_category = torch.cat(self.test_sketch_labels, dim=0) 
 
+        gallery_features = self._gather_variable_tensor(gallery_features)
+        query_features = self._gather_variable_tensor(query_features)
+        all_photo_category = self._gather_variable_tensor(all_photo_category)
+        all_sketch_category = self._gather_variable_tensor(all_sketch_category)
+
         similarity_matrix = query_features @ gallery_features.t()       
 
         dataset = getattr(self.args, 'dataset', 'sketchy')
@@ -459,6 +465,26 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.test_sketch_features.clear()
         self.test_photo_labels.clear()
         self.test_sketch_labels.clear()
+
+    def _gather_variable_tensor(self, tensor):
+        """Gather first-dimension variable-length tensors across DDP ranks."""
+        if getattr(self.trainer, "world_size", 1) == 1:
+            return tensor
+
+        local_size = torch.tensor([tensor.shape[0]], device=tensor.device, dtype=torch.long)
+        gathered_sizes = self.all_gather(local_size).reshape(-1)
+        max_size = int(gathered_sizes.max().item())
+
+        if tensor.shape[0] < max_size:
+            pad_shape = (max_size - tensor.shape[0],) + tuple(tensor.shape[1:])
+            padding = torch.zeros(pad_shape, device=tensor.device, dtype=tensor.dtype)
+            tensor = torch.cat([tensor, padding], dim=0)
+
+        gathered = self.all_gather(tensor)
+        chunks = []
+        for rank_idx, size in enumerate(gathered_sizes.tolist()):
+            chunks.append(gathered[rank_idx, :size])
+        return torch.cat(chunks, dim=0)
 
     def _on_validation_epoch_end_fine_grained(self):
         from src_fg.utils_fg import compute_rank_based_accuracy

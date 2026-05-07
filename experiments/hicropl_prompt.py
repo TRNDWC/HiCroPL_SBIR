@@ -16,6 +16,26 @@ from experiments.options import opts
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
+def resolve_trainer_devices(devices_arg):
+    if devices_arg == 'auto':
+        return torch.cuda.device_count() if torch.cuda.is_available() else 1
+    if isinstance(devices_arg, int):
+        return devices_arg
+    if ',' in devices_arg:
+        return [int(item.strip()) for item in devices_arg.split(',') if item.strip()]
+    return int(devices_arg)
+
+
+def resolve_trainer_strategy(strategy_arg, devices):
+    if strategy_arg != 'auto':
+        return strategy_arg
+    if isinstance(devices, list):
+        num_devices = len(devices)
+    else:
+        num_devices = int(devices)
+    return 'ddp_find_unused_parameters_true' if torch.cuda.is_available() and num_devices > 1 else 'auto'
+
 if __name__ == '__main__':
     SEED = 42
     # Set seed for reproducibility — bao gồm Python, NumPy, PyTorch, CUDA
@@ -75,10 +95,10 @@ if __name__ == '__main__':
     from src.utils import load_clip_to_cpu, load_clip_to_cpu_teacher
     print("Loading CLIP models...")
     
-    clip_model = load_clip_to_cpu(opts).to(device)
+    clip_model = load_clip_to_cpu(opts)
     clip_model.float() # Training prompt in fp32
     
-    clip_model_frozen = load_clip_to_cpu_teacher(opts).to(device)
+    clip_model_frozen = load_clip_to_cpu_teacher(opts)
     clip_model_frozen.float()
     clip_model_frozen.eval()
     
@@ -106,7 +126,12 @@ if __name__ == '__main__':
     )
 
     # 5. Initialize Trainer
-    trainer = Trainer(accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1,
+    trainer_devices = resolve_trainer_devices(opts.devices)
+    trainer_strategy = resolve_trainer_strategy(opts.strategy, trainer_devices)
+    print(f"[CONFIG] accelerator={'gpu' if torch.cuda.is_available() else 'cpu'}, devices={trainer_devices}, strategy={trainer_strategy}, precision={opts.precision}")
+    trainer = Trainer(accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=trainer_devices,
+        strategy=trainer_strategy,
+        precision=opts.precision,
         min_epochs=1, max_epochs=opts.epochs,
         benchmark=False,  # Set False for reproducibility (True causes CUDNN non-determinism)
         deterministic=True,
