@@ -1,6 +1,7 @@
 import copy
 import json
 import numpy as np
+import os
 from pathlib import Path
 import torch
 import torch.nn as nn
@@ -101,18 +102,27 @@ class CustomCLIP(nn.Module):
         # 1. Prompted Branches (HiCroPL)
         clip_model.apply(freeze_all_but_bn)
         self.dtype = clip_model.dtype
-        original_device = next(clip_model.parameters()).device
+        branch_init_device = getattr(cfg, 'branch_init_device', 'cpu')
+        if branch_init_device == 'cuda' and torch.cuda.is_available():
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            copy_device = torch.device(f'cuda:{local_rank}')
+            print(f"[CONFIG] Deepcopying CLIP branches on {copy_device}; this increases peak VRAM during init.")
+            clip_model = clip_model.to(copy_device)
+            clip_model_frozen = clip_model_frozen.to(copy_device)
+        else:
+            copy_device = torch.device('cpu')
+            if branch_init_device == 'cuda':
+                print("[WARN] --branch_init_device cuda requested but CUDA is unavailable; using CPU.")
+            clip_model = clip_model.cpu()
+            clip_model_frozen = clip_model_frozen.cpu()
 
         # Local deepcopies for per-modality branches (photo/sketch)
-        # Move to CPU first to avoid CUDA kernel incompatibility during deepcopy
-        clip_model_cpu = clip_model.cpu()
-        clip_photo = copy.deepcopy(clip_model_cpu).to(original_device)
-        clip_sketch = copy.deepcopy(clip_model_cpu).to(original_device)
-        clip_model = clip_model_cpu.to(original_device)
+        clip_photo = copy.deepcopy(clip_model).to(copy_device)
+        clip_sketch = copy.deepcopy(clip_model).to(copy_device)
 
         # 2. Branch-specific distill branches (vanilla CLIP)
-        self.clip_model_distill_photo = copy.deepcopy(clip_model_frozen).to(original_device)
-        self.clip_model_distill_sketch = copy.deepcopy(clip_model_frozen).to(original_device)
+        self.clip_model_distill_photo = copy.deepcopy(clip_model_frozen).to(copy_device)
+        self.clip_model_distill_sketch = copy.deepcopy(clip_model_frozen).to(copy_device)
         self.clip_model_distill_photo.apply(freeze_all_but_bn)
         self.clip_model_distill_sketch.apply(freeze_all_but_bn)
         self.distill_visual_encoder_photo = self.clip_model_distill_photo.visual
@@ -154,11 +164,11 @@ class CustomCLIP(nn.Module):
         gpt_prompts = _load_gpt_distill_prompts(classnames, gpt_text_file)
         from src.clip import clip as _clip
         if classnames:
-            tokenized_gpt_photo = _clip.tokenize(gpt_prompts["photo"], truncate=True).to(original_device)
-            tokenized_gpt_sketch = _clip.tokenize(gpt_prompts["sketch"], truncate=True).to(original_device)
+            tokenized_gpt_photo = _clip.tokenize(gpt_prompts["photo"], truncate=True).to(copy_device)
+            tokenized_gpt_sketch = _clip.tokenize(gpt_prompts["sketch"], truncate=True).to(copy_device)
         else:
-            tokenized_gpt_photo = torch.empty(0, 77, dtype=torch.long, device=original_device)
-            tokenized_gpt_sketch = torch.empty(0, 77, dtype=torch.long, device=original_device)
+            tokenized_gpt_photo = torch.empty(0, 77, dtype=torch.long, device=copy_device)
+            tokenized_gpt_sketch = torch.empty(0, 77, dtype=torch.long, device=copy_device)
         
         # -- Khởi tạo Feature Extractors --
         self.extractor_photo = HiCroPLFeatureExtractor(
@@ -194,13 +204,10 @@ class CustomCLIP(nn.Module):
         out_p = self.extractor_photo(photo_tensor, image_distill=photo_aug_tensor)
         out_s = self.extractor_sketch(sk_tensor, image_distill=sk_aug_tensor)
         
-        # Đặc trưng Negative lấy từ nhánh Photo
-        out_neg = self.extractor_photo(neg_tensor)
-        
         # 2. Visual features: normalize prenorm features
         photo_feat  = self.normalize_features(out_p["image_features_prenorm"])
         sketch_feat = self.normalize_features(out_s["image_features_prenorm"])
-        neg_feat    = self.normalize_features(out_neg["image_features_prenorm"])
+        neg_feat    = torch.zeros_like(photo_feat)
 
         # Text features: normalize prenorm features
         text_feat_photo  = self.normalize_features(out_p["text_features_prenorm"])
@@ -214,14 +221,9 @@ class CustomCLIP(nn.Module):
         text_distill_photo = text_feat_fixed_photo
         text_distill_sketch = text_feat_fixed_sketch
 
-        # 3. Aug Visual Features: run distill encoder, then normalize
-        photo_aug_prenorm = self.distill_visual_encoder_photo(photo_aug_tensor.type(self.dtype))
-        photo_aug_feat = photo_aug_prenorm
-        photo_aug_feat = photo_aug_feat / photo_aug_feat.norm(dim=-1, keepdim=True)
-
-        sketch_aug_prenorm = self.distill_visual_encoder_sketch(sk_aug_tensor.type(self.dtype))
-        sketch_aug_feat = sketch_aug_prenorm
-        sketch_aug_feat = sketch_aug_feat / sketch_aug_feat.norm(dim=-1, keepdim=True)
+        # 3. Aug visual features are already encoded as extractor distill targets.
+        photo_aug_feat = photo_feat_fixed
+        sketch_aug_feat = sketch_feat_fixed
             
         # 4. Compute Logits
         logit_scale_photo = out_p["logit_scale"]

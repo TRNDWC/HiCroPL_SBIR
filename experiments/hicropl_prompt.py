@@ -136,7 +136,7 @@ if __name__ == '__main__':
         benchmark=False,  # Set False for reproducibility (True causes CUDNN non-determinism)
         deterministic=True,
         logger=logger,
-        check_val_every_n_epoch=1,
+        check_val_every_n_epoch=opts.val_every_n_epoch,
         enable_progress_bar=True,
         callbacks=[checkpoint_callback, rich_progress_bar]
     )

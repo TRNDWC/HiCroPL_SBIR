@@ -28,10 +28,18 @@ parser.add_argument('--linear_lr', type=float, default=1e-4)
 parser.add_argument('--batch_size', type=int, default=64)
 parser.add_argument('--test_batch_size', type=int, default=1024)
 parser.add_argument('--epochs', type=int, default=60)
+parser.add_argument('--val_every_n_epoch', type=int, default=1, help='Run validation every N epochs')
 parser.add_argument('--workers', type=int, default=4)
 parser.add_argument('--devices', type=str, default='auto', help='Lightning devices setting: auto, an integer, or a comma-separated GPU list')
 parser.add_argument('--strategy', type=str, default='auto', help='Lightning strategy: auto, ddp, ddp_find_unused_parameters_true, etc.')
 parser.add_argument('--precision', type=str, default='32-true', help='Lightning precision, e.g. 32-true, 16-mixed, bf16-mixed')
+parser.add_argument(
+    '--branch_init_device',
+    type=str,
+    default='cpu',
+    choices=['cpu', 'cuda'],
+    help='Device used to deepcopy CLIP branches during CustomCLIP init. cuda can reduce CPU copy time but increases peak VRAM.'
+)
 parser.add_argument(
     '--backbone',
     type=str,
