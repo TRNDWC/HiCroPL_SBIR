@@ -11,8 +11,6 @@ Components:
 """
 
 import copy
-import os
-import json
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -103,9 +101,10 @@ class CrossPromptAttention(nn.Module):
 
 
 class CrossModalPromptLearner(nn.Module):
-    def __init__(self, cfg, clip_model, clip_model_distill=None):
+    def __init__(self, cfg, classnames, clip_model, clip_model_distill=None):
         super().__init__()
         
+        n_cls = len(classnames)
         self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
         self.cross_layer = getattr(cfg, 'cross_layer', 4)
         n_ctx = getattr(cfg, 'n_ctx', 4)
@@ -120,13 +119,13 @@ class CrossModalPromptLearner(nn.Module):
         vis_dim = clip_model.visual.output_dim if hasattr(clip_model.visual, 'output_dim') else clip_model.visual.conv1.weight.shape[0]
         v_dim = 768
 
+        self.n_cls = n_cls
         self.n_ctx = n_ctx
-        self.ctx_init_text = ctx_init
         self.dtype = dtype
         self.token_embedding = clip_model.token_embedding
         self.clip_model = clip_model 
         
-        # [SỬA ĐỔI LOAD DATA]: Trong framework SBIR, không có teacher gốc mà dùng chung distill branch
+        # Store distill model for zero-shot image encoder
         self.clip_model_distill = clip_model_distill if clip_model_distill is not None else clip_model
 
         ######## cross-modal text token initialization ########
@@ -139,9 +138,11 @@ class CrossModalPromptLearner(nn.Module):
             with torch.no_grad():
                 embedding = clip_model.token_embedding(prompt).type(dtype)
             ctx_vectors = embedding[0, 1: 1 + n_ctx, :]
+            prompt_prefix = ctx_init_clean
         else:
             ctx_vectors = torch.empty(n_ctx, ctx_dim, dtype=dtype)
             nn.init.normal_(ctx_vectors, std=0.02)
+            prompt_prefix = " ".join(["X"] * n_ctx)
 
         self.ctx = nn.Parameter(ctx_vectors)
         cross_prompts_text = nn.ParameterList([self.ctx] + [nn.Parameter(torch.empty(n_ctx, 512, dtype=dtype)) for _ in range(self.prompt_depth - 1)])
@@ -177,18 +178,20 @@ class CrossModalPromptLearner(nn.Module):
         ######## Distillation Image Encoder ########
         self.ZS_image_encoder = self.clip_model_distill.visual
 
-        # Cache động để lưu classnames của batch 
-        self._cached_classnames = None
-        self._cached_text_input = None
-        self._cached_tokenized_prompts = None
-        self._cached_fixed_embeddings = None
-
-        # modality and gpt mapping
-        self.modality = getattr(cfg, 'modality', None)
-        self.gpt_file = getattr(cfg, 'gpt_file', 'gpt_file/sketchy_ext.json')
-        self.prompt_source = getattr(cfg, 'prompt_source', 'gpt')
-        self._gpt_mapping = self._load_gpt_file(self.gpt_file) if self.prompt_source == 'gpt' else {}
-        self._logged_missing = False
+        ######## Initialize prompts for all classes ########
+        classnames = [name.replace("_", " ") for name in classnames]
+        prompts = [prompt_prefix + " " + name + "." for name in classnames]
+        
+        from src.clip import clip as _clip
+        tokenized_prompts = torch.cat([_clip.tokenize(p) for p in prompts]).to(clip_model.token_embedding.weight.device)
+        
+        with torch.no_grad():
+            embedding = clip_model.token_embedding(tokenized_prompts).type(dtype)
+        
+        # Register as buffers so they move with the model
+        self.register_buffer("token_prefix", embedding[:, :1, :])
+        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx:, :])
+        self.register_buffer("tokenized_prompts", tokenized_prompts)
 
     def construct_prompts(self, ctx, prefix, suffix, label=None):
         if label is not None:
@@ -196,106 +199,14 @@ class CrossModalPromptLearner(nn.Module):
             suffix = suffix[label]
         return torch.cat([prefix, ctx, suffix], dim=1)
 
-    def _prepare_dynamic_classnames(self, classnames):
-        """
-        [CHỈNH SỬA LOAD DATA SKETCH_VLM]: 
-        Bỏ triệt để GPT Classifier đọc JSON mapping rườm rà.
-        Test Zero-Shot trên Sketchy chỉ cần gọi trực tiếp hàm encode_text tĩnh.
-        """
-        if self._cached_classnames is not None and classnames == self._cached_classnames:
-            return self._cached_text_input, self._cached_tokenized_prompts, self._cached_fixed_embeddings
-            
-        n_cls = len(classnames)
+    def forward(self):
         device = self.cross_prompts_text[0].device
-        
-        classnames_clean = [name.replace("_", " ") for name in classnames]
-        prompt_prefix = self.ctx_init_text if self.ctx_init_text else " ".join(["X"] * self.n_ctx)
-
-        raw_prompts = []
-        missing = []
-        for orig_name, clean_name in zip(classnames, classnames_clean):
-            if self.prompt_source == 'gpt':
-                desc = None
-                if self._gpt_mapping:
-                    # try several key normalizations
-                    keys_to_try = [orig_name, clean_name, orig_name.replace(" ", "_"), clean_name.replace(" ", "_")]
-                    for k in keys_to_try:
-                        if k in self._gpt_mapping and self.modality in self._gpt_mapping[k]:
-                            desc = self._gpt_mapping[k][self.modality]
-                            break
-                if desc is not None:
-                    if not desc.endswith('.'):
-                        desc = desc + '.'
-                    raw_prompts.append(desc)
-                else:
-                    missing.append(orig_name)
-                    raw_prompts.append(prompt_prefix + " " + clean_name + ".")
-            else:
-                raw_prompts.append(prompt_prefix + " " + clean_name + ".")
-
-        # Log missing classes once so user can fix GPT file if needed
-        if self.prompt_source == 'gpt' and missing and not self._logged_missing:
-            print(f"Warning: missing GPT descriptions for classes (modality={self.modality}): {missing}")
-            self._logged_missing = True
-        
-        from src.clip import clip as _clip
-        tokenized_prompts = torch.cat([_clip.tokenize(p) for p in raw_prompts]).to(device)
-        
-        with torch.no_grad():
-            embedding = self.token_embedding(tokenized_prompts).type(self.dtype)  
-            
-        token_prefix = embedding[:, :1, :]
-        token_suffix = embedding[:, 1 + self.n_ctx:, :]
-        
         ctx = self.cross_prompts_text[0]
         if ctx.dim() == 2:
-            ctx = ctx.unsqueeze(0).expand(n_cls, -1, -1)
-            
-        text_input = self.construct_prompts(ctx, token_prefix, token_suffix)
-
-        # [SỬA ĐỔI LOAD DATA]: Băm text thành Fixed Embeddings bằng CLIP model gốc (thay vì read folder/json gpt_clip_classifier)
-        with torch.no_grad():
-            fixed_embeddings = self.clip_model_distill.encode_text(tokenized_prompts)
-            fixed_embeddings = fixed_embeddings / fixed_embeddings.norm(dim=-1, keepdim=True)
-            fixed_embeddings = fixed_embeddings.type(self.dtype)
+            ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)
         
-        self._cached_classnames = classnames
-        self._cached_text_input = text_input
-        self._cached_tokenized_prompts = tokenized_prompts
-        self._cached_fixed_embeddings = fixed_embeddings
-
-        return text_input, tokenized_prompts, fixed_embeddings
-
-    def _load_gpt_file(self, path):
-        """Load JSON file mapping class -> { 'photo': desc, 'sketch': desc }"""
-        if path is None:
-            return {}
-        try:
-            if not os.path.exists(path):
-                return {}
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        except Exception:
-            return {}
-
-        mapping = {}
-        for item in data:
-            cls = item.get('class')
-            inp = item.get('input', '').lower()
-            out = item.get('output', '').strip()
-            if not cls or not out:
-                continue
-            # detect modality from input field
-            modality = 'photo' if 'photo' in inp else ('sketch' if 'sketch' in inp else None)
-            if modality is None:
-                continue
-            if cls not in mapping:
-                mapping[cls] = {}
-            mapping[cls][modality] = out
-        return mapping
-
-    def forward(self, classnames):
-        text_input, tokenized_prompts, fixed_embeddings = self._prepare_dynamic_classnames(classnames)
+        # Construct text input prompts
+        text_input = self.construct_prompts(ctx, self.token_prefix, self.token_suffix)
 
         ######## T->I mapping ########
         visual_prompts = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)  
@@ -338,7 +249,7 @@ class CrossModalPromptLearner(nn.Module):
         cross_prompts_text_deeper = [self.cross_prompts_text[i] for i in range(1, len(self.cross_prompts_text))]
         cross_prompts_visual_deeper = [self.cross_prompts_visual[i] for i in range(1, len(self.cross_prompts_visual))]
         
-        return text_input, tokenized_prompts, fixed_embeddings, cross_prompts_text_deeper, cross_prompts_visual_deeper
+        return text_input, self.cross_prompts_visual[0], cross_prompts_text_deeper, cross_prompts_visual_deeper
 
 
 class VisualEncoder(nn.Module):

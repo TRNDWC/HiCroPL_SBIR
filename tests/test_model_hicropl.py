@@ -122,12 +122,12 @@ class TestCustomCLIPSpecification(unittest.TestCase):
         self.clip_model = MockCLIP()
         self.clip_frozen = MockCLIP()
 
-        # Initialize the model being tested
-        self.model = CustomCLIP(self.cfg, self.clip_model, self.clip_frozen)
-
         # Dummy inputs for testing
         self.batch_size = 2
         self.classnames = ["cat", "dog", "car"] # 3 classes
+
+        # Initialize the model being tested with classnames
+        self.model = CustomCLIP(self.cfg, self.clip_model, self.clip_frozen, classnames=self.classnames)
         self.photo_img = torch.randn(self.batch_size, 3, 224, 224)
         self.sk_img = torch.randn(self.batch_size, 3, 224, 224)
         self.neg_img = torch.randn(self.batch_size, 3, 224, 224)

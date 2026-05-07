@@ -18,18 +18,23 @@ class HiCroPLFeatureExtractor(nn.Module):
         self.logit_scale = logit_scale
         self.dtype = dtype
 
-    def forward(self, image, classnames, label=None):
-        # 1. Gọi Prompt Learner 
-        text_input, tokenized_prompts, text_features_fixed_all, cross_prompts_text_deeper, cross_prompts_visual_deeper = self.prompt_learner(classnames)
+    def forward(self, image, label=None):
+        # 1. Gọi Prompt Learner (classnames đã được khởi tạo ở __init__)
+        text_input, first_visual_prompt, cross_prompts_text_deeper, cross_prompts_visual_deeper = self.prompt_learner()
         
-        # 2. Đặc trưng Zero-Shot Fixed Image
+        # 2. Compute fixed text embeddings (zero-shot text encoder output)
+        with torch.no_grad():
+            text_features_fixed_all = self.prompt_learner.clip_model_distill.encode_text(self.prompt_learner.tokenized_prompts)
+            text_features_fixed_all = text_features_fixed_all / text_features_fixed_all.norm(dim=-1, keepdim=True)
+        
+        # 3. Đặc trưng Zero-Shot Fixed Image
         with torch.no_grad():
             image_features_fixed = self.prompt_learner.ZS_image_encoder(image.type(self.dtype))
             image_features_fixed = image_features_fixed / image_features_fixed.norm(dim=-1, keepdim=True)
 
-        # 3. Trích xuất Đặc trưng (Có học)
-        text_features_all = self.text_encoder(text_input, tokenized_prompts, cross_prompts_text_deeper)
-        image_features = self.image_encoder(image.type(self.dtype), self.prompt_learner.cross_prompts_visual[0], cross_prompts_visual_deeper)
+        # 4. Trích xuất Đặc trưng (Có học)
+        text_features_all = self.text_encoder(text_input, self.prompt_learner.tokenized_prompts, cross_prompts_text_deeper)
+        image_features = self.image_encoder(image.type(self.dtype), first_visual_prompt, cross_prompts_visual_deeper)
 
         # 4. Chuẩn hóa & Residual Mix
         image_features_norm1 = image_features / image_features.norm(dim=-1, keepdim=True)

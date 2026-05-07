@@ -1,5 +1,7 @@
 import copy
+import json
 import numpy as np
+from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -28,15 +30,71 @@ def freeze_all_but_bn(m):
             m.bias.requires_grad_(False)
 
 
+def _normalize_classname(name):
+    return str(name).strip().lower().replace(" ", "_")
+
+
+def _resolve_text_file(path_like):
+    path = Path(path_like)
+    if path.is_absolute():
+        return path
+    return Path(__file__).resolve().parents[1] / path
+
+
+def _load_gpt_distill_prompts(classnames, gpt_text_file):
+    text_file = _resolve_text_file(gpt_text_file)
+    if not text_file.exists():
+        raise FileNotFoundError(f"GPT text file not found: {text_file}")
+
+    with text_file.open("r", encoding="utf-8") as f:
+        rows = json.load(f)
+
+    prompts_by_modality = {"photo": {}, "sketch": {}}
+    for row in rows:
+        cls = _normalize_classname(row.get("class", ""))
+        input_text = str(row.get("input", "")).lower()
+        output_text = str(row.get("output", "")).strip()
+        if not cls or not output_text:
+            continue
+        if "sketch" in input_text:
+            prompts_by_modality["sketch"][cls] = output_text
+        elif "photo" in input_text:
+            prompts_by_modality["photo"][cls] = output_text
+
+    prompts = {"photo": [], "sketch": []}
+    missing = {"photo": [], "sketch": []}
+    for classname in classnames:
+        key = _normalize_classname(classname)
+        for modality in ("photo", "sketch"):
+            prompt = prompts_by_modality[modality].get(key)
+            if prompt is None:
+                missing[modality].append(classname)
+                prompt = f"a {modality} of a {str(classname).replace('_', ' ')}."
+            prompts[modality].append(prompt)
+
+    for modality, names in missing.items():
+        if names:
+            print(
+                f"Warning: missing {len(names)} {modality} GPT prompts in {text_file}; "
+                "falling back to template prompts."
+            )
+
+    return prompts
+
+
 class CustomCLIP(nn.Module):
     """
     HiCroPL-SBIR Architecture Wrapper.
     Sử dụng HiCroPLFeatureExtractor làm nòng cốt.
     """
 
-    def __init__(self, cfg, clip_model, clip_model_frozen):
+    def __init__(self, cfg, clip_model, clip_model_frozen, classnames=None):
         super().__init__()
         self.cfg = cfg
+        
+        # Use empty classnames if not provided (will be set during forward)
+        if classnames is None:
+            classnames = []
 
         # 1. Prompted Branches (HiCroPL)
         clip_model.apply(freeze_all_but_bn)
@@ -66,11 +124,9 @@ class CustomCLIP(nn.Module):
         print("Initializing Photo Prompt Learner...")
         cfg_photo = copy.copy(cfg)
         cfg_photo.ctx_init = getattr(cfg, 'ctx_init', 'a photo of a')
-        cfg_photo.modality = 'photo'
-        cfg_photo.gpt_file = getattr(cfg, 'gpt_file', 'gpt_file/sketchy_ext.json')
-        cfg_photo.prompt_source = getattr(cfg, 'prompt_source', 'gpt')
         self.prompt_learner_photo = CrossModalPromptLearner(
             cfg=cfg_photo,
+            classnames=classnames,
             clip_model=clip_photo,
             clip_model_distill=self.clip_model_distill_photo
         )
@@ -78,11 +134,9 @@ class CustomCLIP(nn.Module):
         print("Initializing Sketch Prompt Learner...")
         cfg_sketch = copy.copy(cfg)
         cfg_sketch.ctx_init = getattr(cfg, 'ctx_init_sketch', 'a sketch of a')
-        cfg_sketch.modality = 'sketch'
-        cfg_sketch.gpt_file = getattr(cfg, 'gpt_file', 'gpt_file/sketchy_ext.json')
-        cfg_sketch.prompt_source = getattr(cfg, 'prompt_source', 'gpt')
         self.prompt_learner_sketch = CrossModalPromptLearner(
             cfg=cfg_sketch,
+            classnames=classnames,
             clip_model=clip_sketch,
             clip_model_distill=self.clip_model_distill_sketch
         )
@@ -109,9 +163,38 @@ class CustomCLIP(nn.Module):
             dtype=self.dtype
         )
 
+        # -- Distill Text Branches from GPT descriptions --
+        gpt_text_file = getattr(cfg, 'gpt_text_file', 'gpt_file/sketchy_ext.json')
+        gpt_prompts = _load_gpt_distill_prompts(classnames, gpt_text_file)
+        from src.clip import clip as _clip
+        if classnames:
+            tokenized_gpt_photo = _clip.tokenize(gpt_prompts["photo"], truncate=True).to(original_device)
+            tokenized_gpt_sketch = _clip.tokenize(gpt_prompts["sketch"], truncate=True).to(original_device)
+        else:
+            tokenized_gpt_photo = torch.empty(0, 77, dtype=torch.long, device=original_device)
+            tokenized_gpt_sketch = torch.empty(0, 77, dtype=torch.long, device=original_device)
+        self.register_buffer("tokenized_gpt_text_photo", tokenized_gpt_photo)
+        self.register_buffer("tokenized_gpt_text_sketch", tokenized_gpt_sketch)
+
     def normalize_features(self, feat_prenorm):
         """L2-normalize feature tensors."""
         return feat_prenorm / feat_prenorm.norm(dim=-1, keepdim=True)
+
+    def encode_distill_text(self, modality):
+        """Encode GPT text descriptions with the modality-specific frozen CLIP."""
+        if modality == "photo":
+            clip_model = self.clip_model_distill_photo
+            tokenized = self.tokenized_gpt_text_photo
+        elif modality == "sketch":
+            clip_model = self.clip_model_distill_sketch
+            tokenized = self.tokenized_gpt_text_sketch
+        else:
+            raise ValueError(f"Unsupported modality: {modality}")
+
+        with torch.no_grad():
+            text_feat = clip_model.encode_text(tokenized.to(next(clip_model.parameters()).device))
+            text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
+        return text_feat
 
     def forward(self, x, classnames):
         """
@@ -122,11 +205,11 @@ class CustomCLIP(nn.Module):
         sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
         
         # 1. Trích xuất Feature Cốt lõi thông qua Extractor
-        out_p = self.extractor_photo(photo_tensor, classnames)
-        out_s = self.extractor_sketch(sk_tensor, classnames)
+        out_p = self.extractor_photo(photo_tensor)
+        out_s = self.extractor_sketch(sk_tensor)
         
         # Đặc trưng Negative lấy từ nhánh Photo
-        out_neg = self.extractor_photo(neg_tensor, classnames)
+        out_neg = self.extractor_photo(neg_tensor)
         
         # 2. Visual features: normalize prenorm features
         photo_feat  = self.normalize_features(out_p["image_features_prenorm"])
@@ -136,6 +219,8 @@ class CustomCLIP(nn.Module):
         # Text features: normalize prenorm features
         text_feat_photo  = self.normalize_features(out_p["text_features_prenorm"])
         text_feat_sketch = self.normalize_features(out_s["text_features_prenorm"])
+        text_distill_photo = self.encode_distill_text("photo")
+        text_distill_sketch = self.encode_distill_text("sketch")
 
         # Trích xuất Fixed reference targets
         photo_feat_fixed = out_p["image_features_fixed"]
@@ -168,6 +253,7 @@ class CustomCLIP(nn.Module):
             photo_aug_feat, sketch_aug_feat,
             logits_photo_aug, logits_sketch_aug,
             text_feat_photo, text_feat_sketch,
+            text_distill_photo, text_distill_sketch,
             text_feat_fixed_photo, text_feat_fixed_sketch,
             photo_feat_fixed, sketch_feat_fixed,
         )
@@ -263,7 +349,7 @@ class HiCroPL_SBIR(pl.LightningModule):
     def extract_eval_features(self, tensor, modality):
         """Extract visual features: Adapter trước normalize (giống CoPrompt)"""
         extractor = self.model.extractor_photo if modality == 'photo' else self.model.extractor_sketch
-        out = extractor(tensor, self.classnames)
+        out = extractor(tensor)
         return self.model.normalize_features(out["image_features_prenorm"])
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
