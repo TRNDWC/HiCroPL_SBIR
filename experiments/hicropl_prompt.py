@@ -1,5 +1,6 @@
 import os
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import random
 import numpy as np
 import torch
@@ -133,6 +134,7 @@ if __name__ == '__main__':
         strategy=trainer_strategy,
         precision=opts.precision,
         min_epochs=1, max_epochs=opts.epochs,
+        accumulate_grad_batches=opts.accumulate_grad_batches,
         benchmark=False,  # Set False for reproducibility (True causes CUDNN non-determinism)
         deterministic=True,
         logger=logger,

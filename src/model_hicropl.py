@@ -24,11 +24,13 @@ def freeze_model(m):
         
 
 def freeze_all_but_bn(m):
-    if not isinstance(m, torch.nn.LayerNorm):
-        if hasattr(m, 'weight') and m.weight is not None:
-            m.weight.requires_grad_(False)
-        if hasattr(m, 'bias') and m.bias is not None:
-            m.bias.requires_grad_(False)
+    """Freeze every parameter, then reopen LayerNorm affine parameters."""
+    for param in m.parameters():
+        param.requires_grad_(False)
+    for module in m.modules():
+        if isinstance(module, torch.nn.LayerNorm):
+            for param in module.parameters(recurse=False):
+                param.requires_grad_(True)
 
 
 def _normalize_classname(name):
@@ -100,7 +102,7 @@ class CustomCLIP(nn.Module):
             raise ValueError("CustomCLIP requires non-empty classnames during initialization.")
 
         # 1. Prompted Branches (HiCroPL)
-        clip_model.apply(freeze_all_but_bn)
+        freeze_all_but_bn(clip_model)
         self.dtype = clip_model.dtype
         branch_init_device = getattr(cfg, 'branch_init_device', 'cpu')
         if branch_init_device == 'cuda' and torch.cuda.is_available():
@@ -123,8 +125,8 @@ class CustomCLIP(nn.Module):
         # 2. Branch-specific distill branches (vanilla CLIP)
         self.clip_model_distill_photo = copy.deepcopy(clip_model_frozen).to(copy_device)
         self.clip_model_distill_sketch = copy.deepcopy(clip_model_frozen).to(copy_device)
-        self.clip_model_distill_photo.apply(freeze_all_but_bn)
-        self.clip_model_distill_sketch.apply(freeze_all_but_bn)
+        freeze_all_but_bn(self.clip_model_distill_photo)
+        freeze_all_but_bn(self.clip_model_distill_sketch)
         self.distill_visual_encoder_photo = self.clip_model_distill_photo.visual
         self.distill_visual_encoder_sketch = self.clip_model_distill_sketch.visual
 
