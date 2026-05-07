@@ -146,22 +146,6 @@ class CustomCLIP(nn.Module):
         self.text_encoder_sketch = TextEncoder(clip_sketch)
         self.visual_encoder_photo = VisualEncoder(clip_photo)
         self.visual_encoder_sketch = VisualEncoder(clip_sketch)
-        
-        # -- Khởi tạo Feature Extractors --
-        self.extractor_photo = HiCroPLFeatureExtractor(
-            prompt_learner=self.prompt_learner_photo,
-            text_encoder=self.text_encoder_photo,
-            image_encoder=self.visual_encoder_photo,
-            logit_scale=self.logit_scale_photo,
-            dtype=self.dtype
-        )
-        self.extractor_sketch = HiCroPLFeatureExtractor(
-            prompt_learner=self.prompt_learner_sketch,
-            text_encoder=self.text_encoder_sketch,
-            image_encoder=self.visual_encoder_sketch,
-            logit_scale=self.logit_scale_sketch,
-            dtype=self.dtype
-        )
 
         # -- Distill Text Branches from GPT descriptions --
         gpt_text_file = getattr(cfg, 'gpt_text_file', 'gpt_file/sketchy_ext.json')
@@ -173,27 +157,28 @@ class CustomCLIP(nn.Module):
         else:
             tokenized_gpt_photo = torch.empty(0, 77, dtype=torch.long, device=original_device)
             tokenized_gpt_sketch = torch.empty(0, 77, dtype=torch.long, device=original_device)
-        self.register_buffer("tokenized_gpt_text_photo", tokenized_gpt_photo)
-        self.register_buffer("tokenized_gpt_text_sketch", tokenized_gpt_sketch)
+        
+        # -- Khởi tạo Feature Extractors --
+        self.extractor_photo = HiCroPLFeatureExtractor(
+            prompt_learner=self.prompt_learner_photo,
+            text_encoder=self.text_encoder_photo,
+            image_encoder=self.visual_encoder_photo,
+            logit_scale=self.logit_scale_photo,
+            dtype=self.dtype,
+            text_distill_tokenized_prompts=tokenized_gpt_photo,
+        )
+        self.extractor_sketch = HiCroPLFeatureExtractor(
+            prompt_learner=self.prompt_learner_sketch,
+            text_encoder=self.text_encoder_sketch,
+            image_encoder=self.visual_encoder_sketch,
+            logit_scale=self.logit_scale_sketch,
+            dtype=self.dtype,
+            text_distill_tokenized_prompts=tokenized_gpt_sketch,
+        )
 
     def normalize_features(self, feat_prenorm):
         """L2-normalize feature tensors."""
         return feat_prenorm / feat_prenorm.norm(dim=-1, keepdim=True)
-
-    def encode_distill_text(self, modality):
-        """Encode GPT text descriptions with the modality-specific distill CLIP."""
-        if modality == "photo":
-            clip_model = self.clip_model_distill_photo
-            tokenized = self.tokenized_gpt_text_photo
-        elif modality == "sketch":
-            clip_model = self.clip_model_distill_sketch
-            tokenized = self.tokenized_gpt_text_sketch
-        else:
-            raise ValueError(f"Unsupported modality: {modality}")
-
-        text_feat = clip_model.encode_text(tokenized.to(next(clip_model.parameters()).device))
-        text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
-        return text_feat
 
     def forward(self, x, classnames):
         """
@@ -204,8 +189,8 @@ class CustomCLIP(nn.Module):
         sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
         
         # 1. Trích xuất Feature Cốt lõi thông qua Extractor
-        out_p = self.extractor_photo(photo_tensor)
-        out_s = self.extractor_sketch(sk_tensor)
+        out_p = self.extractor_photo(photo_tensor, image_distill=photo_aug_tensor)
+        out_s = self.extractor_sketch(sk_tensor, image_distill=sk_aug_tensor)
         
         # Đặc trưng Negative lấy từ nhánh Photo
         out_neg = self.extractor_photo(neg_tensor)
@@ -218,14 +203,14 @@ class CustomCLIP(nn.Module):
         # Text features: normalize prenorm features
         text_feat_photo  = self.normalize_features(out_p["text_features_prenorm"])
         text_feat_sketch = self.normalize_features(out_s["text_features_prenorm"])
-        text_distill_photo = self.encode_distill_text("photo")
-        text_distill_sketch = self.encode_distill_text("sketch")
 
         # Trích xuất Fixed reference targets
         photo_feat_fixed = out_p["image_features_fixed"]
         sketch_feat_fixed = out_s["image_features_fixed"]
         text_feat_fixed_photo = out_p["text_features_fixed"]
         text_feat_fixed_sketch = out_s["text_features_fixed"]
+        text_distill_photo = text_feat_fixed_photo
+        text_distill_sketch = text_feat_fixed_sketch
 
         # 3. Aug Visual Features: run distill encoder, then normalize
         photo_aug_prenorm = self.distill_visual_encoder_photo(photo_aug_tensor.type(self.dtype))
