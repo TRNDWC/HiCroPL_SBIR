@@ -118,13 +118,13 @@ if __name__ == '__main__':
 
     # 6. Initialize Model
     if ckpt_path is None:
-        custom_clip = CustomCLIP(opts, clip_model, clip_model_frozen)
+        custom_clip = CustomCLIP(opts, clip_model, clip_model_frozen, classnames=classnames)
         model = HiCroPL_SBIR(cfg=opts, args=opts, classnames=classnames, model=custom_clip)
     else:
         print ('resuming training from %s'%ckpt_path)
         # Note: Depending on Lightning version, PyTorch Lightning may require the architecture 
         # to be instantiated before load_from_checkpoint or handle it directly if args are passed correctly.
-        custom_clip = CustomCLIP(opts, clip_model, clip_model_frozen)
+        custom_clip = CustomCLIP(opts, clip_model, clip_model_frozen, classnames=classnames)
         model = HiCroPL_SBIR.load_from_checkpoint(ckpt_path, cfg=opts, args=opts, classnames=classnames, model=custom_clip)
 
     print ('\nBeginning training HiCroPL-SBIR... Good luck!')

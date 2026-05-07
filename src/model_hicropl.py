@@ -95,6 +95,8 @@ class CustomCLIP(nn.Module):
         # Use empty classnames if not provided (will be set during forward)
         if classnames is None:
             classnames = []
+        if len(classnames) == 0:
+            raise ValueError("CustomCLIP requires non-empty classnames during initialization.")
 
         # 1. Prompted Branches (HiCroPL)
         clip_model.apply(freeze_all_but_bn)
