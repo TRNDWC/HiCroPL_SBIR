@@ -181,7 +181,7 @@ class CustomCLIP(nn.Module):
         return feat_prenorm / feat_prenorm.norm(dim=-1, keepdim=True)
 
     def encode_distill_text(self, modality):
-        """Encode GPT text descriptions with the modality-specific frozen CLIP."""
+        """Encode GPT text descriptions with the modality-specific distill CLIP."""
         if modality == "photo":
             clip_model = self.clip_model_distill_photo
             tokenized = self.tokenized_gpt_text_photo
@@ -191,9 +191,8 @@ class CustomCLIP(nn.Module):
         else:
             raise ValueError(f"Unsupported modality: {modality}")
 
-        with torch.no_grad():
-            text_feat = clip_model.encode_text(tokenized.to(next(clip_model.parameters()).device))
-            text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
+        text_feat = clip_model.encode_text(tokenized.to(next(clip_model.parameters()).device))
+        text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
         return text_feat
 
     def forward(self, x, classnames):
