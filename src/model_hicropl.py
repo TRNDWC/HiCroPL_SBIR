@@ -98,29 +98,21 @@ class CustomCLIP(nn.Module):
         if len(classnames) == 0:
             raise ValueError("CustomCLIP requires non-empty classnames during initialization.")
 
-        # 1. Prompted Branches (HiCroPL)
-        clip_model.apply(freeze_all_but_bn)
+        # 1. Main Prompted Branch (Frozen backbone, including LN)
+        clip_model.apply(freeze_model)
+        self.clip_model_shared = clip_model
         self.dtype = clip_model.dtype
         original_device = next(clip_model.parameters()).device
 
-        # Local deepcopies for per-modality branches (photo/sketch)
-        # Move to CPU first to avoid CUDA kernel incompatibility during deepcopy
-        clip_model_cpu = clip_model.cpu()
-        clip_photo = copy.deepcopy(clip_model_cpu).to(original_device)
-        clip_sketch = copy.deepcopy(clip_model_cpu).to(original_device)
-        clip_model = clip_model_cpu.to(original_device)
-
-        # 2. Branch-specific distill branches (vanilla CLIP)
-        self.clip_model_distill_photo = copy.deepcopy(clip_model_frozen).to(original_device)
-        self.clip_model_distill_sketch = copy.deepcopy(clip_model_frozen).to(original_device)
-        self.clip_model_distill_photo.apply(freeze_all_but_bn)
-        self.clip_model_distill_sketch.apply(freeze_all_but_bn)
-        self.distill_visual_encoder_photo = self.clip_model_distill_photo.visual
-        self.distill_visual_encoder_sketch = self.clip_model_distill_sketch.visual
-
-        # 3. Branch-specific logit scales
-        self.logit_scale_photo = clip_photo.logit_scale
-        self.logit_scale_sketch = clip_sketch.logit_scale
+        # 2. Distill Branches (modality-specific, only LN open)
+        self.clip_distill_photo = copy.deepcopy(clip_model_frozen).to(original_device)
+        self.clip_distill_sketch = copy.deepcopy(clip_model_frozen).to(original_device)
+        self.clip_distill_photo.apply(freeze_all_but_bn)
+        self.clip_distill_sketch.apply(freeze_all_but_bn)
+        
+        # 3. Logit scales (shared from backbone)
+        self.logit_scale_photo = self.clip_model_shared.logit_scale
+        self.logit_scale_sketch = self.clip_model_shared.logit_scale
 
         # -- Prompt Learners --
         print("Initializing Photo Prompt Learner...")
@@ -129,8 +121,8 @@ class CustomCLIP(nn.Module):
         self.prompt_learner_photo = CrossModalPromptLearner(
             cfg=cfg_photo,
             classnames=classnames,
-            clip_model=clip_photo,
-            clip_model_distill=self.clip_model_distill_photo
+            clip_model=self.clip_model_shared,
+            clip_model_distill=self.clip_distill_photo
         )
 
         print("Initializing Sketch Prompt Learner...")
@@ -139,35 +131,34 @@ class CustomCLIP(nn.Module):
         self.prompt_learner_sketch = CrossModalPromptLearner(
             cfg=cfg_sketch,
             classnames=classnames,
-            clip_model=clip_sketch,
-            clip_model_distill=self.clip_model_distill_sketch
+            clip_model=self.clip_model_shared,
+            clip_model_distill=self.clip_distill_sketch
         )
 
-        # -- Encoders --
-        self.text_encoder_photo = TextEncoder(clip_photo)
-        self.text_encoder_sketch = TextEncoder(clip_sketch)
-        self.visual_encoder_photo = VisualEncoder(clip_photo)
-        self.visual_encoder_sketch = VisualEncoder(clip_sketch)
+        # -- Encoders (Main Branches - Frozen) --
+        self.text_encoder_photo = TextEncoder(self.clip_model_shared)
+        self.text_encoder_sketch = TextEncoder(self.clip_model_shared)
+        self.visual_encoder_photo = VisualEncoder(self.clip_model_shared)
+        self.visual_encoder_sketch = VisualEncoder(self.clip_model_shared)
 
-        # -- Distill Text Branches from GPT descriptions --
+        # -- GPT Text Distill Tokenization --
         gpt_text_file = getattr(cfg, 'gpt_text_file', 'gpt_file/sketchy_ext.json')
         gpt_prompts = _load_gpt_distill_prompts(classnames, gpt_text_file)
         from src.clip import clip as _clip
         if classnames:
-            tokenized_gpt_photo = _clip.tokenize(gpt_prompts["photo"], truncate=True).to(original_device)
-            tokenized_gpt_sketch = _clip.tokenize(gpt_prompts["sketch"], truncate=True).to(original_device)
+            self.register_buffer("tokenized_gpt_photo", _clip.tokenize(gpt_prompts["photo"], truncate=True))
+            self.register_buffer("tokenized_gpt_sketch", _clip.tokenize(gpt_prompts["sketch"], truncate=True))
         else:
-            tokenized_gpt_photo = torch.empty(0, 77, dtype=torch.long, device=original_device)
-            tokenized_gpt_sketch = torch.empty(0, 77, dtype=torch.long, device=original_device)
+            self.register_buffer("tokenized_gpt_photo", torch.empty(0, 77, dtype=torch.long))
+            self.register_buffer("tokenized_gpt_sketch", torch.empty(0, 77, dtype=torch.long))
         
-        # -- Khởi tạo Feature Extractors --
+        # -- HiCroPL Extractors (Main Branches) --
         self.extractor_photo = HiCroPLFeatureExtractor(
             prompt_learner=self.prompt_learner_photo,
             text_encoder=self.text_encoder_photo,
             image_encoder=self.visual_encoder_photo,
             logit_scale=self.logit_scale_photo,
             dtype=self.dtype,
-            text_distill_tokenized_prompts=tokenized_gpt_photo,
         )
         self.extractor_sketch = HiCroPLFeatureExtractor(
             prompt_learner=self.prompt_learner_sketch,
@@ -175,7 +166,6 @@ class CustomCLIP(nn.Module):
             image_encoder=self.visual_encoder_sketch,
             logit_scale=self.logit_scale_sketch,
             dtype=self.dtype,
-            text_distill_tokenized_prompts=tokenized_gpt_sketch,
         )
 
     def normalize_features(self, feat_prenorm):
@@ -184,63 +174,84 @@ class CustomCLIP(nn.Module):
 
     def forward(self, x, classnames):
         """
-        Forward pass for training with augmentation support.
-        x: batch from DataLoader with augmented images
-        Format: [sk_tensor, img_tensor, neg_tensor, sk_aug_tensor, img_aug_tensor, label, filename]
+        Forward pass for training with optimized redundancy.
         """
         sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
         
-        # 1. Trích xuất Feature Cốt lõi thông qua Extractor
-        out_p = self.extractor_photo(photo_tensor, image_distill=photo_aug_tensor)
-        out_s = self.extractor_sketch(sk_tensor, image_distill=sk_aug_tensor)
-        
-        # Đặc trưng Negative lấy từ nhánh Photo
+        # 1. Prompted Features (Main Branches)
+        out_p = self.extractor_photo(photo_tensor)
+        out_s = self.extractor_sketch(sk_tensor)
         out_neg = self.extractor_photo(neg_tensor)
         
-        # 2. Visual features: normalize prenorm features
-        photo_feat  = self.normalize_features(out_p["image_features_prenorm"])
-        sketch_feat = self.normalize_features(out_s["image_features_prenorm"])
-        neg_feat    = self.normalize_features(out_neg["image_features_prenorm"])
+        # 2. Distill Visual Features (Open LN branches) - RUN ONCE
+        photo_aug_feat_fixed = self.clip_distill_photo.visual(photo_aug_tensor.type(self.dtype))
+        photo_aug_feat_fixed = photo_aug_feat_fixed / photo_aug_feat_fixed.norm(dim=-1, keepdim=True)
+        
+        sketch_aug_feat_fixed = self.clip_distill_sketch.visual(sk_aug_tensor.type(self.dtype))
+        sketch_aug_feat_fixed = sketch_aug_feat_fixed / sketch_aug_feat_fixed.norm(dim=-1, keepdim=True)
 
-        # Text features: normalize prenorm features
-        text_feat_photo  = self.normalize_features(out_p["text_features_prenorm"])
-        text_feat_sketch = self.normalize_features(out_s["text_features_prenorm"])
+        # Distill Visual Features for Original (for residual mix)
+        photo_feat_fixed = self.clip_distill_photo.visual(photo_tensor.type(self.dtype))
+        photo_feat_fixed = photo_feat_fixed / photo_feat_fixed.norm(dim=-1, keepdim=True)
+        
+        sketch_feat_fixed = self.clip_distill_sketch.visual(sk_tensor.type(self.dtype))
+        sketch_feat_fixed = sketch_feat_fixed / sketch_feat_fixed.norm(dim=-1, keepdim=True)
 
-        # Trích xuất Fixed reference targets
-        photo_feat_fixed = out_p["image_features_fixed"]
-        sketch_feat_fixed = out_s["image_features_fixed"]
-        text_feat_fixed_photo = out_p["text_features_fixed"]
-        text_feat_fixed_sketch = out_s["text_features_fixed"]
-        text_distill_photo = text_feat_fixed_photo
-        text_distill_sketch = text_feat_fixed_sketch
+        # 3. GPT Text Distill Features (Open LN branches) - RUN ONCE
+        text_distill_photo = self.clip_distill_photo.encode_text(self.tokenized_gpt_photo)
+        text_distill_photo = text_distill_photo / text_distill_photo.norm(dim=-1, keepdim=True)
+        
+        text_distill_sketch = self.clip_distill_sketch.encode_text(self.tokenized_gpt_sketch)
+        text_distill_sketch = text_distill_sketch / text_distill_sketch.norm(dim=-1, keepdim=True)
 
-        # 3. Aug Visual Features: run distill encoder, then normalize
-        photo_aug_prenorm = self.distill_visual_encoder_photo(photo_aug_tensor.type(self.dtype))
-        photo_aug_feat = photo_aug_prenorm
-        photo_aug_feat = photo_aug_feat / photo_aug_feat.norm(dim=-1, keepdim=True)
+        # Filter by labels for loss computation
+        text_distill_photo_batch = text_distill_photo[label]
+        text_distill_sketch_batch = text_distill_sketch[label]
 
-        sketch_aug_prenorm = self.distill_visual_encoder_sketch(sk_aug_tensor.type(self.dtype))
-        sketch_aug_feat = sketch_aug_prenorm
-        sketch_aug_feat = sketch_aug_feat / sketch_aug_feat.norm(dim=-1, keepdim=True)
-            
-        # 4. Compute Logits
+        # 4. Residual Mix & Final Normalization
+        # Image
+        photo_feat_prompted = out_p["image_features"]
+        photo_feat_prompted_norm = photo_feat_prompted / photo_feat_prompted.norm(dim=-1, keepdim=True)
+        photo_feat_prenorm = photo_feat_prompted_norm + photo_feat_fixed
+        photo_feat = photo_feat_prenorm / photo_feat_prenorm.norm(dim=-1, keepdim=True)
+
+        sketch_feat_prompted = out_s["image_features"]
+        sketch_feat_prompted_norm = sketch_feat_prompted / sketch_feat_prompted.norm(dim=-1, keepdim=True)
+        sketch_feat_prenorm = sketch_feat_prompted_norm + sketch_feat_fixed
+        sketch_feat = sketch_feat_prenorm / sketch_feat_prenorm.norm(dim=-1, keepdim=True)
+        
+        neg_feat_prompted = out_neg["image_features"]
+        neg_feat = neg_feat_prompted / neg_feat_prompted.norm(dim=-1, keepdim=True)
+
+        # Text
+        text_feat_photo_prompted = out_p["text_features"]
+        text_feat_photo_prompted_norm = text_feat_photo_prompted / text_feat_photo_prompted.norm(dim=-1, keepdim=True)
+        text_feat_photo_prenorm = text_feat_photo_prompted_norm + text_distill_photo_batch
+        text_feat_photo = text_feat_photo_prenorm / text_feat_photo_prenorm.norm(dim=-1, keepdim=True)
+
+        text_feat_sketch_prompted = out_s["text_features"]
+        text_feat_sketch_prompted_norm = text_feat_sketch_prompted / text_feat_sketch_prompted.norm(dim=-1, keepdim=True)
+        text_feat_sketch_prenorm = text_feat_sketch_prompted_norm + text_distill_sketch_batch
+        text_feat_sketch = text_feat_sketch_prenorm / text_feat_sketch_prenorm.norm(dim=-1, keepdim=True)
+
+        # 5. Compute Logits
         logit_scale = out_p["logit_scale"]
         logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
         logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
         
-        # 5. Compute Logits for Augmented Images
-        logits_photo_aug = logit_scale * photo_aug_feat @ text_feat_photo.t()
-        logits_sketch_aug = logit_scale * sketch_aug_feat @ text_feat_sketch.t()
+        # Logits for Augmented Images
+        logits_photo_aug = logit_scale * photo_aug_feat_fixed @ text_feat_photo.t()
+        logits_sketch_aug = logit_scale * sketch_aug_feat_fixed @ text_feat_sketch.t()
         
         return (
             photo_feat, logits_photo,
             sketch_feat, logits_sketch,
             neg_feat, label,
-            photo_aug_feat, sketch_aug_feat,
+            photo_aug_feat_fixed, sketch_aug_feat_fixed,
             logits_photo_aug, logits_sketch_aug,
             text_feat_photo, text_feat_sketch,
-            text_distill_photo, text_distill_sketch,
-            text_feat_fixed_photo, text_feat_fixed_sketch,
+            text_distill_photo_batch, text_distill_sketch_batch,
+            text_distill_photo, text_distill_sketch, # for all classes if needed
             photo_feat_fixed, sketch_feat_fixed,
         )
 
@@ -279,8 +290,8 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.model.visual_encoder_sketch.eval()
         self.model.text_encoder_photo.eval()
         self.model.text_encoder_sketch.eval()
-        self.model.clip_model_distill_photo.eval()
-        self.model.clip_model_distill_sketch.eval()
+        self.model.clip_distill_photo.eval()
+        self.model.clip_distill_sketch.eval()
 
     def configure_optimizers(self):
         def add_unique_params(candidates, out_list, seen_ids):
@@ -333,10 +344,23 @@ class HiCroPL_SBIR(pl.LightningModule):
         return loss
 
     def extract_eval_features(self, tensor, modality):
-        """Extract visual features: Adapter trước normalize (giống CoPrompt)"""
-        extractor = self.model.extractor_photo if modality == 'photo' else self.model.extractor_sketch
+        """Extract visual features: Prompted + Distill Fixed (Residual Mix)"""
+        if modality == 'photo':
+            extractor = self.model.extractor_photo
+            distill_encoder = self.model.clip_distill_photo.visual
+        else:
+            extractor = self.model.extractor_sketch
+            distill_encoder = self.model.clip_distill_sketch.visual
+            
         out = extractor(tensor)
-        return self.model.normalize_features(out["image_features_prenorm"])
+        prompted_feat = out["image_features"]
+        prompted_feat_norm = prompted_feat / prompted_feat.norm(dim=-1, keepdim=True)
+        
+        fixed_feat = distill_encoder(tensor.type(self.model.dtype))
+        fixed_feat_norm = fixed_feat / fixed_feat.norm(dim=-1, keepdim=True)
+        
+        combined_prenorm = prompted_feat_norm + fixed_feat_norm
+        return combined_prenorm / combined_prenorm.norm(dim=-1, keepdim=True)
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         if self.eval_mode == 'fine_grained':
@@ -353,12 +377,12 @@ class HiCroPL_SBIR(pl.LightningModule):
             
         if dataloader_idx == 0:
             sketch_feat = self.extract_eval_features(tensor, modality='sketch')
-            self.test_sketch_features.append(sketch_feat.detach()) 
-            self.test_sketch_labels.append(label.detach())
+            self.test_sketch_features.append(sketch_feat.cpu().detach()) 
+            self.test_sketch_labels.append(label.cpu().detach())
         elif dataloader_idx == 1:
             photo_feat = self.extract_eval_features(tensor, modality='photo')
-            self.test_photo_features.append(photo_feat.detach())   
-            self.test_photo_labels.append(label.detach())
+            self.test_photo_features.append(photo_feat.cpu().detach())   
+            self.test_photo_labels.append(label.cpu().detach())
 
     def _validation_step_fg(self, batch, batch_idx, dataloader_idx=0):
         tensor, category_idx, filename, base_name = batch
@@ -375,7 +399,7 @@ class HiCroPL_SBIR(pl.LightningModule):
             feat = sketch_feat[i] if dataloader_idx == 0 else photo_feat[i]
             fname = filename[i]
             bname = base_name[i]
-            target_buckets[cat_idx]['features'].append(feat.detach())  
+            target_buckets[cat_idx]['features'].append(feat.cpu().detach())  
             target_buckets[cat_idx]['filenames'].append(fname)
             target_buckets[cat_idx]['base_names'].append(bname)
 
@@ -390,70 +414,60 @@ class HiCroPL_SBIR(pl.LightningModule):
             self.print("Warning: Missing features for validation. Skipping metrics.")
             return
 
-        gallery_features = torch.cat(self.test_photo_features, dim=0)   
-        query_features   = torch.cat(self.test_sketch_features, dim=0)  
+        gallery_features = torch.cat(self.test_photo_features, dim=0).to(self.device)
+        query_features   = torch.cat(self.test_sketch_features, dim=0).to(self.device)
         
-        all_photo_category  = torch.cat(self.test_photo_labels, dim=0)  
-        all_sketch_category = torch.cat(self.test_sketch_labels, dim=0) 
+        all_photo_category  = torch.cat(self.test_photo_labels, dim=0).to(self.device)
+        all_sketch_category = torch.cat(self.test_sketch_labels, dim=0).to(self.device)
 
+        # 1. Compute Similarity Matrix
         similarity_matrix = query_features @ gallery_features.t()       
 
+        # 2. Vectorized Metric Computation
         dataset = getattr(self.args, 'dataset', 'sketchy')
-        if dataset == "sketchy_2" or dataset == "sketchy_ext":
-            map_k = 200
-            p_k = 200
-        elif dataset == "quickdraw":
-            map_k = 0
-            p_k = 200
+        p_k = 200 if dataset in ["sketchy_2", "sketchy_ext", "quickdraw"] else 100
+        map_k = 200 if dataset in ["sketchy_2", "sketchy_ext"] else 0
+
+        # Sort similarity matrix once
+        _, indices = torch.sort(similarity_matrix, dim=1, descending=True)
+        
+        # Binary ground truth matrix [N_query, N_gallery]
+        # gt[i, j] is 1 if gallery[indices[i, j]] has same category as query[i]
+        gt = (all_photo_category[indices] == all_sketch_category.unsqueeze(1))
+        
+        # P@K
+        p_at_k = gt[:, :p_k].float().mean(dim=1).mean()
+        
+        # mAP
+        if map_k > 0:
+            gt_limited = gt[:, :map_k]
+            relevant_counts = gt_limited.sum(dim=1)
+            # Avoid division by zero
+            mask = relevant_counts > 0
+            
+            # Precision at each rank where a relevant item is found
+            cumsum = torch.cumsum(gt_limited, dim=1)
+            precision_at_rel = (cumsum * gt_limited) / torch.arange(1, map_k + 1, device=self.device)
+            ap = precision_at_rel.sum(dim=1) / relevant_counts.clamp(min=1)
+            mAP = ap[mask].mean() if mask.any() else torch.tensor(0.0, device=self.device)
         else:
-            map_k = 0
-            p_k = 100
-
-        ap        = torch.zeros(len(query_features), device=self.device)
-        precision = torch.zeros(len(query_features), device=self.device)
-
-        for idx in range(len(query_features)):
-            category = all_sketch_category[idx]
-            distance = similarity_matrix[idx] 
-            target = (all_photo_category == category)
-
-            if map_k != 0:
-                top_k_actual = min(map_k, len(gallery_features))
-                ap[idx] = retrieval_average_precision(distance, target, top_k=top_k_actual)
-            else:
-                ap[idx] = retrieval_average_precision(distance, target)
-
-            precision[idx] = retrieval_precision(distance, target, top_k=p_k)
-
-        mAP            = torch.mean(ap)
-        mean_precision = torch.mean(precision)
+            # Full mAP
+            relevant_counts = gt.sum(dim=1)
+            mask = relevant_counts > 0
+            cumsum = torch.cumsum(gt, dim=1)
+            precision_at_rel = (cumsum * gt) / torch.arange(1, gt.size(1) + 1, device=self.device)
+            ap = precision_at_rel.sum(dim=1) / relevant_counts.clamp(min=1)
+            mAP = ap[mask].mean() if mask.any() else torch.tensor(0.0, device=self.device)
 
         self.log("mAP", mAP, on_step=False, on_epoch=True)
-        self.log(f"P@{p_k}", mean_precision, on_step=False, on_epoch=True)
-
+        self.log(f"P@{p_k}", p_at_k, on_step=False, on_epoch=True)
         self.log("val_mAP", mAP, on_step=False, on_epoch=True, prog_bar=False)
-        self.log(f"val_P@{p_k}", mean_precision, on_step=False, on_epoch=True)
-        self.log("best_mAP", self.best_metric, on_step=False, on_epoch=True, prog_bar=False)
-
-        if map_k != 0:
-            self.log(f"val_map_{map_k}", mAP, on_step=False, on_epoch=True)
-        else:
-            self.log("val_map_all", mAP, on_step=False, on_epoch=True)
-        self.log(f"val_p_{p_k}", mean_precision, on_step=False, on_epoch=True)
+        self.log(f"val_P@{p_k}", p_at_k, on_step=False, on_epoch=True)
 
         if self.global_step > 0:
-            self.best_metric = self.best_metric if (self.best_metric > mAP.item()) else mAP.item()
+            self.best_metric = max(self.best_metric, mAP.item())
 
-        if map_k != 0:
-            self.print('mAP@{}: {:.4f}, P@{}: {:.4f}, Best mAP: {:.4f}'.format(
-                map_k, mAP.item(), p_k, mean_precision.item(), self.best_metric))
-        else:
-            self.print('mAP@all: {:.4f}, P@{}: {:.4f}, Best mAP: {:.4f}'.format(
-                mAP.item(), p_k, mean_precision.item(), self.best_metric))
-
-        train_loss = self.trainer.callback_metrics.get("train_loss", None)
-        if train_loss is not None:
-            self.print(f"Train loss (epoch avg): {train_loss.item():.6f}")
+        self.print(f'mAP: {mAP.item():.4f}, P@{p_k}: {p_at_k.item():.4f}, Best mAP: {self.best_metric:.4f}')
 
         self.test_photo_features.clear()
         self.test_sketch_features.clear()
@@ -516,24 +530,25 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.fg_photo_buckets.clear()
 
     def _compute_per_category_rank(self, sketch_feats, sketch_base_names, photo_feats, photo_base_names):
+        """Vectorized rank computation for fine-grained retrieval"""
         sim_matrix = sketch_feats @ photo_feats.t()  
-        distance_matrix = 1.0 - sim_matrix
         
         N_sk = len(sketch_feats)
         ranks = torch.zeros(N_sk, device=sketch_feats.device)
         
+        # We still need to find the ground truth index for each sketch.
+        # This part is hard to vectorize completely because it depends on string matching.
+        # But we can vectorize the rank calculation once gt_idx is known.
         for i in range(N_sk):
             sketch_base = sketch_base_names[i]
             try:
                 gt_idx = photo_base_names.index(sketch_base)
+                gt_sim = sim_matrix[i, gt_idx]
+                # Rank = number of items with similarity >= ground truth similarity
+                rank = (sim_matrix[i] >= gt_sim).sum()
+                ranks[i] = rank
             except ValueError:
                 ranks[i] = len(photo_base_names) + 1
-                continue
-            
-            distances = distance_matrix[i]
-            gt_distance = distances[gt_idx]
-            rank = (distances <= gt_distance).sum()
-            ranks[i] = rank
         
         return ranks
 
