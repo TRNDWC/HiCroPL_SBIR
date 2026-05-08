@@ -29,13 +29,11 @@ parser.add_argument('--batch_size', type=int, default=64)
 parser.add_argument('--test_batch_size', type=int, default=1024)
 parser.add_argument('--epochs', type=int, default=60)
 parser.add_argument('--workers', type=int, default=4)
-parser.add_argument(
-    '--backbone',
-    type=str,
-    default='ViT-B/32',
-    choices=['ViT-B/32'],
-    help='CLIP backbone name (fixed to ViT-B/32)'
-)
+parser.add_argument('--backbone', type=str, default='ViT-B/32', 
+                    choices=['ViT-B/32'], 
+                    help='CLIP backbone name')
+parser.add_argument('--num_trainable_ln', type=int, default=-1, 
+                    help='Number of LayerNorm layers to train (counting from the end). -1 means all.')
 
 # ----------------------
 # ViT & HiCroPL Prompt Parameters

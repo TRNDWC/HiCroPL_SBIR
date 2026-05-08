@@ -73,13 +73,14 @@ def loss_fn_hicropl(args, features):
         + loss_consistency_photo
     )
 
-    # --- L3: Text distill consistency ---
-    loss_text_consistency_sketch = cross_loss(text_feat_sketch, text_distill_sketch, temperature)
-    loss_text_consistency_photo = cross_loss(text_feat_photo, text_distill_photo, temperature)
-    loss_text_consistency = lambda_text_consistency * (
-        loss_text_consistency_sketch
-        + loss_text_consistency_photo
-    )
+    # --- L3: Text distill consistency (TEMPORARILY DISABLED) ---
+    # loss_text_consistency_sketch = cross_loss(text_feat_sketch, text_distill_sketch, temperature)
+    # loss_text_consistency_photo = cross_loss(text_feat_photo, text_distill_photo, temperature)
+    # loss_text_consistency = lambda_text_consistency * (
+    #     loss_text_consistency_sketch
+    #     + loss_text_consistency_photo
+    # )
+    loss_text_consistency = 0.0
 
     # --- L4: Cross-Entropy Loss (text - photo) + (text - sketch) ---
     loss_ce_photo = F.cross_entropy(logits_photo, label)
