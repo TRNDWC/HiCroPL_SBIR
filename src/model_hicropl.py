@@ -460,61 +460,63 @@ class HiCroPL_SBIR(pl.LightningModule):
         all_photo_category  = torch.cat(self.test_photo_labels, dim=0).to(self.device)
         all_sketch_category = torch.cat(self.test_sketch_labels, dim=0).to(self.device)
 
-        # 1. Compute Similarity Matrix
-        similarity_matrix = query_features @ gallery_features.t()       
+        similarity_matrix = query_features @ gallery_features.t()
 
-        # 2. Vectorized Metric Computation
         dataset = getattr(self.args, 'dataset', 'sketchy')
-        p_k = 200 if dataset in ["sketchy_2", "sketchy_ext", "quickdraw"] else 100
-        map_k = 200 if dataset in ["sketchy_2", "sketchy_ext"] else 0
-
-        # Sort similarity matrix once
-        _, indices = torch.sort(similarity_matrix, dim=1, descending=True)
-        
-        # Binary ground truth matrix [N_query, N_gallery]
-        # gt[i, j] is 1 if gallery[indices[i, j]] has same category as query[i]
-        gt = (all_photo_category[indices] == all_sketch_category.unsqueeze(1))
-        
-        # P@K
-        p_at_k = gt[:, :p_k].float().mean(dim=1).mean()
-        
-        # mAP
-        if map_k > 0:
-            gt_limited = gt[:, :map_k]
-            relevant_counts = gt_limited.sum(dim=1)
-            # Avoid division by zero
-            mask = relevant_counts > 0
-            
-            # Precision at each rank where a relevant item is found
-            cumsum = torch.cumsum(gt_limited, dim=1)
-            precision_at_rel = (cumsum * gt_limited) / torch.arange(1, map_k + 1, device=self.device)
-            ap = precision_at_rel.sum(dim=1) / relevant_counts.clamp(min=1)
-            mAP = ap[mask].mean() if mask.any() else torch.tensor(0.0, device=self.device)
+        if dataset == "sketchy_2" or dataset == "sketchy_ext":
+            map_k = 200
+            p_k = 200
+        elif dataset == "quickdraw":
+            map_k = 0
+            p_k = 200
         else:
-            # Full mAP
-            relevant_counts = gt.sum(dim=1)
-            mask = relevant_counts > 0
-            cumsum = torch.cumsum(gt, dim=1)
-            precision_at_rel = (cumsum * gt) / torch.arange(1, gt.size(1) + 1, device=self.device)
-            ap = precision_at_rel.sum(dim=1) / relevant_counts.clamp(min=1)
-            mAP = ap[mask].mean() if mask.any() else torch.tensor(0.0, device=self.device)
+            map_k = 0
+            p_k = 100
+
+        ap = torch.zeros(len(query_features), device=self.device)
+        precision = torch.zeros(len(query_features), device=self.device)
+
+        for idx in range(len(query_features)):
+            category = all_sketch_category[idx]
+            distance = similarity_matrix[idx]
+            target = (all_photo_category == category)
+
+            if map_k != 0:
+                top_k_actual = min(map_k, len(gallery_features))
+                ap[idx] = retrieval_average_precision(distance, target, top_k=top_k_actual)
+            else:
+                ap[idx] = retrieval_average_precision(distance, target)
+
+            precision[idx] = retrieval_precision(distance, target, top_k=p_k)
+
+        mAP = torch.mean(ap)
+        mean_precision = torch.mean(precision)
 
         self.log("mAP", mAP, on_step=False, on_epoch=True)
-        self.log(f"P@{p_k}", p_at_k, on_step=False, on_epoch=True)
+        self.log(f"P@{p_k}", mean_precision, on_step=False, on_epoch=True)
         self.log("val_mAP", mAP, on_step=False, on_epoch=True, prog_bar=False)
-        self.log(f"val_P@{p_k}", p_at_k, on_step=False, on_epoch=True)
+        self.log(f"val_P@{p_k}", mean_precision, on_step=False, on_epoch=True)
+        self.log("best_mAP", self.best_metric, on_step=False, on_epoch=True, prog_bar=False)
 
-        # Restore specific keys for ModelCheckpoint compatibility
-        if map_k > 0:
+        if map_k != 0:
             self.log(f"val_map_{map_k}", mAP, on_step=False, on_epoch=True)
         else:
             self.log("val_map_all", mAP, on_step=False, on_epoch=True)
-        self.log(f"val_p_{p_k}", p_at_k, on_step=False, on_epoch=True)
+        self.log(f"val_p_{p_k}", mean_precision, on_step=False, on_epoch=True)
 
         if self.global_step > 0:
-            self.best_metric = max(self.best_metric, mAP.item())
+            self.best_metric = self.best_metric if (self.best_metric > mAP.item()) else mAP.item()
 
-        self.print(f'mAP: {mAP.item():.4f}, P@{p_k}: {p_at_k.item():.4f}, Best mAP: {self.best_metric:.4f}')
+        if map_k != 0:
+            self.print('mAP@{}: {:.4f}, P@{}: {:.4f}, Best mAP: {:.4f}'.format(
+                map_k, mAP.item(), p_k, mean_precision.item(), self.best_metric))
+        else:
+            self.print('mAP@all: {:.4f}, P@{}: {:.4f}, Best mAP: {:.4f}'.format(
+                mAP.item(), p_k, mean_precision.item(), self.best_metric))
+
+        train_loss = self.trainer.callback_metrics.get("train_loss", None)
+        if train_loss is not None:
+            self.print(f"Train loss (epoch avg): {train_loss.item():.6f}")
 
         self.test_photo_features.clear()
         self.test_sketch_features.clear()
