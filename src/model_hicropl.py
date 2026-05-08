@@ -490,6 +490,13 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.log("val_mAP", mAP, on_step=False, on_epoch=True, prog_bar=False)
         self.log(f"val_P@{p_k}", p_at_k, on_step=False, on_epoch=True)
 
+        # Restore specific keys for ModelCheckpoint compatibility
+        if map_k > 0:
+            self.log(f"val_map_{map_k}", mAP, on_step=False, on_epoch=True)
+        else:
+            self.log("val_map_all", mAP, on_step=False, on_epoch=True)
+        self.log(f"val_p_{p_k}", p_at_k, on_step=False, on_epoch=True)
+
         if self.global_step > 0:
             self.best_metric = max(self.best_metric, mAP.item())
 
