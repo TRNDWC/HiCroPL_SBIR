@@ -36,26 +36,34 @@ def freeze_all_but_bn(m):
 
 def set_trainable_ln(model, num_trainable_ln):
     """
-    Selective LayerNorm training: 
-    1. Freeze all but BN (opens all LNs).
-    2. Freeze the first (Total - num_trainable_ln) LNs.
+    Selective LayerNorm training for BOTH Visual and Text encoders: 
+    1. Freeze all but BN (opens all LNs in the entire CLIP model).
+    2. Collect Visual LNs and Text LNs separately.
+    3. For each list, freeze the first (Total - num_trainable_ln) LNs.
     """
     # 1. Open all LNs, freeze everything else
     model.apply(freeze_all_but_bn)
     
-    # 2. Collect all LayerNorm modules
-    ln_modules = [m for m in model.modules() if isinstance(m, torch.nn.LayerNorm)]
-    total_ln = len(ln_modules)
+    # 2. Collect Visual LayerNorms
+    visual_lns = [m for m in model.visual.modules() if isinstance(m, torch.nn.LayerNorm)]
     
-    # 3. Handle cases where we don't need to freeze any LNs
-    if num_trainable_ln < 0 or num_trainable_ln >= total_ln:
-        return
-        
-    # 4. Freeze the first M layers (M = Total - Trainable)
-    num_to_freeze = total_ln - num_trainable_ln
-    for i in range(num_to_freeze):
-        for param in ln_modules[i].parameters():
-            param.requires_grad_(False)
+    # 3. Collect Text LayerNorms (Transformer + ln_final)
+    text_lns = [m for m in model.transformer.modules() if isinstance(m, torch.nn.LayerNorm)]
+    if hasattr(model, 'ln_final') and isinstance(model.ln_final, torch.nn.LayerNorm):
+        text_lns.append(model.ln_final)
+    
+    def _selective_freeze(ln_list, k):
+        total = len(ln_list)
+        if k < 0 or k >= total:
+            return # Keep all open
+        num_to_freeze = total - k
+        for i in range(num_to_freeze):
+            for param in ln_list[i].parameters():
+                param.requires_grad_(False)
+
+    # 4. Apply selective freezing to both parts
+    _selective_freeze(visual_lns, num_trainable_ln)
+    _selective_freeze(text_lns, num_trainable_ln)
 
 
 def _normalize_classname(name):
@@ -120,29 +128,33 @@ class CustomCLIP(nn.Module):
         super().__init__()
         self.cfg = cfg
         
-        # Use empty classnames if not provided (will be set during forward)
         if classnames is None:
             classnames = []
         if len(classnames) == 0:
             raise ValueError("CustomCLIP requires non-empty classnames during initialization.")
 
-        # 1. Main Prompted Branch (Frozen backbone, including LN)
-        clip_model.apply(freeze_model)
-        self.clip_model_shared = clip_model
-        self.dtype = clip_model.dtype
+        num_trainable_ln = getattr(cfg, 'num_trainable_ln', -1)
         original_device = next(clip_model.parameters()).device
+        self.dtype = clip_model.dtype
 
-        # 2. Distill Branches (modality-specific, only selected LN open)
-        num_trainable_ln = getattr(cfg, 'num_trainable_ln', -1) # Default to -1 (open all)
+        # 1. Branch-specific models (4 deep copies for independent training)
+        self.clip_photo = copy.deepcopy(clip_model).to(original_device)
+        self.clip_sketch = copy.deepcopy(clip_model).to(original_device)
         self.clip_distill_photo = copy.deepcopy(clip_model_frozen).to(original_device)
         self.clip_distill_sketch = copy.deepcopy(clip_model_frozen).to(original_device)
+
+        # 2. Set Trainable LayerNorms
+        # Main Branches: Always open ALL LayerNorms (-1)
+        set_trainable_ln(self.clip_photo, -1)
+        set_trainable_ln(self.clip_sketch, -1)
         
+        # Distill Branches: Open selective LayerNorms (num_trainable_ln)
         set_trainable_ln(self.clip_distill_photo, num_trainable_ln)
         set_trainable_ln(self.clip_distill_sketch, num_trainable_ln)
         
-        # 3. Logit scales (shared from backbone)
-        self.logit_scale_photo = self.clip_model_shared.logit_scale
-        self.logit_scale_sketch = self.clip_model_shared.logit_scale
+        # 3. Logit scales (unique to each prompted model)
+        self.logit_scale_photo = self.clip_photo.logit_scale
+        self.logit_scale_sketch = self.clip_sketch.logit_scale
 
         # -- Prompt Learners --
         print("Initializing Photo Prompt Learner...")
@@ -151,7 +163,7 @@ class CustomCLIP(nn.Module):
         self.prompt_learner_photo = CrossModalPromptLearner(
             cfg=cfg_photo,
             classnames=classnames,
-            clip_model=self.clip_model_shared,
+            clip_model=self.clip_photo,
             clip_model_distill=self.clip_distill_photo
         )
 
@@ -161,15 +173,15 @@ class CustomCLIP(nn.Module):
         self.prompt_learner_sketch = CrossModalPromptLearner(
             cfg=cfg_sketch,
             classnames=classnames,
-            clip_model=self.clip_model_shared,
+            clip_model=self.clip_sketch,
             clip_model_distill=self.clip_distill_sketch
         )
 
-        # -- Encoders (Main Branches - Frozen) --
-        self.text_encoder_photo = TextEncoder(self.clip_model_shared)
-        self.text_encoder_sketch = TextEncoder(self.clip_model_shared)
-        self.visual_encoder_photo = VisualEncoder(self.clip_model_shared)
-        self.visual_encoder_sketch = VisualEncoder(self.clip_model_shared)
+        # -- Encoders (Main Branches using their own models with ALL LNs open) --
+        self.text_encoder_photo = TextEncoder(self.clip_photo)
+        self.text_encoder_sketch = TextEncoder(self.clip_sketch)
+        self.visual_encoder_photo = VisualEncoder(self.clip_photo)
+        self.visual_encoder_sketch = VisualEncoder(self.clip_sketch)
 
         # -- GPT Text Distill Tokenization (TEMPORARILY DISABLED) --
         # gpt_text_file = getattr(cfg, 'gpt_text_file', 'gpt_file/sketchy_ext.json')
@@ -316,6 +328,8 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.model.visual_encoder_sketch.eval()
         self.model.text_encoder_photo.eval()
         self.model.text_encoder_sketch.eval()
+        self.model.clip_photo.eval()
+        self.model.clip_sketch.eval()
         self.model.clip_distill_photo.eval()
         self.model.clip_distill_sketch.eval()
 
