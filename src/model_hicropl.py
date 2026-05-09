@@ -149,8 +149,8 @@ class CustomCLIP(nn.Module):
         set_trainable_ln(self.clip_sketch, -1)
         
         # Distill Branches: Open selective LayerNorms (num_trainable_ln)
-        set_trainable_ln(self.clip_distill_photo, num_trainable_ln)
-        set_trainable_ln(self.clip_distill_sketch, num_trainable_ln)
+        freeze_model(self.clip_distill_photo)
+        freeze_model(self.clip_distill_sketch)
         
         # 3. Logit scales (unique to each prompted model)
         self.logit_scale_photo = self.clip_photo.logit_scale
