@@ -36,34 +36,95 @@ def freeze_all_but_bn(m):
 
 def set_trainable_ln(model, num_trainable_ln):
     """
-    Selective LayerNorm training for BOTH Visual and Text encoders: 
-    1. Freeze all but BN (opens all LNs in the entire CLIP model).
-    2. Collect Visual LNs and Text LNs separately.
-    3. For each list, freeze the first (Total - num_trainable_ln) LNs.
-    """
-    # 1. Open all LNs, freeze everything else
-    model.apply(freeze_all_but_bn)
-    
-    # 2. Collect Visual LayerNorms
-    visual_lns = [m for m in model.visual.modules() if isinstance(m, torch.nn.LayerNorm)]
-    
-    # 3. Collect Text LayerNorms (Transformer + ln_final)
-    text_lns = [m for m in model.transformer.modules() if isinstance(m, torch.nn.LayerNorm)]
-    if hasattr(model, 'ln_final') and isinstance(model.ln_final, torch.nn.LayerNorm):
-        text_lns.append(model.ln_final)
-    
-    def _selective_freeze(ln_list, k):
-        total = len(ln_list)
-        if k < 0 or k >= total:
-            return # Keep all open
-        num_to_freeze = total - k
-        for i in range(num_to_freeze):
-            for param in ln_list[i].parameters():
-                param.requires_grad_(False)
+    Selective LayerNorm training for BOTH Visual and Text transformer stacks.
 
-    # 4. Apply selective freezing to both parts
-    _selective_freeze(visual_lns, num_trainable_ln)
-    _selective_freeze(text_lns, num_trainable_ln)
+    Design goal (FIX): `num_trainable_ln` is interpreted as the number of *transformer
+    layers/blocks* whose LayerNorms are trainable (typically the last K blocks).
+
+    This replaces the previous implementation that:
+    - relied on `model.apply(freeze_all_but_bn)`, which does NOT reliably freeze many
+      parameters (e.g., MultiheadAttention weights are not named `weight`/`bias`).
+    - selected LayerNorms by module traversal order, which is not a stable proxy for
+      "layer index".
+
+    Semantics:
+    - `num_trainable_ln < 0`: open all transformer blocks' LayerNorms
+    - `num_trainable_ln == 0`: freeze everything (including all LayerNorms)
+    - `0 < num_trainable_ln < n_layers`: open LayerNorms in the last K blocks
+    - `num_trainable_ln >= n_layers`: open all transformer blocks' LayerNorms
+    """
+    def _freeze_all_params(module: nn.Module) -> None:
+        for p in module.parameters():
+            p.requires_grad_(False)
+
+    def _unfreeze_params(module: nn.Module) -> None:
+        for p in module.parameters(recurse=False):
+            p.requires_grad_(True)
+
+    def _get_resblocks(transformer_module: nn.Module):
+        resblocks = getattr(transformer_module, "resblocks", None)
+        if resblocks is None:
+            return []
+        # resblocks can be nn.Sequential / nn.ModuleList
+        try:
+            return list(resblocks)
+        except TypeError:
+            return []
+
+    def _open_block_layernorms(block: nn.Module) -> None:
+        # CLIP blocks use ln_1/ln_2; be tolerant to mocks or variants.
+        for ln_name in ("ln_1", "ln_2"):
+            ln = getattr(block, ln_name, None)
+            if isinstance(ln, torch.nn.LayerNorm):
+                _unfreeze_params(ln)
+
+    def _open_common_layernorms() -> None:
+        # Vision pre/post layernorms
+        visual = getattr(model, "visual", None)
+        if visual is not None:
+            for ln_name in ("ln_pre", "ln_post"):
+                ln = getattr(visual, ln_name, None)
+                if isinstance(ln, torch.nn.LayerNorm):
+                    _unfreeze_params(ln)
+
+        # Text final layernorm
+        ln_final = getattr(model, "ln_final", None)
+        if isinstance(ln_final, torch.nn.LayerNorm):
+            _unfreeze_params(ln_final)
+
+    # 1) Freeze everything first (reliable)
+    _freeze_all_params(model)
+
+    # 2) Optionally open transformer LayerNorms by *block index*
+    # If K == 0: keep fully frozen.
+    if num_trainable_ln == 0:
+        return
+
+    # Vision blocks
+    n_vis_layers = 0
+    visual = getattr(model, "visual", None)
+    if visual is not None and hasattr(visual, "transformer"):
+        vis_blocks = _get_resblocks(visual.transformer)
+        n_vis_layers = len(vis_blocks)
+        if n_vis_layers > 0:
+            k_vis = n_vis_layers if num_trainable_ln < 0 else min(num_trainable_ln, n_vis_layers)
+            for i in range(n_vis_layers - k_vis, n_vis_layers):
+                _open_block_layernorms(vis_blocks[i])
+
+    # Text blocks
+    n_txt_layers = 0
+    if hasattr(model, "transformer"):
+        txt_blocks = _get_resblocks(model.transformer)
+        n_txt_layers = len(txt_blocks)
+        if n_txt_layers > 0:
+            k_txt = n_txt_layers if num_trainable_ln < 0 else min(num_trainable_ln, n_txt_layers)
+            for i in range(n_txt_layers - k_txt, n_txt_layers):
+                _open_block_layernorms(txt_blocks[i])
+
+    # Open ln_pre/ln_post/ln_final when any block is trainable, or when we can't
+    # determine block structure (fallback for ResNet / mocks).
+    if (n_vis_layers + n_txt_layers) == 0 or num_trainable_ln != 0:
+        _open_common_layernorms()
 
 
 def _normalize_classname(name):
@@ -149,8 +210,8 @@ class CustomCLIP(nn.Module):
         set_trainable_ln(self.clip_sketch, -1)
         
         # Distill Branches: Open selective LayerNorms (num_trainable_ln)
-        freeze_model(self.clip_distill_photo)
-        freeze_model(self.clip_distill_sketch)
+        set_trainable_ln(self.clip_distill_photo, num_trainable_ln)
+        set_trainable_ln(self.clip_distill_sketch, num_trainable_ln)
         
         # 3. Logit scales (unique to each prompted model)
         self.logit_scale_photo = self.clip_photo.logit_scale
