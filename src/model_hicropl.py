@@ -50,11 +50,9 @@ def freeze_all_but_ln_last_k_layers(model: nn.Module, k: int):
         for p in module.parameters():
             p.requires_grad_(False)
 
-    def _unfreeze_layernorms(module: nn.Module) -> None:
-        for submodule in module.modules():
-            if isinstance(submodule, nn.LayerNorm):
-                for p in submodule.parameters(recurse=False):
-                    p.requires_grad_(True)
+    def _freeze_block_params(block: nn.Module) -> None:
+        for p in block.parameters():
+            p.requires_grad_(False)
 
     def _get_resblocks(transformer_module: nn.Module):
         resblocks = getattr(transformer_module, "resblocks", None)
@@ -65,10 +63,24 @@ def freeze_all_but_ln_last_k_layers(model: nn.Module, k: int):
         except TypeError:
             return []
 
-    _freeze_all_params(model)
+    def _count_blocks() -> tuple[int, int]:
+        visual = getattr(model, 'visual', None)
+        vis_blocks = []
+        if visual is not None:
+            vis_blocks = _get_resblocks(getattr(visual, 'transformer', None))
+
+        txt_blocks = _get_resblocks(getattr(model, 'transformer', None))
+        return len(vis_blocks), len(txt_blocks)
+
+    n_vis_blocks, n_txt_blocks = _count_blocks()
 
     if k <= 0:
+        _freeze_all_params(model)
         return
+
+    # Start from the exact same baseline as `freeze_all_but_bn` on the full model.
+    # Then we selectively freeze back the blocks that are NOT in the last-k window.
+    model.apply(freeze_all_but_bn)
 
     # ===================== VISUAL ENCODER =====================
     visual = getattr(model, 'visual', None)
@@ -79,16 +91,12 @@ def freeze_all_but_ln_last_k_layers(model: nn.Module, k: int):
             num_blocks = len(blocks)
             freeze_count = max(0, num_blocks - k)
 
-            # Only last-k blocks have their LayerNorms trainable
-            for block in blocks[freeze_count:]:
-                _unfreeze_layernorms(block)
+            # Freeze back the blocks that are outside the last-k window.
+            for block in blocks[:freeze_count]:
+                _freeze_block_params(block)
 
-        # keep common visual LNs trainable when we are opening any layer
-        for name in ('ln_pre', 'ln_post'):
-            ln = getattr(visual, name, None)
-            if isinstance(ln, nn.LayerNorm):
-                for p in ln.parameters(recurse=False):
-                    p.requires_grad_(True)
+        # Keep common visual LNs exactly as the full-model baseline.
+        # No extra action needed for the last-k blocks.
 
     # ===================== TEXT ENCODER =====================
     resblocks = _get_resblocks(getattr(model, 'transformer', None))
@@ -97,15 +105,9 @@ def freeze_all_but_ln_last_k_layers(model: nn.Module, k: int):
         num_blocks = len(blocks)
         freeze_count = max(0, num_blocks - k)
 
-        # Only last-k blocks have their LayerNorms trainable
-        for block in blocks[freeze_count:]:
-            _unfreeze_layernorms(block)
-
-    # ln_final luôn mở nếu k >= 1
-    ln_final = getattr(model, 'ln_final', None)
-    if isinstance(ln_final, nn.LayerNorm):
-        for p in ln_final.parameters(recurse=False):
-            p.requires_grad_(True)
+        # Freeze back the blocks that are outside the last-k window.
+        for block in blocks[:freeze_count]:
+            _freeze_block_params(block)
 
 def _normalize_classname(name):
     return str(name).strip().lower().replace(" ", "_")
