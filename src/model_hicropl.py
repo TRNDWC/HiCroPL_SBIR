@@ -33,73 +33,78 @@ def freeze_all_but_bn(m):
         if hasattr(m, "bias") and m.bias is not None:
             m.bias.requires_grad_(False)
 
-import torch.nn as nn
-
 def freeze_all_but_ln_last_k_layers(model: nn.Module, k: int):
     """
-    Logic theo yêu cầu mới:
-        1. Mở hết toàn bộ model (requires_grad = True)
-        2. Chỉ đóng (freeze) các layer đầu tiên
-        3. Với k layer cuối: giữ LayerNorm mở, đóng các parameter khác
+    Freeze toàn bộ model trước, sau đó chỉ mở LayerNorm của k layer cuối.
+
+    Semantics:
+    - k <= 0: keep everything frozen
+    - 0 < k < num_layers: only LayerNorms in the last-k blocks are trainable
+    - k >= num_layers: equivalent to applying freeze_all_but_bn to the whole model
+
+    This helper is intentionally conservative: it never leaves non-LayerNorm
+    parameters trainable inside the selected blocks.
     """
 
-    # Helper đóng theo logic freeze_all_but_ln
-    def _apply_freeze_but_ln(module: nn.Module):
-        def _freeze(m):
-            if isinstance(m, nn.LayerNorm):
-                return
-            if hasattr(m, "weight") and m.weight is not None:
-                m.weight.requires_grad_(False)
-            if hasattr(m, "bias") and m.bias is not None:
-                m.bias.requires_grad_(False)
-        
-        module.apply(_freeze)
+    def _freeze_all_params(module: nn.Module) -> None:
+        for p in module.parameters():
+            p.requires_grad_(False)
+
+    def _unfreeze_layernorms(module: nn.Module) -> None:
+        for submodule in module.modules():
+            if isinstance(submodule, nn.LayerNorm):
+                for p in submodule.parameters(recurse=False):
+                    p.requires_grad_(True)
+
+    def _get_resblocks(transformer_module: nn.Module):
+        resblocks = getattr(transformer_module, "resblocks", None)
+        if resblocks is None:
+            return []
+        try:
+            return list(resblocks)
+        except TypeError:
+            return []
+
+    _freeze_all_params(model)
+
+    if k <= 0:
+        return
 
     # ===================== VISUAL ENCODER =====================
     visual = getattr(model, 'visual', None)
     if visual is not None:
-        resblocks = getattr(getattr(visual, 'transformer', None), 'resblocks', None)
-        if resblocks is not None:
+        resblocks = _get_resblocks(getattr(visual, 'transformer', None))
+        if resblocks:
             blocks = list(resblocks)
             num_blocks = len(blocks)
             freeze_count = max(0, num_blocks - k)
 
-            # Đóng hoàn toàn các block đầu
-            for block in blocks[:freeze_count]:
-                for p in block.parameters():
-                    p.requires_grad_(False)
-
-            # k block cuối: chỉ giữ LayerNorm
+            # Only last-k blocks have their LayerNorms trainable
             for block in blocks[freeze_count:]:
-                _apply_freeze_but_ln(block)
+                _unfreeze_layernorms(block)
 
-        # ln_pre và ln_post luôn mở (nếu k >= 1)
+        # keep common visual LNs trainable when we are opening any layer
         for name in ('ln_pre', 'ln_post'):
             ln = getattr(visual, name, None)
             if isinstance(ln, nn.LayerNorm):
-                for p in ln.parameters():
+                for p in ln.parameters(recurse=False):
                     p.requires_grad_(True)
 
     # ===================== TEXT ENCODER =====================
-    resblocks = getattr(getattr(model, 'transformer', None), 'resblocks', None)
+    resblocks = _get_resblocks(getattr(model, 'transformer', None))
     if resblocks is not None:
         blocks = list(resblocks)
         num_blocks = len(blocks)
         freeze_count = max(0, num_blocks - k)
 
-        # Đóng hoàn toàn các block đầu
-        for block in blocks[:freeze_count]:
-            for p in block.parameters():
-                p.requires_grad_(False)
-
-        # k block cuối: chỉ giữ LayerNorm
+        # Only last-k blocks have their LayerNorms trainable
         for block in blocks[freeze_count:]:
-            _apply_freeze_but_ln(block)
+            _unfreeze_layernorms(block)
 
     # ln_final luôn mở nếu k >= 1
     ln_final = getattr(model, 'ln_final', None)
     if isinstance(ln_final, nn.LayerNorm):
-        for p in ln_final.parameters():
+        for p in ln_final.parameters(recurse=False):
             p.requires_grad_(True)
 
 def _normalize_classname(name):
@@ -184,8 +189,8 @@ class CustomCLIP(nn.Module):
         self.clip_sketch.apply(freeze_all_but_bn)
         
         # Distill/Augment Branches:
-        self.clip_distill_photo.apply(freeze_all_but_bn)
-        self.clip_distill_sketch.apply(freeze_all_but_bn)
+        freeze_all_but_ln_last_k_layers(self.clip_distill_photo, num_trainable_ln)
+        freeze_all_but_ln_last_k_layers(self.clip_distill_sketch, num_trainable_ln)
         
         # 3. Logit scales (unique to each prompted model)
         self.logit_scale_photo = self.clip_photo.logit_scale
