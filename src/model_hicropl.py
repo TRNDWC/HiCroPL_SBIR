@@ -184,8 +184,8 @@ class CustomCLIP(nn.Module):
         self.clip_sketch.apply(freeze_all_but_bn)
         
         # Distill/Augment Branches:
-        freeze_all_but_ln_last_k_layers(self.clip_distill_photo, num_trainable_ln)
-        freeze_all_but_ln_last_k_layers(self.clip_distill_sketch, num_trainable_ln)
+        self.clip_distill_photo.apply(freeze_all_but_bn)
+        self.clip_distill_sketch.apply(freeze_all_but_bn)
         
         # 3. Logit scales (unique to each prompted model)
         self.logit_scale_photo = self.clip_photo.logit_scale
