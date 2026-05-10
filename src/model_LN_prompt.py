@@ -14,9 +14,9 @@ def freeze_model(m):
 
 def freeze_all_but_bn(m):
     if not isinstance(m, torch.nn.LayerNorm):
-        if hasattr(m, 'weight') and m.weight is not None:
+        if hasattr(m, "weight") and m.weight is not None:
             m.weight.requires_grad_(False)
-        if hasattr(m, 'bias') and m.bias is not None:
+        if hasattr(m, "bias") and m.bias is not None:
             m.bias.requires_grad_(False)
 
 def set_ln_to_train(m):
