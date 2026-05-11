@@ -33,81 +33,65 @@ def freeze_all_but_bn(m):
         if hasattr(m, "bias") and m.bias is not None:
             m.bias.requires_grad_(False)
 
-def freeze_all_but_ln_last_k_layers(model: nn.Module, k: int):
+def set_last_k_transformer_layers_trainable(model, k: int):
     """
-    Freeze toàn bộ model trước, sau đó chỉ mở LayerNorm của k layer cuối.
-
-    Semantics:
-    - k <= 0: keep everything frozen
-    - 0 < k < num_layers: only LayerNorms in the last-k blocks are trainable
-    - k >= num_layers: equivalent to applying freeze_all_but_bn to the whole model
-
-    This helper is intentionally conservative: it never leaves non-LayerNorm
-    parameters trainable inside the selected blocks.
+    Implements the user's specified 3-step algorithm:
+    1) Freeze entire model (all params requires_grad=False)
+    2) LayerNorm global handling: if k == 0 -> close all LN; if k >=1 -> open all LN
+    3) Unfreeze all params (attention + FFN + LN) of the last-k resblocks in both
+       visual and text transformer stacks (if present).
+    This function is conservative about attribute access and will skip missing
+    components gracefully.
     """
+    # Step 1: freeze entire model but only disable weight/bias on non-LayerNorm modules
+    for m in model.modules():
+        if not isinstance(m, torch.nn.LayerNorm):
+            if hasattr(m, "weight") and m.weight is not None:
+                m.weight.requires_grad_(False)
+            if hasattr(m, "bias") and m.bias is not None:
+                m.bias.requires_grad_(False)
 
-    def _freeze_all_params(module: nn.Module) -> None:
-        for p in module.parameters():
-            p.requires_grad_(False)
+    # Step 2: global LayerNorm handling
+    ln_open = bool(k >= 1)
+    for module in model.modules():
+        if isinstance(module, torch.nn.LayerNorm):
+            for p in module.parameters(recurse=False):
+                p.requires_grad_(ln_open)
 
-    def _freeze_block_params(block: nn.Module) -> None:
-        for p in block.parameters():
-            p.requires_grad_(False)
-
-    def _get_resblocks(transformer_module: nn.Module):
-        resblocks = getattr(transformer_module, "resblocks", None)
-        if resblocks is None:
-            return []
-        try:
-            return list(resblocks)
-        except TypeError:
-            return []
-
-    def _count_blocks() -> tuple[int, int]:
-        visual = getattr(model, 'visual', None)
-        vis_blocks = []
-        if visual is not None:
-            vis_blocks = _get_resblocks(getattr(visual, 'transformer', None))
-
-        txt_blocks = _get_resblocks(getattr(model, 'transformer', None))
-        return len(vis_blocks), len(txt_blocks)
-
-    n_vis_blocks, n_txt_blocks = _count_blocks()
-
+    # Step 3: unfreeze last-k resblocks params in visual and text transformer stacks
     if k <= 0:
-        _freeze_all_params(model)
         return
 
-    # Start from the exact same baseline as `freeze_all_but_bn` on the full model.
-    # Then we selectively freeze back the blocks that are NOT in the last-k window.
-    model.apply(freeze_all_but_bn)
-
-    # ===================== VISUAL ENCODER =====================
-    visual = getattr(model, 'visual', None)
-    if visual is not None:
-        resblocks = _get_resblocks(getattr(visual, 'transformer', None))
-        if resblocks:
+    def _unfreeze_resblocks(resblocks):
+        # resblocks may be a ModuleList or list-like; handle safely
+        try:
             blocks = list(resblocks)
-            num_blocks = len(blocks)
-            freeze_count = max(0, num_blocks - k)
+        except Exception:
+            return
+        if k <= 0:
+            return
+        last_blocks = blocks[-k:]
+        for block in last_blocks:
+            for p in block.parameters():
+                p.requires_grad_(True)
 
-            # Freeze back the blocks that are outside the last-k window.
-            for block in blocks[:freeze_count]:
-                _freeze_block_params(block)
+    # Visual encoder: model.visual.transformer.resblocks (common CLIP layout)
+    try:
+        vis = getattr(model, "visual", None)
+        if vis is not None:
+            trans = getattr(vis, "transformer", None)
+            if trans is not None and hasattr(trans, "resblocks"):
+                _unfreeze_resblocks(trans.resblocks)
+    except Exception:
+        pass
 
-        # Keep common visual LNs exactly as the full-model baseline.
-        # No extra action needed for the last-k blocks.
-
-    # ===================== TEXT ENCODER =====================
-    resblocks = _get_resblocks(getattr(model, 'transformer', None))
-    if resblocks is not None:
-        blocks = list(resblocks)
-        num_blocks = len(blocks)
-        freeze_count = max(0, num_blocks - k)
-
-        # Freeze back the blocks that are outside the last-k window.
-        for block in blocks[:freeze_count]:
-            _freeze_block_params(block)
+    # Text encoder: model.transformer.resblocks (common CLIP layout)
+    try:
+        text_trans = getattr(model, "transformer", None)
+        if text_trans is not None and hasattr(text_trans, "resblocks"):
+            _unfreeze_resblocks(text_trans.resblocks)
+    except Exception:
+        pass
 
 def _normalize_classname(name):
     return str(name).strip().lower().replace(" ", "_")
@@ -189,10 +173,29 @@ class CustomCLIP(nn.Module):
         # 2. Set Trainable LayerNorms
         self.clip_photo.apply(freeze_all_but_bn)
         self.clip_sketch.apply(freeze_all_but_bn)
-        
-        # Distill/Augment Branches:
-        freeze_all_but_ln_last_k_layers(self.clip_distill_photo, num_trainable_ln)
-        freeze_all_but_ln_last_k_layers(self.clip_distill_sketch, num_trainable_ln)
+
+        # Distill/Augment Branches: keep fully frozen
+        set_last_k_transformer_layers_trainable(self.clip_distill_photo, num_trainable_ln)
+        set_last_k_transformer_layers_trainable(self.clip_distill_sketch, num_trainable_ln)
+
+        # Print trainable param counts per branch for verification
+        def _count_trainable(m):
+            total = 0
+            trainable = 0
+            for p in m.parameters():
+                total += p.numel()
+                if p.requires_grad:
+                    trainable += p.numel()
+            return total, trainable
+
+        for name, module in (
+            ("clip_photo", self.clip_photo),
+            ("clip_sketch", self.clip_sketch),
+            ("clip_distill_photo", self.clip_distill_photo),
+            ("clip_distill_sketch", self.clip_distill_sketch),
+        ):
+            tot, tr = _count_trainable(module)
+            print(f"{name}: trainable {tr:,} / total {tot:,} params")
         
         # 3. Logit scales (unique to each prompted model)
         self.logit_scale_photo = self.clip_photo.logit_scale
