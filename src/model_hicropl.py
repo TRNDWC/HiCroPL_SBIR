@@ -160,23 +160,24 @@ class CustomCLIP(nn.Module):
         if len(classnames) == 0:
             raise ValueError("CustomCLIP requires non-empty classnames during initialization.")
 
-        num_trainable_ln = getattr(cfg, 'num_trainable_ln', -1)
         original_device = next(clip_model.parameters()).device
         self.dtype = clip_model.dtype
 
-        # 1. Branch-specific models (4 deep copies for independent training)
+        # 1. Branch-specific models (3 deep copies + 2 distill branches)
         self.clip_photo = copy.deepcopy(clip_model).to(original_device)
         self.clip_sketch = copy.deepcopy(clip_model).to(original_device)
         self.clip_distill_photo = copy.deepcopy(clip_model_frozen).to(original_device)
         self.clip_distill_sketch = copy.deepcopy(clip_model_frozen).to(original_device)
 
+        # Backward-compatible alias for older code paths
+        self.clip_distill = self.clip_distill_photo
+
         # 2. Set Trainable LayerNorms
         self.clip_photo.apply(freeze_all_but_bn)
         self.clip_sketch.apply(freeze_all_but_bn)
 
-        # Distill/Augment Branches: keep fully frozen
-        set_last_k_transformer_layers_trainable(self.clip_distill_photo, num_trainable_ln)
-        set_last_k_transformer_layers_trainable(self.clip_distill_sketch, num_trainable_ln)
+        self.clip_distill_photo.apply(freeze_all_but_bn)
+        self.clip_distill_sketch.apply(freeze_all_but_bn)
 
         # Print trainable param counts per branch for verification
         def _count_trainable(m):
@@ -228,17 +229,16 @@ class CustomCLIP(nn.Module):
         self.visual_encoder_photo = VisualEncoder(self.clip_photo)
         self.visual_encoder_sketch = VisualEncoder(self.clip_sketch)
 
-        # -- GPT Text Distill Tokenization (TEMPORARILY DISABLED) --
-        # gpt_text_file = getattr(cfg, 'gpt_text_file', 'gpt_file/sketchy_ext.json')
-        # gpt_prompts = _load_gpt_distill_prompts(classnames, gpt_text_file)
-        # from src.clip import clip as _clip
-        # if classnames:
-        #     self.register_buffer("tokenized_gpt_photo", _clip.tokenize(gpt_prompts["photo"], truncate=True))
-        #     self.register_buffer("tokenized_gpt_sketch", _clip.tokenize(gpt_prompts["sketch"], truncate=True))
-        # else:
-        #     self.register_buffer("tokenized_gpt_photo", torch.empty(0, 77, dtype=torch.long))
-        #     self.register_buffer("tokenized_gpt_sketch", torch.empty(0, 77, dtype=torch.long))
-        
+        gpt_text_file = getattr(cfg, 'gpt_text_file', 'gpt_file/sketchy_ext.json')
+        gpt_prompts = _load_gpt_distill_prompts(classnames, gpt_text_file)
+        from src.clip import clip as _clip
+        if classnames:
+            self.register_buffer("tokenized_gpt_photo", _clip.tokenize(gpt_prompts["photo"], truncate=True))
+            self.register_buffer("tokenized_gpt_sketch", _clip.tokenize(gpt_prompts["sketch"], truncate=True))
+        else:
+            self.register_buffer("tokenized_gpt_photo", torch.empty(0, 77, dtype=torch.long))
+            self.register_buffer("tokenized_gpt_sketch", torch.empty(0, 77, dtype=torch.long))
+
         # -- HiCroPL Extractors (Main Branches) --
         self.extractor_photo = HiCroPLFeatureExtractor(
             prompt_learner=self.prompt_learner_photo,
@@ -284,18 +284,7 @@ class CustomCLIP(nn.Module):
         sketch_feat_fixed = self.clip_distill_sketch.visual(sk_tensor.type(self.dtype))
         sketch_feat_fixed = sketch_feat_fixed / sketch_feat_fixed.norm(dim=-1, keepdim=True)
 
-        # 3. GPT Text Distill Features (TEMPORARILY DISABLED)
-        # text_distill_photo = self.clip_distill_photo.encode_text(self.tokenized_gpt_photo)
-        # text_distill_photo = text_distill_photo / text_distill_photo.norm(dim=-1, keepdim=True)
-        
-        # text_distill_sketch = self.clip_distill_sketch.encode_text(self.tokenized_gpt_sketch)
-        # text_distill_sketch = text_distill_sketch / text_distill_sketch.norm(dim=-1, keepdim=True)
-
-        # Filter by labels for loss computation
-        # text_distill_photo_batch = text_distill_photo[label]
-        # text_distill_sketch_batch = text_distill_sketch[label]
-
-        # 4. Residual Mix & Final Normalization
+        # 3. Residual Mix & Final Normalization
         # Image
         photo_feat_prompted = out_p["image_features"]
         photo_feat_prompted_norm = photo_feat_prompted / photo_feat_prompted.norm(dim=-1, keepdim=True)
@@ -310,12 +299,18 @@ class CustomCLIP(nn.Module):
         neg_feat_prompted = out_neg["image_features"]
         neg_feat = neg_feat_prompted / neg_feat_prompted.norm(dim=-1, keepdim=True)
 
-        # Text (ONLY PROMPTED - GPT DISABLED)
         text_feat_photo_prompted = out_p["text_features"]
         text_feat_photo = text_feat_photo_prompted / text_feat_photo_prompted.norm(dim=-1, keepdim=True)
 
         text_feat_sketch_prompted = out_s["text_features"]
         text_feat_sketch = text_feat_sketch_prompted / text_feat_sketch_prompted.norm(dim=-1, keepdim=True)
+
+        # Encode GPT distill features for all classes (loss will select batch entries)
+        text_distill_photo = self.clip_distill_photo.encode_text(self.tokenized_gpt_photo)
+        text_distill_photo = text_distill_photo / text_distill_photo.norm(dim=-1, keepdim=True)
+
+        text_distill_sketch = self.clip_distill_sketch.encode_text(self.tokenized_gpt_sketch)
+        text_distill_sketch = text_distill_sketch / text_distill_sketch.norm(dim=-1, keepdim=True)
 
         # 5. Compute Logits
         logit_scale = out_p["logit_scale"]
@@ -333,8 +328,7 @@ class CustomCLIP(nn.Module):
             photo_aug_feat_fixed, sketch_aug_feat_fixed,
             logits_photo_aug, logits_sketch_aug,
             text_feat_photo, text_feat_sketch,
-            None, None, # text_distill_photo_batch, text_distill_sketch_batch (DISABLED)
-            None, None, # text_distill_photo, text_distill_sketch (DISABLED)
+            text_distill_photo, text_distill_sketch,
             photo_feat_fixed, sketch_feat_fixed,
         )
 

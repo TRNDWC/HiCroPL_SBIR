@@ -73,14 +73,29 @@ def loss_fn_hicropl(args, features):
         + loss_consistency_photo
     )
 
-    # --- L3: Text distill consistency (TEMPORARILY DISABLED) ---
-    # loss_text_consistency_sketch = cross_loss(text_feat_sketch, text_distill_sketch, temperature)
-    # loss_text_consistency_photo = cross_loss(text_feat_photo, text_distill_photo, temperature)
-    # loss_text_consistency = lambda_text_consistency * (
-    #     loss_text_consistency_sketch
-    #     + loss_text_consistency_photo
-    # )
-    loss_text_consistency = 0.0
+    # --- L3: Text distill consistency ---
+    # Model returns full-class text features (text_feat_*) and full-class
+    # distill features (text_distill_*). The loss should index both by
+    # `label` to obtain per-sample pairs, then compute the cross-loss.
+    text_distill_photo_batch = text_distill_photo[label].to(device)
+    text_distill_sketch_batch = text_distill_sketch[label].to(device)
+
+    # text_feat_* are class prototypes (num_classes x dim), select per-sample
+    text_feat_photo_batch = text_feat_photo[label].to(device)
+    text_feat_sketch_batch = text_feat_sketch[label].to(device)
+
+    # Sanity check: both sides must have same batch length
+    if text_feat_sketch_batch.shape[0] != text_distill_sketch_batch.shape[0]:
+        raise ValueError(f"Mismatched shapes for sketch text distill: text_feat {text_feat_sketch_batch.shape} vs distill {text_distill_sketch_batch.shape}")
+    if text_feat_photo_batch.shape[0] != text_distill_photo_batch.shape[0]:
+        raise ValueError(f"Mismatched shapes for photo text distill: text_feat {text_feat_photo_batch.shape} vs distill {text_distill_photo_batch.shape}")
+
+    loss_text_consistency_sketch = cross_loss(text_feat_sketch_batch, text_distill_sketch_batch, temperature)
+    loss_text_consistency_photo = cross_loss(text_feat_photo_batch, text_distill_photo_batch, temperature)
+    loss_text_consistency = lambda_text_consistency * (
+        loss_text_consistency_sketch
+        + loss_text_consistency_photo
+    )
 
     # --- L4: Cross-Entropy Loss (text - photo) + (text - sketch) ---
     loss_ce_photo = F.cross_entropy(logits_photo, label)
