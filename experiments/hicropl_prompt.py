@@ -7,11 +7,12 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.callbacks import ModelCheckpoint, RichProgressBar
+from pytorch_lightning.callbacks import ModelCheckpoint
 
 from src.clip import clip
 from src.model_hicropl import CustomCLIP, HiCroPL_SBIR
-from src.dataset_retrieval import Sketchy, ValidDataset, ValidDatasetFG
+from src.dataset_retrieval import Sketchy, ValidDataset
+from src.dataset_fg import SketchyDataset as SketchyDatasetFG
 from experiments.options import opts
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -34,50 +35,62 @@ if __name__ == '__main__':
         np.random.seed(worker_seed)
         random.seed(worker_seed)
 
+    def collate_fn(batch):
+        batch = [item for item in batch if item is not None]
+        return torch.utils.data.default_collate(batch)
+
     g = torch.Generator()
     g.manual_seed(SEED)
     print(f"[CONFIG] Running HiCroPL with backbone {opts.backbone}")
 
     # 1. Prepare Datasets
-    dataset_transforms = Sketchy.data_transform(opts)
-    
-    train_dataset = Sketchy(opts, dataset_transforms, mode='train', return_orig=False)
-    
-    # Load validation datasets based on eval_mode
     if opts.eval_mode == 'fine_grained':
-        print(f"[CONFIG] Loading validation data in fine-grained mode")
-        val_sketch = ValidDatasetFG(opts, mode='sketch')
-        val_photo = ValidDatasetFG(opts, mode='photo')
+        print(f"[CONFIG] Loading data in fine-grained mode")
+        train_dataset = SketchyDatasetFG(opts, mode='train')
+        val_dataset = SketchyDatasetFG(opts, mode='test')
     else:
+        dataset_transforms = Sketchy.data_transform(opts)
+        train_dataset = Sketchy(opts, dataset_transforms, mode='train', return_orig=False)
         print(f"[CONFIG] Loading validation data in category mode")
         val_sketch = ValidDataset(opts, mode='sketch')
         val_photo = ValidDataset(opts, mode='photo')
 
     print(f"Train dataset: {len(train_dataset)} samples, {len(train_dataset.all_categories)} categories")
-    print(f"Val sketch dataset: {len(val_sketch)} samples")
-    print(f"Val photo dataset: {len(val_photo)} samples")
-    # Debug: verify category ordering is consistent across runs
-    print(f"[DEBUG] Val categories (first 5): {val_sketch.all_categories[:5]}")
-    print(f"[DEBUG] Val photo categories (first 5): {val_photo.all_categories[:5]}")
-    assert val_sketch.all_categories == val_photo.all_categories, \
-        "CRITICAL: sketch and photo category lists differ! Fix dataset loading."
+    if opts.eval_mode == 'fine_grained':
+        print(f"Val dataset: {len(val_dataset)} samples")
+        print(f"[DEBUG] Val categories (first 5): {val_dataset.all_categories[:5]}")
+    else:
+        print(f"Val sketch dataset: {len(val_sketch)} samples")
+        print(f"Val photo dataset: {len(val_photo)} samples")
+        # Debug: verify category ordering is consistent across runs
+        print(f"[DEBUG] Val categories (first 5): {val_sketch.all_categories[:5]}")
+        print(f"[DEBUG] Val photo categories (first 5): {val_photo.all_categories[:5]}")
+        assert val_sketch.all_categories == val_photo.all_categories, \
+            "CRITICAL: sketch and photo category lists differ! Fix dataset loading."
 
     # 2. Prepare DataLoaders
     train_loader = DataLoader(
         dataset=train_dataset, batch_size=opts.batch_size,
         num_workers=opts.workers, shuffle=True,
-        worker_init_fn=seed_worker, generator=g,
+        worker_init_fn=seed_worker, generator=g, collate_fn=collate_fn,
     )
-    val_sketch_loader = DataLoader(
-        dataset=val_sketch, batch_size=opts.test_batch_size,
-        num_workers=opts.workers, shuffle=False,
-        worker_init_fn=seed_worker, generator=g,
-    )
-    val_photo_loader = DataLoader(
-        dataset=val_photo, batch_size=opts.test_batch_size,
-        num_workers=opts.workers, shuffle=False,
-        worker_init_fn=seed_worker, generator=g,
-    )
+    if opts.eval_mode == 'fine_grained':
+        val_loader = DataLoader(
+            dataset=val_dataset, batch_size=opts.test_batch_size,
+            num_workers=opts.workers, shuffle=False,
+            worker_init_fn=seed_worker, generator=g, collate_fn=collate_fn,
+        )
+    else:
+        val_sketch_loader = DataLoader(
+            dataset=val_sketch, batch_size=opts.test_batch_size,
+            num_workers=opts.workers, shuffle=False,
+            worker_init_fn=seed_worker, generator=g, collate_fn=collate_fn,
+        )
+        val_photo_loader = DataLoader(
+            dataset=val_photo, batch_size=opts.test_batch_size,
+            num_workers=opts.workers, shuffle=False,
+            worker_init_fn=seed_worker, generator=g, collate_fn=collate_fn,
+        )
 
     # 3. Setup CLIP backbones
     from src.utils import load_clip_to_cpu, load_clip_to_cpu_teacher
@@ -97,8 +110,8 @@ if __name__ == '__main__':
     logger = TensorBoardLogger('tb_logs', name=opts.exp_name)
 
     if opts.eval_mode == 'fine_grained':
-        checkpoint_monitor = 'fg_acc@1'
-        checkpoint_filename = '{epoch:02d}-{fg_acc@1:.4f}'
+        checkpoint_monitor = 'top1'
+        checkpoint_filename = '{epoch:02d}-{top1:.4f}'
     else:
         checkpoint_monitor = 'val_map_200' if opts.dataset == 'sketchy_ext' else 'val_map_all'
         checkpoint_filename = '{epoch:02d}-{val_map_200:.4f}' if opts.dataset == 'sketchy_ext' else '{epoch:02d}-{val_map_all:.4f}'
@@ -116,10 +129,6 @@ if __name__ == '__main__':
     else:
         print ('resuming training from %s'%ckpt_path)
 
-    rich_progress_bar = RichProgressBar(
-        leave=True
-    )
-
     # 5. Initialize Trainer
     trainer = Trainer(accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1,
         min_epochs=1, max_epochs=opts.epochs,
@@ -127,8 +136,8 @@ if __name__ == '__main__':
         deterministic=True,
         logger=logger,
         check_val_every_n_epoch=1,
-        enable_progress_bar=True,
-        callbacks=[checkpoint_callback, rich_progress_bar]
+        enable_progress_bar=False,
+        callbacks=[checkpoint_callback]
     )
 
     # 6. Initialize Model
@@ -143,4 +152,7 @@ if __name__ == '__main__':
         model = HiCroPL_SBIR.load_from_checkpoint(ckpt_path, cfg=opts, args=opts, classnames=classnames, model=custom_clip)
 
     print ('\nBeginning training HiCroPL-SBIR... Good luck!')
-    trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader], ckpt_path=ckpt_path)
+    if opts.eval_mode == 'fine_grained':
+        trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
+    else:
+        trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader], ckpt_path=ckpt_path)

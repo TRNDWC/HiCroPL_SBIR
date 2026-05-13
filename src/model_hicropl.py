@@ -342,6 +342,7 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.model = model
         
         self.best_metric = 1e-3
+        self.distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
 
         self.eval_mode = getattr(args, 'eval_mode', 'category')
 
@@ -351,15 +352,11 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.test_sketch_labels = []
 
         from collections import defaultdict
-        self.fg_sketch_buckets = defaultdict(lambda: {
-            'features': [],
-            'filenames': [],
-            'base_names': []
-        })
-        self.fg_photo_buckets = defaultdict(lambda: {
-            'features': [],
-            'filenames': [],
-            'base_names': []
+        self.val = defaultdict(lambda: {
+            'val_img_features': [],
+            'val_img_names': [],
+            'val_sk_features': [],
+            'val_sk_names': [],
         })
 
     def on_train_epoch_start(self):
@@ -413,8 +410,13 @@ class HiCroPL_SBIR(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         from src.losses_hicropl import loss_fn_hicropl
-        
-        features = self.model(batch, self.classnames)
+        # Reorder batch to match model expected ordering when using fine-grained dataset
+        if self.eval_mode == 'fine_grained':
+            # batch format from SketchyDatasetFG (train): img, sk, img_aug, sk_aug, neg, label
+            reordered = (batch[1], batch[0], batch[4], batch[3], batch[2], batch[5])
+            features = self.model(reordered, self.classnames)
+        else:
+            features = self.model(batch, self.classnames)
         loss = loss_fn_hicropl(self.args, features)
         
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
@@ -443,7 +445,7 @@ class HiCroPL_SBIR(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         if self.eval_mode == 'fine_grained':
-            return self._validation_step_fg(batch, batch_idx, dataloader_idx)
+            return self._validation_step_fg(batch, batch_idx)
         else:
             return self._validation_step_category(batch, batch_idx, dataloader_idx)
 
@@ -463,24 +465,27 @@ class HiCroPL_SBIR(pl.LightningModule):
             self.test_photo_features.append(photo_feat.cpu().detach())   
             self.test_photo_labels.append(label.cpu().detach())
 
-    def _validation_step_fg(self, batch, batch_idx, dataloader_idx=0):
-        tensor, category_idx, filename, base_name = batch
+    def _validation_step_fg(self, batch, batch_idx):
+        sk_tensor, sk_name, img_tensor, pos_name, label = batch
 
-        if dataloader_idx == 0:
-            sketch_feat = self.extract_eval_features(tensor, modality='sketch')
-            target_buckets = self.fg_sketch_buckets
-        elif dataloader_idx == 1:
-            photo_feat = self.extract_eval_features(tensor, modality='photo')
-            target_buckets = self.fg_photo_buckets
+        sk_feature = self.extract_eval_features(sk_tensor, modality='sketch')
+        img_feature = self.extract_eval_features(img_tensor, modality='photo')
 
-        for i in range(tensor.size(0)):
-            cat_idx = category_idx[i].item()
-            feat = sketch_feat[i] if dataloader_idx == 0 else photo_feat[i]
-            fname = filename[i]
-            bname = base_name[i]
-            target_buckets[cat_idx]['features'].append(feat.cpu().detach())  
-            target_buckets[cat_idx]['filenames'].append(fname)
-            target_buckets[cat_idx]['base_names'].append(bname)
+        if torch.is_tensor(label):
+            label_list = label.detach().cpu().tolist()
+        else:
+            label_list = list(label)
+
+        for i in range(len(label_list)):
+            lab = label_list[i]
+
+            self.val[lab]['val_sk_features'].append(sk_feature[i].detach().cpu())
+            self.val[lab]['val_sk_names'].append(sk_name[i])
+
+            p_name = pos_name[i]
+            if p_name not in self.val[lab]['val_img_names']:
+                self.val[lab]['val_img_names'].append(p_name)
+                self.val[lab]['val_img_features'].append(img_feature[i].detach().cpu())
 
     def on_validation_epoch_end(self):
         if self.eval_mode == 'fine_grained':
@@ -563,59 +568,54 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.test_sketch_labels.clear()
 
     def _on_validation_epoch_end_fine_grained(self):
-        from src_fg.utils_fg import compute_rank_based_accuracy
-        
-        if len(self.fg_sketch_buckets) == 0 or len(self.fg_photo_buckets) == 0:
+        if len(self.val) == 0:
             self.print("Warning: No fine-grained data collected. Skipping FG metrics.")
             return
         
-        all_ranks = []
-        for category_idx in self.fg_sketch_buckets.keys():
-            if category_idx not in self.fg_photo_buckets:
-                continue
-            
-            sketch_bucket = self.fg_sketch_buckets[category_idx]
-            photo_bucket = self.fg_photo_buckets[category_idx]
-            
-            if len(sketch_bucket['features']) == 0 or len(photo_bucket['features']) == 0:
-                continue
-            
-            sketch_feats = torch.stack(sketch_bucket['features'])  
-            photo_feats = torch.stack(photo_bucket['features'])    
-            
-            ranks = self._compute_per_category_rank(
-                sketch_feats,
-                sketch_bucket['base_names'],
-                photo_feats,
-                photo_bucket['base_names']
-            )
-            all_ranks.append(ranks)
-        
-        if len(all_ranks) == 0:
-            self.print("Warning: No valid categories for FG evaluation.")
-            return
-        
-        all_ranks_tensor = torch.cat(all_ranks)  
-        result = compute_rank_based_accuracy(all_ranks_tensor, top_k_list=[1, 5, 10])
-        
-        acc1 = result['acc@1']
-        acc5 = result['acc@5']
-        acc10 = result['acc@10']
+        top1_list, top5_list = [], []
 
-        self.log('fg_acc@1', acc1, on_epoch=True, prog_bar=True)
-        self.log('fg_acc@5', acc5, on_epoch=True, prog_bar=True)
-        self.log('fg_acc@10', acc10, on_epoch=True, prog_bar=True)
-        self.log('top1', acc1, on_epoch=True, prog_bar=True)
-        self.log('top5', acc5, on_epoch=True, prog_bar=True)
-        
+        for category, bucket in self.val.items():
+            rank = torch.zeros(len(bucket['val_sk_names']), device=self.device)
+
+            if len(bucket['val_img_features']) == 0:
+                continue
+            val_img_feature = torch.stack(bucket['val_img_features'])
+
+            for num, sketch_feature in enumerate(bucket['val_sk_features']):
+                s_name = bucket['val_sk_names'][num]
+                sk_query_name = s_name.split('/')[-1].split('-')[:-1][0]
+
+                position_query = bucket['val_img_names'].index(sk_query_name)
+
+                distance = self.distance_fn(sketch_feature.unsqueeze(0), val_img_feature)
+                target_distance = self.distance_fn(
+                    sketch_feature.unsqueeze(0),
+                    val_img_feature[position_query].unsqueeze(0)
+                )
+
+                rank[num] = distance.le(target_distance).sum()
+
+            top1_list.append(rank.le(1).float().mean().item())
+            top5_list.append(rank.le(5).float().mean().item())
+
+        if len(top1_list) == 0:
+            self.print("Warning: No valid categories for FG evaluation.")
+            self.val.clear()
+            return
+
+        top1 = sum(top1_list) / len(top1_list)
+        top5 = sum(top5_list) / len(top5_list)
+
+        self.log('top1', top1, on_step=False, on_epoch=True, prog_bar=False)
+        self.log('top5', top5, on_step=False, on_epoch=True, prog_bar=False)
+
         if self.global_step > 0:
-            self.best_metric = max(self.best_metric, acc1)
+            self.best_metric = max(self.best_metric, top1)
         self.log('best_fg_acc@1', self.best_metric, on_epoch=True, prog_bar=False)
-        
-        self.print(f'top1: {acc1:.4f}, top5: {acc5:.4f}, acc@10: {acc10:.4f}, Best: {self.best_metric:.4f}')
-        
-        self.fg_sketch_buckets.clear()
-        self.fg_photo_buckets.clear()
+
+        self.print(f'top1: {top1:.4f}, top5: {top5:.4f}, Best: {self.best_metric:.4f}')
+
+        self.val.clear()
 
     def _compute_per_category_rank(self, sketch_feats, sketch_base_names, photo_feats, photo_base_names):
         """
@@ -634,8 +634,6 @@ class HiCroPL_SBIR(pl.LightningModule):
             rank_q = |{g | d(q, g) <= d(q, gt)}|
             where gt is the photo with matching instance_id
         """
-        dist_matrix = torch.cdist(sketch_feats, photo_feats, p=2)  # [Q, G]
-        
         N_sk = len(sketch_feats)
         ranks = torch.zeros(N_sk, device=sketch_feats.device)
         
@@ -669,10 +667,12 @@ class HiCroPL_SBIR(pl.LightningModule):
                 # No matching positive photo found
                 ranks[i] = len(photo_feats) + 1
             else:
-                gt_dist = dist_matrix[i, gt_idx]
-                # Rank = number of photos with distance <= ground truth distance (including ties)
-                rank = (dist_matrix[i] <= gt_dist).sum().item()
-                ranks[i] = rank
+                distance = self.distance_fn(sketch_feats[i].unsqueeze(0), photo_feats)
+                target_distance = self.distance_fn(
+                    sketch_feats[i].unsqueeze(0),
+                    photo_feats[gt_idx].unsqueeze(0)
+                )
+                ranks[i] = distance.le(target_distance).sum()
         
         return ranks
 
