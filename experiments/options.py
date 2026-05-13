@@ -61,4 +61,11 @@ parser.add_argument('--language_depth', type=int, default=-1, help='Prompted tex
 parser.add_argument('--vision_ctx', type=int, default=-1, help='Visual prompt token count; -1 means use n_ctx')
 parser.add_argument('--language_ctx', type=int, default=-1, help='Text prompt token count; -1 means use n_ctx')
 
+# ----------------------
+# Evaluation Mode
+# ----------------------
+parser.add_argument('--eval_mode', type=str, default='category', 
+                    choices=['category', 'fine_grained'],
+                    help='Evaluation mode: category-level retrieval or fine-grained instance-level retrieval')
+
 opts = parser.parse_args()

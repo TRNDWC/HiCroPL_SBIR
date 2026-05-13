@@ -11,7 +11,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, RichProgressBar
 
 from src.clip import clip
 from src.model_hicropl import CustomCLIP, HiCroPL_SBIR
-from src.dataset_retrieval import Sketchy, ValidDataset
+from src.dataset_retrieval import Sketchy, ValidDataset, ValidDatasetFG
 from experiments.options import opts
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -42,8 +42,16 @@ if __name__ == '__main__':
     dataset_transforms = Sketchy.data_transform(opts)
     
     train_dataset = Sketchy(opts, dataset_transforms, mode='train', return_orig=False)
-    val_sketch = ValidDataset(opts, mode='sketch')
-    val_photo = ValidDataset(opts, mode='photo')
+    
+    # Load validation datasets based on eval_mode
+    if opts.eval_mode == 'fine_grained':
+        print(f"[CONFIG] Loading validation data in fine-grained mode")
+        val_sketch = ValidDatasetFG(opts, mode='sketch')
+        val_photo = ValidDatasetFG(opts, mode='photo')
+    else:
+        print(f"[CONFIG] Loading validation data in category mode")
+        val_sketch = ValidDataset(opts, mode='sketch')
+        val_photo = ValidDataset(opts, mode='photo')
 
     print(f"Train dataset: {len(train_dataset)} samples, {len(train_dataset.all_categories)} categories")
     print(f"Val sketch dataset: {len(val_sketch)} samples")
@@ -88,10 +96,17 @@ if __name__ == '__main__':
     # 4. Setup Checkpointing and Logger
     logger = TensorBoardLogger('tb_logs', name=opts.exp_name)
 
+    if opts.eval_mode == 'fine_grained':
+        checkpoint_monitor = 'fg_acc@1'
+        checkpoint_filename = '{epoch:02d}-{fg_acc@1:.4f}'
+    else:
+        checkpoint_monitor = 'val_map_200' if opts.dataset == 'sketchy_ext' else 'val_map_all'
+        checkpoint_filename = '{epoch:02d}-{val_map_200:.4f}' if opts.dataset == 'sketchy_ext' else '{epoch:02d}-{val_map_all:.4f}'
+
     checkpoint_callback = ModelCheckpoint(
-        monitor='val_map_all' if opts.dataset != 'sketchy_ext' else 'val_map_200',
-        dirpath='saved_models/%s'%opts.exp_name,
-        filename="{epoch:02d}-{val_map_200:.4f}" if opts.dataset == 'sketchy_ext' else "{epoch:02d}-{val_map_all:.4f}",
+        monitor=checkpoint_monitor,
+        dirpath='saved_models/%s' % opts.exp_name,
+        filename=checkpoint_filename,
         mode='max',
         save_last=True)
 

@@ -618,25 +618,61 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.fg_photo_buckets.clear()
 
     def _compute_per_category_rank(self, sketch_feats, sketch_base_names, photo_feats, photo_base_names):
-        """Vectorized rank computation for fine-grained retrieval"""
-        sim_matrix = sketch_feats @ photo_feats.t()  
+        """
+        Compute rank-based accuracy for fine-grained retrieval.
+        
+        Args:
+            sketch_feats: [Q, D] tensor of sketch embeddings
+            sketch_base_names: list of sketch instance IDs (e.g., "n02691156_10151-1" -> "n02691156_10151")
+            photo_feats: [G, D] tensor of photo embeddings
+            photo_base_names: list of photo instance IDs (e.g., "n02691156_10151")
+        
+        Returns:
+            ranks: [Q] tensor of ranks for each sketch query
+        
+        Metric Definition:
+            rank_q = |{g | d(q, g) <= d(q, gt)}|
+            where gt is the photo with matching instance_id
+        """
+        dist_matrix = torch.cdist(sketch_feats, photo_feats, p=2)  # [Q, G]
         
         N_sk = len(sketch_feats)
         ranks = torch.zeros(N_sk, device=sketch_feats.device)
         
-        # We still need to find the ground truth index for each sketch.
-        # This part is hard to vectorize completely because it depends on string matching.
-        # But we can vectorize the rank calculation once gt_idx is known.
+        # Convert base_names to list of strings if needed
+        sketch_names_str = []
+        for name in sketch_base_names:
+            if isinstance(name, torch.Tensor):
+                sketch_names_str.append(name.item())
+            else:
+                sketch_names_str.append(str(name))
+        
+        photo_names_str = []
+        for name in photo_base_names:
+            if isinstance(name, torch.Tensor):
+                photo_names_str.append(name.item())
+            else:
+                photo_names_str.append(str(name))
+        
+        # Compute rank for each sketch query
         for i in range(N_sk):
-            sketch_base = sketch_base_names[i]
-            try:
-                gt_idx = photo_base_names.index(sketch_base)
-                gt_sim = sim_matrix[i, gt_idx]
-                # Rank = number of items with similarity >= ground truth similarity
-                rank = (sim_matrix[i] >= gt_sim).sum()
+            sketch_base = sketch_names_str[i]
+            
+            # Find ground truth photo index with matching instance_id
+            gt_idx = None
+            for j, photo_base in enumerate(photo_names_str):
+                if sketch_base == photo_base:
+                    gt_idx = j
+                    break
+            
+            if gt_idx is None:
+                # No matching positive photo found
+                ranks[i] = len(photo_feats) + 1
+            else:
+                gt_dist = dist_matrix[i, gt_idx]
+                # Rank = number of photos with distance <= ground truth distance (including ties)
+                rank = (dist_matrix[i] <= gt_dist).sum().item()
                 ranks[i] = rank
-            except ValueError:
-                ranks[i] = len(photo_base_names) + 1
         
         return ranks
 
