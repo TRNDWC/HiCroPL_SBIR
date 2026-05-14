@@ -35,6 +35,9 @@ parser.add_argument('--backbone', type=str, default='ViT-B/32',
 parser.add_argument('--num_trainable_ln', type=int, default=-1, 
                     help='Number of LayerNorm layers to train (counting from the end). -1 means all.')
 
+# Patch shuffle options (self-supervised auxiliary loss)
+# (patch-shuffle handled in FG training code; no CLI options required)
+
 # ----------------------
 # ViT & HiCroPL Prompt Parameters
 # ----------------------

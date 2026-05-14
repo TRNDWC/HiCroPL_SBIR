@@ -7,12 +7,11 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, RichProgressBar
 
 from src.clip import clip
 from src.model_hicropl import CustomCLIP, HiCroPL_SBIR
 from src.dataset_retrieval import Sketchy, ValidDataset
-from src.dataset_fg import SketchyDataset as SketchyDatasetFG
 from experiments.options import opts
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -46,6 +45,7 @@ if __name__ == '__main__':
     # 1. Prepare Datasets
     if opts.eval_mode == 'fine_grained':
         print(f"[CONFIG] Loading data in fine-grained mode")
+        from src_fg.dataset_fg import SketchyDataset as SketchyDatasetFG
         train_dataset = SketchyDatasetFG(opts, mode='train')
         val_dataset = SketchyDatasetFG(opts, mode='test')
     else:
@@ -130,26 +130,38 @@ if __name__ == '__main__':
         print ('resuming training from %s'%ckpt_path)
 
     # 5. Initialize Trainer
+    rich_progress_bar = RichProgressBar(
+        leave=True
+    )
+
     trainer = Trainer(accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1,
         min_epochs=1, max_epochs=opts.epochs,
         benchmark=False,  # Set False for reproducibility (True causes CUDNN non-determinism)
         deterministic=True,
         logger=logger,
         check_val_every_n_epoch=1,
-        enable_progress_bar=False,
-        callbacks=[checkpoint_callback]
+        enable_progress_bar=True,
+        callbacks=[checkpoint_callback, rich_progress_bar]
     )
 
     # 6. Initialize Model
     if ckpt_path is None:
         custom_clip = CustomCLIP(opts, clip_model, clip_model_frozen, classnames=classnames)
-        model = HiCroPL_SBIR(cfg=opts, args=opts, classnames=classnames, model=custom_clip)
+        if opts.eval_mode == 'fine_grained':
+            from src_fg.model_hicropl_fg import HiCroPL_SBIR_FG
+            model = HiCroPL_SBIR_FG(cfg=opts, args=opts, classnames=classnames, model=custom_clip)
+        else:
+            model = HiCroPL_SBIR(cfg=opts, args=opts, classnames=classnames, model=custom_clip)
     else:
         print ('resuming training from %s'%ckpt_path)
         # Note: Depending on Lightning version, PyTorch Lightning may require the architecture 
         # to be instantiated before load_from_checkpoint or handle it directly if args are passed correctly.
         custom_clip = CustomCLIP(opts, clip_model, clip_model_frozen, classnames=classnames)
-        model = HiCroPL_SBIR.load_from_checkpoint(ckpt_path, cfg=opts, args=opts, classnames=classnames, model=custom_clip)
+        if opts.eval_mode == 'fine_grained':
+            from src_fg.model_hicropl_fg import HiCroPL_SBIR_FG
+            model = HiCroPL_SBIR_FG.load_from_checkpoint(ckpt_path, cfg=opts, args=opts, classnames=classnames, model=custom_clip)
+        else:
+            model = HiCroPL_SBIR.load_from_checkpoint(ckpt_path, cfg=opts, args=opts, classnames=classnames, model=custom_clip)
 
     print ('\nBeginning training HiCroPL-SBIR... Good luck!')
     if opts.eval_mode == 'fine_grained':

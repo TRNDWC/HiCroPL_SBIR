@@ -344,20 +344,10 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.best_metric = 1e-3
         self.distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
 
-        self.eval_mode = getattr(args, 'eval_mode', 'category')
-
         self.test_photo_features = []
         self.test_sketch_features = []
         self.test_photo_labels = []
         self.test_sketch_labels = []
-
-        from collections import defaultdict
-        self.val = defaultdict(lambda: {
-            'val_img_features': [],
-            'val_img_names': [],
-            'val_sk_features': [],
-            'val_sk_names': [],
-        })
 
     def on_train_epoch_start(self):
         self.model.visual_encoder_photo.eval()
@@ -410,13 +400,7 @@ class HiCroPL_SBIR(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         from src.losses_hicropl import loss_fn_hicropl
-        # Reorder batch to match model expected ordering when using fine-grained dataset
-        if self.eval_mode == 'fine_grained':
-            # batch format from SketchyDatasetFG (train): img, sk, img_aug, sk_aug, neg, label
-            reordered = (batch[1], batch[0], batch[4], batch[3], batch[2], batch[5])
-            features = self.model(reordered, self.classnames)
-        else:
-            features = self.model(batch, self.classnames)
+        features = self.model(batch, self.classnames)
         loss = loss_fn_hicropl(self.args, features)
         
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
@@ -444,10 +428,7 @@ class HiCroPL_SBIR(pl.LightningModule):
         return combined_prenorm / combined_prenorm.norm(dim=-1, keepdim=True)
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
-        if self.eval_mode == 'fine_grained':
-            return self._validation_step_fg(batch, batch_idx)
-        else:
-            return self._validation_step_category(batch, batch_idx, dataloader_idx)
+        return self._validation_step_category(batch, batch_idx, dataloader_idx)
 
     def _validation_step_category(self, batch, batch_idx, dataloader_idx=0):
         if len(batch) == 3:
@@ -465,33 +446,8 @@ class HiCroPL_SBIR(pl.LightningModule):
             self.test_photo_features.append(photo_feat.cpu().detach())   
             self.test_photo_labels.append(label.cpu().detach())
 
-    def _validation_step_fg(self, batch, batch_idx):
-        sk_tensor, sk_name, img_tensor, pos_name, label = batch
-
-        sk_feature = self.extract_eval_features(sk_tensor, modality='sketch')
-        img_feature = self.extract_eval_features(img_tensor, modality='photo')
-
-        if torch.is_tensor(label):
-            label_list = label.detach().cpu().tolist()
-        else:
-            label_list = list(label)
-
-        for i in range(len(label_list)):
-            lab = label_list[i]
-
-            self.val[lab]['val_sk_features'].append(sk_feature[i].detach().cpu())
-            self.val[lab]['val_sk_names'].append(sk_name[i])
-
-            p_name = pos_name[i]
-            if p_name not in self.val[lab]['val_img_names']:
-                self.val[lab]['val_img_names'].append(p_name)
-                self.val[lab]['val_img_features'].append(img_feature[i].detach().cpu())
-
     def on_validation_epoch_end(self):
-        if self.eval_mode == 'fine_grained':
-            return self._on_validation_epoch_end_fine_grained()
-        else:
-            return self._on_validation_epoch_end_category()
+        return self._on_validation_epoch_end_category()
 
     def _on_validation_epoch_end_category(self):
         if not self.test_photo_features or not self.test_sketch_features:
@@ -566,115 +522,6 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.test_sketch_features.clear()
         self.test_photo_labels.clear()
         self.test_sketch_labels.clear()
-
-    def _on_validation_epoch_end_fine_grained(self):
-        if len(self.val) == 0:
-            self.print("Warning: No fine-grained data collected. Skipping FG metrics.")
-            return
-        
-        top1_list, top5_list = [], []
-
-        for category, bucket in self.val.items():
-            rank = torch.zeros(len(bucket['val_sk_names']), device=self.device)
-
-            if len(bucket['val_img_features']) == 0:
-                continue
-            val_img_feature = torch.stack(bucket['val_img_features'])
-
-            for num, sketch_feature in enumerate(bucket['val_sk_features']):
-                s_name = bucket['val_sk_names'][num]
-                sk_query_name = s_name.split('/')[-1].split('-')[:-1][0]
-
-                position_query = bucket['val_img_names'].index(sk_query_name)
-
-                distance = self.distance_fn(sketch_feature.unsqueeze(0), val_img_feature)
-                target_distance = self.distance_fn(
-                    sketch_feature.unsqueeze(0),
-                    val_img_feature[position_query].unsqueeze(0)
-                )
-
-                rank[num] = distance.le(target_distance).sum()
-
-            top1_list.append(rank.le(1).float().mean().item())
-            top5_list.append(rank.le(5).float().mean().item())
-
-        if len(top1_list) == 0:
-            self.print("Warning: No valid categories for FG evaluation.")
-            self.val.clear()
-            return
-
-        top1 = sum(top1_list) / len(top1_list)
-        top5 = sum(top5_list) / len(top5_list)
-
-        self.log('top1', top1, on_step=False, on_epoch=True, prog_bar=False)
-        self.log('top5', top5, on_step=False, on_epoch=True, prog_bar=False)
-
-        if self.global_step > 0:
-            self.best_metric = max(self.best_metric, top1)
-        self.log('best_fg_acc@1', self.best_metric, on_epoch=True, prog_bar=False)
-
-        self.print(f'top1: {top1:.4f}, top5: {top5:.4f}, Best: {self.best_metric:.4f}')
-
-        self.val.clear()
-
-    def _compute_per_category_rank(self, sketch_feats, sketch_base_names, photo_feats, photo_base_names):
-        """
-        Compute rank-based accuracy for fine-grained retrieval.
-        
-        Args:
-            sketch_feats: [Q, D] tensor of sketch embeddings
-            sketch_base_names: list of sketch instance IDs (e.g., "n02691156_10151-1" -> "n02691156_10151")
-            photo_feats: [G, D] tensor of photo embeddings
-            photo_base_names: list of photo instance IDs (e.g., "n02691156_10151")
-        
-        Returns:
-            ranks: [Q] tensor of ranks for each sketch query
-        
-        Metric Definition:
-            rank_q = |{g | d(q, g) <= d(q, gt)}|
-            where gt is the photo with matching instance_id
-        """
-        N_sk = len(sketch_feats)
-        ranks = torch.zeros(N_sk, device=sketch_feats.device)
-        
-        # Convert base_names to list of strings if needed
-        sketch_names_str = []
-        for name in sketch_base_names:
-            if isinstance(name, torch.Tensor):
-                sketch_names_str.append(name.item())
-            else:
-                sketch_names_str.append(str(name))
-        
-        photo_names_str = []
-        for name in photo_base_names:
-            if isinstance(name, torch.Tensor):
-                photo_names_str.append(name.item())
-            else:
-                photo_names_str.append(str(name))
-        
-        # Compute rank for each sketch query
-        for i in range(N_sk):
-            sketch_base = sketch_names_str[i]
-            
-            # Find ground truth photo index with matching instance_id
-            gt_idx = None
-            for j, photo_base in enumerate(photo_names_str):
-                if sketch_base == photo_base:
-                    gt_idx = j
-                    break
-            
-            if gt_idx is None:
-                # No matching positive photo found
-                ranks[i] = len(photo_feats) + 1
-            else:
-                distance = self.distance_fn(sketch_feats[i].unsqueeze(0), photo_feats)
-                target_distance = self.distance_fn(
-                    sketch_feats[i].unsqueeze(0),
-                    photo_feats[gt_idx].unsqueeze(0)
-                )
-                ranks[i] = distance.le(target_distance).sum()
-        
-        return ranks
 
     def test_step(self, batch, batch_idx, dataloader_idx=0):
         return self.validation_step(batch, batch_idx, dataloader_idx)
