@@ -34,38 +34,25 @@ class HiCroPL_SBIR_FG(HiCroPL_SBIR):
         features = self.model(reordered, self.classnames)
         loss = loss_fn_hicropl(self.args, features)
 
-        # --- Patch Shuffle Loss (always on for FG) ---
+        # --- Patch Shuffle Loss (temporarily disabled) ---
         num_split = getattr(self.args, 'patch_split', 2)
         B = img_tensor.size(0)
-        img_shuffle_list = []
+        # We still generate shuffled sketches and perms for the jigsaw loss below,
+        # but skip computing cross-modal patch-shuffle contrastive loss for now.
         sk_shuffle_list = []
         perm_list = []
         for i in range(B):
             perm = generate_perm(num_split=num_split)
             perm_list.append(perm.to(img_tensor.device))
-            img_shuffle = permute_patch(img_tensor[i].detach().cpu(), perm, num_split=num_split).to(img_tensor.device)
             sk_shuffle = permute_patch(sk_tensor[i].detach().cpu(), perm, num_split=num_split).to(sk_tensor.device)
-            img_shuffle_list.append(img_shuffle)
             sk_shuffle_list.append(sk_shuffle)
 
-        img_shuffle_batch = torch.stack(img_shuffle_list)
         sk_shuffle_batch = torch.stack(sk_shuffle_list)
 
-        img_shuffle_feat = self.extract_eval_features(img_shuffle_batch, modality='photo')
-        sk_shuffle_feat = self.extract_eval_features(sk_shuffle_batch, modality='sketch')
+        # For now do not compute patch-based cross-loss; keep base loss as starting point
+        total_loss = loss
 
-        temperature = getattr(self.args, 'temperature', 0.07)
-        patch_loss = cross_loss(sk_shuffle_feat, img_shuffle_feat, temperature)
-        lambda_patch = 1.0
-
-        total_loss = loss + lambda_patch * patch_loss
-
-        self.log('train_loss', total_loss, on_step=False, on_epoch=True, prog_bar=False)
         self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False)
-        self.log('patch_loss', patch_loss, on_step=False, on_epoch=True, prog_bar=False)
-
-        self.train_loss_epoch.append(total_loss.detach())
-        self.patch_loss_epoch.append(patch_loss.detach())
 
         # --- Conditional Cross-modal Jigsaw Loss (L_cjs) ---
         # Build per-patch features for sketch and shuffled-sketch, predict original locations
@@ -127,6 +114,9 @@ class HiCroPL_SBIR_FG(HiCroPL_SBIR):
         # update logged train loss (includes cjs now)
         self.log('train_loss', total_loss, on_step=False, on_epoch=True, prog_bar=False)
 
+        # append finalized total_loss (so epoch averages include cjs and any other additions)
+        self.train_loss_epoch.append(total_loss.detach())
+
         return total_loss
 
     def on_train_epoch_end(self):
@@ -134,7 +124,7 @@ class HiCroPL_SBIR_FG(HiCroPL_SBIR):
             return
 
         epoch_train_loss = torch.stack(self.train_loss_epoch).mean()
-        epoch_patch_loss = torch.stack(self.patch_loss_epoch).mean()
+        epoch_patch_loss = torch.stack(self.patch_loss_epoch).mean() if len(self.patch_loss_epoch) > 0 else torch.tensor(0.0, device=self.device)
         epoch_cjs_loss = torch.stack(self.cjs_loss_epoch).mean() if len(self.cjs_loss_epoch) > 0 else torch.tensor(0.0, device=self.device)
         epoch_base_loss = epoch_train_loss - epoch_patch_loss
 
