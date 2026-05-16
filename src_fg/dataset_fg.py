@@ -2,7 +2,6 @@ import os
 import glob
 import numpy as np
 import torch
-from torch.nn import functional as F
 
 
 from torchvision import transforms
@@ -48,30 +47,7 @@ def augmented_transform():
     return transforms.Compose(transform_list)
 
 
-def generate_perm(num_split=2):
-    return torch.randperm(num_split ** 2)
 
-
-def permute_patch(images, perm, num_split=2):
-    image_size = 224
-    patch_size = image_size // num_split
-    interpolated_size = (patch_size * num_split, patch_size * num_split)
-    perm_inds = []
-    for a in range(num_split):
-        for b in range(num_split):
-            perm_inds.append([a, b])
-
-    images = F.interpolate(images.unsqueeze(0), size=interpolated_size).squeeze(0)
-
-    image_shuffle = torch.zeros_like(images)
-    for i_num, i_perm in enumerate(perm):
-        x_source, y_source = perm_inds[int(i_perm)]
-        x_target, y_target = perm_inds[i_num]
-        image_shuffle[:, x_target * patch_size: (x_target + 1) * patch_size, y_target * patch_size: (y_target + 1) * patch_size] = \
-            images[:, x_source * patch_size: (x_source + 1) * patch_size,
-                   y_source * patch_size: (y_source + 1) * patch_size]
-
-    return image_shuffle
  
 
 def normal_transform():
