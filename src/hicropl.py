@@ -318,7 +318,27 @@ class VisualVisualPromptLearner(nn.Module):
             self.attn_pooling_vis2 = self.attn_pooling_vis2.half()
 
     def forward(self):
-        # V1 -> V2 mapping (use first cross_layer prompts from vis1 to update vis2 shallow prompts)
+        # V2 -> V1 mapping first (photo -> sketch)
+        visual2_prompts = torch.cat([self.cross_prompts_vis2[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)
+        proxy_v2_tokens = []
+        for i in range(self.cross_layer, self.prompt_depth):
+            proxy = self.attn_pooling_vis2[i - self.cross_layer](
+                token_query=self.vis2_proxy_tokens[i - self.cross_layer],
+                sequence_key=self.cross_prompts_vis2[i],
+                sequence_value=self.cross_prompts_vis2[i]
+            )
+            proxy_v2_tokens.append(proxy)
+        proxy_v2_prompts = torch.cat(proxy_v2_tokens, dim=0)
+
+        visual1_prompts_deeper = torch.cat([self.cross_prompts_vis1[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)
+        visual1_prompts_flat = visual1_prompts_deeper.view(-1, visual1_prompts_deeper.shape[-1])
+        proxy_v2_flat = proxy_v2_prompts.view(-1, proxy_v2_prompts.shape[-1])
+        updated_vis1 = self.vis2to1_net(visual1_prompts_flat, proxy_v2_flat, proxy_v2_flat)
+        updated_vis1 = updated_vis1.view(self.prompt_depth - self.cross_layer, -1, updated_vis1.shape[-1])
+        for i in range(self.cross_layer, self.prompt_depth):
+            self.cross_prompts_vis1[i].data.copy_(updated_vis1[i - self.cross_layer])
+
+        # V1 -> V2 mapping after that (sketch -> photo)
         visual1_prompts = torch.cat([self.cross_prompts_vis1[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)
         proxy_v1_tokens = []
         for i in range(self.cross_layer):
@@ -338,26 +358,6 @@ class VisualVisualPromptLearner(nn.Module):
         updated_vis2 = updated_vis2.view(self.cross_layer, -1, updated_vis2.shape[-1])
         for i in range(self.cross_layer):
             self.cross_prompts_vis2[i].data.copy_(updated_vis2[i])
-
-        # V2 -> V1 mapping (use deeper prompts from vis2 to update vis1 deeper prompts)
-        visual2_prompts = torch.cat([self.cross_prompts_vis2[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)
-        proxy_v2_tokens = []
-        for i in range(self.cross_layer, self.prompt_depth):
-            proxy = self.attn_pooling_vis2[i - self.cross_layer](
-                token_query=self.vis2_proxy_tokens[i - self.cross_layer],
-                sequence_key=self.cross_prompts_vis2[i],
-                sequence_value=self.cross_prompts_vis2[i]
-            )
-            proxy_v2_tokens.append(proxy)
-        proxy_v2_prompts = torch.cat(proxy_v2_tokens, dim=0)
-
-        visual1_prompts_deeper = torch.cat([self.cross_prompts_vis1[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)
-        visual1_prompts_flat = visual1_prompts_deeper.view(-1, visual1_prompts_deeper.shape[-1])
-        proxy_v2_flat = proxy_v2_prompts.view(-1, proxy_v2_prompts.shape[-1])
-        updated_vis1 = self.vis2to1_net(visual1_prompts_flat, proxy_v2_flat, proxy_v2_flat)
-        updated_vis1 = updated_vis1.view(self.prompt_depth - self.cross_layer, -1, updated_vis1.shape[-1])
-        for i in range(self.cross_layer, self.prompt_depth):
-            self.cross_prompts_vis1[i].data.copy_(updated_vis1[i - self.cross_layer])
 
         vis1_deeper = [self.cross_prompts_vis1[i] for i in range(1, len(self.cross_prompts_vis1))]
         vis2_deeper = [self.cross_prompts_vis2[i] for i in range(1, len(self.cross_prompts_vis2))]
