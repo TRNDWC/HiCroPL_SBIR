@@ -360,6 +360,46 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.model.clip_distill_photo.eval()
         self.model.clip_distill_sketch.eval()
 
+    def on_fit_start(self):
+        """Log the number of learnable prompt tokens per branch once at fit start.
+
+        Logs four scalars (tokens count):
+        - `tokens_visual_photo`
+        - `tokens_visual_sketch`
+        - `tokens_text_photo`
+        - `tokens_text_sketch`
+        """
+        try:
+            vv = self.model.visual_visual_learner
+            # visual tokens: number of prompt vectors (prompt_depth * n_ctx)
+            tokens_visual_photo = len(vv.cross_prompts_vis2) * vv.n_ctx
+            tokens_visual_sketch = len(vv.cross_prompts_vis1) * vv.n_ctx
+        except Exception:
+            tokens_visual_photo = 0
+            tokens_visual_sketch = 0
+
+        try:
+            tp = self.model.text_prompt_photo
+            ts = self.model.text_prompt_sketch
+            tokens_text_photo = len(tp.cross_prompts_text) * tp.cross_prompts_text[0].shape[0]
+            tokens_text_sketch = len(ts.cross_prompts_text) * ts.cross_prompts_text[0].shape[0]
+        except Exception:
+            tokens_text_photo = 0
+            tokens_text_sketch = 0
+
+        # Log to Lightning logger and print for immediate visibility
+        self.print(f"Learnable tokens - visual/photo: {tokens_visual_photo}, visual/sketch: {tokens_visual_sketch}, text/photo: {tokens_text_photo}, text/sketch: {tokens_text_sketch}")
+        # Use self.log so TensorBoard/other loggers capture these scalars
+        # Use rank_zero_only to avoid duplicate logs in distributed runs
+        try:
+            self.log('tokens_visual_photo', tokens_visual_photo, prog_bar=True, logger=True)
+            self.log('tokens_visual_sketch', tokens_visual_sketch, prog_bar=True, logger=True)
+            self.log('tokens_text_photo', tokens_text_photo, prog_bar=True, logger=True)
+            self.log('tokens_text_sketch', tokens_text_sketch, prog_bar=True, logger=True)
+        except Exception:
+            # Fallback to print-only if logger not ready
+            pass
+
     def configure_optimizers(self):
         def add_unique_params(candidates, out_list, seen_ids):
             for p in candidates:
