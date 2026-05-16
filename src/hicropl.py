@@ -271,10 +271,17 @@ class VisualVisualPromptLearner(nn.Module):
         assert self.prompt_depth >= 1
 
         dtype = clip_model_vis1.dtype
-        # visual embedding dims — prefer explicit attribute when available
-        v1_dim = clip_model_vis1.visual.output_dim if hasattr(clip_model_vis1.visual, 'output_dim') else clip_model_vis1.visual.conv1.weight.shape[0]
-        v2_dim = clip_model_vis2.visual.output_dim if hasattr(clip_model_vis2.visual, 'output_dim') else clip_model_vis2.visual.conv1.weight.shape[0]
-        assert v1_dim == v2_dim, "Both visual branches must have same embedding dimension"
+        # visual embedding dims — use the transformer's internal width (conv1 out channels)
+        # for ViT backbones this corresponds to the d_model (e.g., 768). Fallback to
+        # visual.output_dim only if conv1 is not present.
+        if hasattr(clip_model_vis1.visual, 'conv1') and hasattr(clip_model_vis2.visual, 'conv1'):
+            v1_dim = clip_model_vis1.visual.conv1.weight.shape[0]
+            v2_dim = clip_model_vis2.visual.conv1.weight.shape[0]
+        else:
+            v1_dim = clip_model_vis1.visual.output_dim if hasattr(clip_model_vis1.visual, 'output_dim') else None
+            v2_dim = clip_model_vis2.visual.output_dim if hasattr(clip_model_vis2.visual, 'output_dim') else None
+
+        assert v1_dim == v2_dim and v1_dim is not None, "Both visual branches must have same embedding dimension"
         v_dim = v1_dim
 
         self.dtype = dtype
@@ -408,6 +415,7 @@ class SimpleTextPromptLearner(nn.Module):
         if label is not None:
             prefix = prefix[label]
             suffix = suffix[label]
+            ctx = ctx[label]  # Select ctx by label to match batch dimension
         return torch.cat([prefix, ctx, suffix], dim=1)
 
     def forward(self, label=None):
@@ -433,6 +441,15 @@ class BranchPromptAdapter(nn.Module):
         self.visual_learner = visual_learner
         self.text_learner = text_learner
         self.branch = branch
+        # Proxy token buffers from the text learner so older callers (e.g.
+        # `HiCroPLFeatureExtractor`) that access `prompt_learner.tokenized_prompts`
+        # continue to work with the adapter.
+        if hasattr(text_learner, 'tokenized_prompts'):
+            self.register_buffer('tokenized_prompts', text_learner.tokenized_prompts)
+        if hasattr(text_learner, 'token_prefix'):
+            self.register_buffer('token_prefix', text_learner.token_prefix)
+        if hasattr(text_learner, 'token_suffix'):
+            self.register_buffer('token_suffix', text_learner.token_suffix)
 
     def forward(self, label=None):
         # run visual-visual learner to update both visual prompt sets

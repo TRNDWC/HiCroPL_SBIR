@@ -74,44 +74,15 @@ def loss_fn_hicropl(args, features):
     else:
         loss_cross_modal = lambda_cross_modal * cross_loss(sketch_feat, photo_feat, temperature)
 
-    # --- L2: Visual distill consistency ---
-    loss_consistency_sketch = cross_loss(sketch_feat, sketch_aug_feat, temperature)
-    loss_consistency_photo = cross_loss(photo_feat, photo_aug_feat, temperature)
-    loss_consistency = lambda_consistency * (
-        loss_consistency_sketch
-        + loss_consistency_photo
-    )
-
-    # --- L3: Text distill consistency ---
-    # Model returns full-class text features (text_feat_*) and full-class
-    # distill features (text_distill_*). The loss should index both by
-    # `label` to obtain per-sample pairs, then compute the cross-loss.
-    text_distill_photo_batch = text_distill_photo[label].to(device)
-    text_distill_sketch_batch = text_distill_sketch[label].to(device)
-
-    # text_feat_* are class prototypes (num_classes x dim), select per-sample
-    text_feat_photo_batch = text_feat_photo[label].to(device)
-    text_feat_sketch_batch = text_feat_sketch[label].to(device)
-
-    # Sanity check: both sides must have same batch length
-    if text_feat_sketch_batch.shape[0] != text_distill_sketch_batch.shape[0]:
-        raise ValueError(f"Mismatched shapes for sketch text distill: text_feat {text_feat_sketch_batch.shape} vs distill {text_distill_sketch_batch.shape}")
-    if text_feat_photo_batch.shape[0] != text_distill_photo_batch.shape[0]:
-        raise ValueError(f"Mismatched shapes for photo text distill: text_feat {text_feat_photo_batch.shape} vs distill {text_distill_photo_batch.shape}")
-
-    loss_text_consistency_sketch = cross_loss(text_feat_sketch_batch, text_distill_sketch_batch, temperature)
-    loss_text_consistency_photo = cross_loss(text_feat_photo_batch, text_distill_photo_batch, temperature)
-    loss_text_consistency = lambda_text_consistency * (
-        loss_text_consistency_sketch
-        + loss_text_consistency_photo
-    )
-
     # --- L4: Cross-Entropy Loss (text - photo) + (text - sketch) ---
     loss_ce_photo = F.cross_entropy(logits_photo, label)
     loss_ce_sketch = F.cross_entropy(logits_sketch, label)
     loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
-    # Total loss
-    total_loss = loss_cross_modal + loss_ce + loss_consistency
+    # Total loss: Only keep L1 (cross-modal InfoNCE / triplet) and L4 (CE).
+    # Visual/text distillation and augmentation-based consistency are disabled
+    # in this configuration because the dataset/branching does not provide
+    # augmentations or GPT text distill targets.
+    total_loss = loss_cross_modal + loss_ce
 
     return total_loss
