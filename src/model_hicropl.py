@@ -12,6 +12,9 @@ from src.hicropl import (
     CrossModalPromptLearner,
     TextEncoder,
     VisualEncoder,
+    VisualVisualPromptLearner,
+    SimpleTextPromptLearner,
+    BranchPromptAdapter,
 )
 from src.hicropl_extractor import HiCroPLFeatureExtractor
 
@@ -203,25 +206,23 @@ class CustomCLIP(nn.Module):
         self.logit_scale_sketch = self.clip_sketch.logit_scale
 
         # -- Prompt Learners --
-        print("Initializing Photo Prompt Learner...")
+        # Initialize Visual-Visual learner + simple text learners + adapters
+        print("Initializing Visual-Visual Prompt Learner (sketch <-> photo)...")
+        self.visual_visual_learner = VisualVisualPromptLearner(cfg, self.clip_sketch, self.clip_photo)
+
+        print("Initializing Photo Text Prompt Learner...")
         cfg_photo = copy.copy(cfg)
         cfg_photo.ctx_init = getattr(cfg, 'ctx_init', 'a photo of a')
-        self.prompt_learner_photo = CrossModalPromptLearner(
-            cfg=cfg_photo,
-            classnames=classnames,
-            clip_model=self.clip_photo,
-            clip_model_distill=self.clip_distill_photo
-        )
+        self.text_prompt_photo = SimpleTextPromptLearner(cfg_photo, classnames, self.clip_photo)
 
-        print("Initializing Sketch Prompt Learner...")
+        print("Initializing Sketch Text Prompt Learner...")
         cfg_sketch = copy.copy(cfg)
         cfg_sketch.ctx_init = getattr(cfg, 'ctx_init_sketch', 'a sketch of a')
-        self.prompt_learner_sketch = CrossModalPromptLearner(
-            cfg=cfg_sketch,
-            classnames=classnames,
-            clip_model=self.clip_sketch,
-            clip_model_distill=self.clip_distill_sketch
-        )
+        self.text_prompt_sketch = SimpleTextPromptLearner(cfg_sketch, classnames, self.clip_sketch)
+
+        # Adapters expose the same interface as previous CrossModalPromptLearner
+        self.prompt_learner_photo = BranchPromptAdapter(self.visual_visual_learner, self.text_prompt_photo, branch='photo')
+        self.prompt_learner_sketch = BranchPromptAdapter(self.visual_visual_learner, self.text_prompt_sketch, branch='sketch')
 
         # -- Encoders (Main Branches using their own models with ALL LNs open) --
         self.text_encoder_photo = TextEncoder(self.clip_photo)

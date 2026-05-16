@@ -252,6 +252,204 @@ class CrossModalPromptLearner(nn.Module):
         return text_input, self.cross_prompts_visual[0], cross_prompts_text_deeper, cross_prompts_visual_deeper
 
 
+class VisualVisualPromptLearner(nn.Module):
+    """Learner for visual-to-visual prompt exchange (e.g. sketch <-> photo).
+
+    This class mirrors the behaviour of CrossModalPromptLearner but maps
+    between two visual branches instead of text <-> visual.
+    The learner only produces/updates prompt tensors; it does not encode images.
+    """
+
+    def __init__(self, cfg, clip_model_vis1, clip_model_vis2):
+        super().__init__()
+
+        self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
+        self.cross_layer = getattr(cfg, 'cross_layer', 4)
+        n_ctx = getattr(cfg, 'n_ctx', 4)
+        prec = getattr(cfg, 'prec', 'fp32')
+
+        assert self.prompt_depth >= 1
+
+        dtype = clip_model_vis1.dtype
+        # visual embedding dims — prefer explicit attribute when available
+        v1_dim = clip_model_vis1.visual.output_dim if hasattr(clip_model_vis1.visual, 'output_dim') else clip_model_vis1.visual.conv1.weight.shape[0]
+        v2_dim = clip_model_vis2.visual.output_dim if hasattr(clip_model_vis2.visual, 'output_dim') else clip_model_vis2.visual.conv1.weight.shape[0]
+        assert v1_dim == v2_dim, "Both visual branches must have same embedding dimension"
+        v_dim = v1_dim
+
+        self.dtype = dtype
+        self.n_ctx = n_ctx
+        self.clip_model_vis1 = clip_model_vis1
+        self.clip_model_vis2 = clip_model_vis2
+
+        # initialize visual prompts for both branches
+        visual_vectors = torch.empty(n_ctx, v_dim, dtype=dtype)
+        nn.init.normal_(visual_vectors, std=0.02)
+        self.cross_prompts_vis1 = nn.ParameterList([nn.Parameter(visual_vectors.clone()) for _ in range(self.prompt_depth)])
+        self.cross_prompts_vis2 = nn.ParameterList([nn.Parameter(visual_vectors.clone()) for _ in range(self.prompt_depth)])
+
+        # cross-attention mappers between visual branches
+        self.vis1to2_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
+        self.vis2to1_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
+        if prec == 'fp16':
+            self.vis1to2_net = self.vis1to2_net.half()
+            self.vis2to1_net = self.vis2to1_net.half()
+
+        # Layer-specific knowledge proxies (LKP)
+        attn_pooling_vis = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
+        self.attn_pooling_vis1 = _get_clones(attn_pooling_vis, self.cross_layer)
+        self.attn_pooling_vis2 = _get_clones(attn_pooling_vis, self.prompt_depth - self.cross_layer)
+
+        # proxy tokens
+        vis1_proxy_token = torch.randn(1, v_dim, dtype=dtype)
+        self.vis1_proxy_tokens = nn.ParameterList([nn.Parameter(vis1_proxy_token) for _ in range(self.cross_layer)])
+        vis2_proxy_token = torch.randn(1, v_dim, dtype=dtype)
+        self.vis2_proxy_tokens = nn.ParameterList([nn.Parameter(vis2_proxy_token) for _ in range(self.cross_layer, self.prompt_depth)])
+
+        if prec == 'fp16':
+            self.attn_pooling_vis1 = self.attn_pooling_vis1.half()
+            self.attn_pooling_vis2 = self.attn_pooling_vis2.half()
+
+    def forward(self):
+        # V1 -> V2 mapping (use first cross_layer prompts from vis1 to update vis2 shallow prompts)
+        visual1_prompts = torch.cat([self.cross_prompts_vis1[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)
+        proxy_v1_tokens = []
+        for i in range(self.cross_layer):
+            proxy = self.attn_pooling_vis1[i](
+                token_query=self.vis1_proxy_tokens[i],
+                sequence_key=self.cross_prompts_vis1[i],
+                sequence_value=self.cross_prompts_vis1[i]
+            )
+            proxy_v1_tokens.append(proxy)
+        proxy_v1_prompts = torch.cat(proxy_v1_tokens, dim=0)
+
+        visual2_prompts_shallow = torch.cat([self.cross_prompts_vis2[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)
+
+        visual2_prompts_flat = visual2_prompts_shallow.view(-1, visual2_prompts_shallow.shape[-1])
+        proxy_v1_flat = proxy_v1_prompts.view(-1, proxy_v1_prompts.shape[-1])
+        updated_vis2 = self.vis1to2_net(visual2_prompts_flat, proxy_v1_flat, proxy_v1_flat)
+        updated_vis2 = updated_vis2.view(self.cross_layer, -1, updated_vis2.shape[-1])
+        for i in range(self.cross_layer):
+            self.cross_prompts_vis2[i].data.copy_(updated_vis2[i])
+
+        # V2 -> V1 mapping (use deeper prompts from vis2 to update vis1 deeper prompts)
+        visual2_prompts = torch.cat([self.cross_prompts_vis2[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)
+        proxy_v2_tokens = []
+        for i in range(self.cross_layer, self.prompt_depth):
+            proxy = self.attn_pooling_vis2[i - self.cross_layer](
+                token_query=self.vis2_proxy_tokens[i - self.cross_layer],
+                sequence_key=self.cross_prompts_vis2[i],
+                sequence_value=self.cross_prompts_vis2[i]
+            )
+            proxy_v2_tokens.append(proxy)
+        proxy_v2_prompts = torch.cat(proxy_v2_tokens, dim=0)
+
+        visual1_prompts_deeper = torch.cat([self.cross_prompts_vis1[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)
+        visual1_prompts_flat = visual1_prompts_deeper.view(-1, visual1_prompts_deeper.shape[-1])
+        proxy_v2_flat = proxy_v2_prompts.view(-1, proxy_v2_prompts.shape[-1])
+        updated_vis1 = self.vis2to1_net(visual1_prompts_flat, proxy_v2_flat, proxy_v2_flat)
+        updated_vis1 = updated_vis1.view(self.prompt_depth - self.cross_layer, -1, updated_vis1.shape[-1])
+        for i in range(self.cross_layer, self.prompt_depth):
+            self.cross_prompts_vis1[i].data.copy_(updated_vis1[i - self.cross_layer])
+
+        vis1_deeper = [self.cross_prompts_vis1[i] for i in range(1, len(self.cross_prompts_vis1))]
+        vis2_deeper = [self.cross_prompts_vis2[i] for i in range(1, len(self.cross_prompts_vis2))]
+
+        return self.cross_prompts_vis1[0], self.cross_prompts_vis2[0], vis1_deeper, vis2_deeper
+
+class SimpleTextPromptLearner(nn.Module):
+    """Minimal text-only prompt learner: prepares tokenized prompts and text prompt tensors.
+
+    Matches the outputs needed by TextEncoder but does not perform cross-modal mapping.
+    """
+
+    def __init__(self, cfg, classnames, clip_model):
+        super().__init__()
+        n_cls = len(classnames)
+        self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
+        n_ctx = getattr(cfg, 'n_ctx', 4)
+        ctx_init = getattr(cfg, 'ctx_init', "a photo of a")
+        dtype = clip_model.dtype
+
+        ctx_dim = clip_model.ln_final.weight.shape[0]
+
+        # initialize context vectors
+        if ctx_init and (n_ctx) <= 4:
+            from src.clip import clip as _clip
+            prompt = _clip.tokenize(ctx_init.replace("_", " "))
+            prompt = prompt.to(clip_model.token_embedding.weight.device)
+            with torch.no_grad():
+                embedding = clip_model.token_embedding(prompt).type(dtype)
+            ctx_vectors = embedding[0, 1: 1 + n_ctx, :]
+            prompt_prefix = ctx_init.replace("_", " ")
+        else:
+            ctx_vectors = torch.empty(n_ctx, ctx_dim, dtype=dtype)
+            nn.init.normal_(ctx_vectors, std=0.02)
+            prompt_prefix = " ".join(["X"] * n_ctx)
+
+        self.ctx = nn.Parameter(ctx_vectors)
+        cross_prompts_text = nn.ParameterList([self.ctx] + [nn.Parameter(torch.empty(n_ctx, ctx_dim, dtype=dtype)) for _ in range(self.prompt_depth - 1)])
+        for p in cross_prompts_text[1:]:
+            nn.init.normal_(p, std=0.02)
+        self.cross_prompts_text = cross_prompts_text
+
+        # register token prefix/suffix buffers for class prompts
+        classnames = [name.replace("_", " ") for name in classnames]
+        prompts = [prompt_prefix + " " + name + "." for name in classnames]
+        from src.clip import clip as _clip
+        tokenized_prompts = torch.cat([_clip.tokenize(p) for p in prompts]).to(clip_model.token_embedding.weight.device)
+        with torch.no_grad():
+            embedding = clip_model.token_embedding(tokenized_prompts).type(dtype)
+        self.register_buffer("token_prefix", embedding[:, :1, :])
+        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx:, :])
+        self.register_buffer("tokenized_prompts", tokenized_prompts)
+
+    def construct_prompts(self, ctx, prefix, suffix, label=None):
+        if label is not None:
+            prefix = prefix[label]
+            suffix = suffix[label]
+        return torch.cat([prefix, ctx, suffix], dim=1)
+
+    def forward(self, label=None):
+        ctx = self.cross_prompts_text[0]
+        if ctx.dim() == 2:
+            ctx = ctx.unsqueeze(0).expand(self.tokenized_prompts.shape[0], -1, -1)
+        text_input = self.construct_prompts(ctx, self.token_prefix, self.token_suffix, label=label)
+        cross_prompts_text_deeper = [self.cross_prompts_text[i] for i in range(1, len(self.cross_prompts_text))]
+        return text_input, cross_prompts_text_deeper
+
+
+class BranchPromptAdapter(nn.Module):
+    """Adapter that exposes a unified prompt-learner interface for a branch.
+
+    It composes a shared VisualVisualPromptLearner (for both visuals) and a
+    SimpleTextPromptLearner for the branch's text prompts, and returns the
+    4-tuple expected by HiCroPLFeatureExtractor.forward().
+    """
+
+    def __init__(self, visual_learner: VisualVisualPromptLearner, text_learner: SimpleTextPromptLearner, branch: str):
+        super().__init__()
+        assert branch in ("photo", "sketch")
+        self.visual_learner = visual_learner
+        self.text_learner = text_learner
+        self.branch = branch
+
+    def forward(self, label=None):
+        # run visual-visual learner to update both visual prompt sets
+        vis1_shallow, vis2_shallow, vis1_deeper, vis2_deeper = self.visual_learner()
+
+        # run text-only learner for this branch
+        text_input, cross_prompts_text_deeper = self.text_learner(label=label)
+
+        if self.branch == 'photo':
+            first_visual_prompt = vis2_shallow
+            cross_prompts_visual_deeper = vis2_deeper
+        else:
+            first_visual_prompt = vis1_shallow
+            cross_prompts_visual_deeper = vis1_deeper
+
+        return text_input, first_visual_prompt, cross_prompts_text_deeper, cross_prompts_visual_deeper
+
 class VisualEncoder(nn.Module):
     """Wraps CLIP VisionTransformer_HiCroPL for deep prompt injection.
     

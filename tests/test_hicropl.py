@@ -8,7 +8,7 @@ Run: python -m pytest tests/test_hicropl.py -v
   or: python -m tests.test_hicropl
 """
 
-import torchx
+import torch
 import torch.nn as nn
 import unittest
 
@@ -324,6 +324,8 @@ class TestCrossModalPromptLearner(unittest.TestCase):
             dtype = torch.float32
             
         class MockTokenEmbedding:
+            def __init__(self):
+                self.weight = torch.randn(10, 512)
             def __call__(self, x):
                 return torch.randn(x.shape[0], x.shape[1], 512)
                 
@@ -358,13 +360,18 @@ class TestCrossModalPromptLearner(unittest.TestCase):
         sys.modules['src.clip'] = mock_clip_pkg
         sys.modules['src.clip.clip'] = mock_clip_module
         
+        class MockCfg:
+            def __init__(self, n_ctx, prompt_depth, cross_layer, ctx_init):
+                self.n_ctx = n_ctx
+                self.prompt_depth = prompt_depth
+                self.cross_layer = cross_layer
+                self.ctx_init = ctx_init
+        cfg = MockCfg(n_ctx, prompt_depth, cross_layer, "a photo of a")
+        classnames = ["class1", "class2"]
         learner = CrossModalPromptLearner(
-            clip_model=mock_clip,
-            n_ctx=n_ctx,
-            prompt_depth=prompt_depth,
-            cross_layer=cross_layer,
-            ctx_init="a photo of a",
-            use_fp16=False,
+            cfg=cfg,
+            classnames=classnames,
+            clip_model=mock_clip
         )
         
         return learner
