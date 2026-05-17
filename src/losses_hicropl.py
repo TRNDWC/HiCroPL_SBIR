@@ -74,15 +74,19 @@ def loss_fn_hicropl(args, features):
     else:
         loss_cross_modal = lambda_cross_modal * cross_loss(sketch_feat, photo_feat, temperature)
 
+    # --- L2: Visual consistency (sketch/photo vs augmented) ---
+    loss_consistency = lambda_consistency * (
+        cross_loss(sketch_feat, sketch_aug_feat, temperature) +
+        cross_loss(photo_feat, photo_aug_feat, temperature)
+    )
+
     # --- L4: Cross-Entropy Loss (text - photo) + (text - sketch) ---
     loss_ce_photo = F.cross_entropy(logits_photo, label)
     loss_ce_sketch = F.cross_entropy(logits_sketch, label)
     loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
-    # Total loss: Only keep L1 (cross-modal InfoNCE / triplet) and L4 (CE).
-    # Visual/text distillation and augmentation-based consistency are disabled
-    # in this configuration because the dataset/branching does not provide
-    # augmentations or GPT text distill targets.
-    total_loss = loss_cross_modal + loss_ce
+    # Total loss: L1 (cross-modal) + L2 (visual consistency) + L4 (CE)
+    # Text distillation consistency remains disabled in this configuration.
+    total_loss = loss_cross_modal + loss_consistency + loss_ce
 
     return total_loss
