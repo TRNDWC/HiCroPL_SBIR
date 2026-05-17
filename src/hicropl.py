@@ -253,14 +253,7 @@ class CrossModalPromptLearner(nn.Module):
 
 
 class VisualVisualPromptLearner(nn.Module):
-    """Learner for visual-to-visual prompt exchange (e.g. sketch <-> photo).
-
-    This class mirrors the behaviour of CrossModalPromptLearner but maps
-    between two visual branches instead of text <-> visual.
-    The learner only produces/updates prompt tensors; it does not encode images.
-    """
-
-    def __init__(self, cfg, clip_model_vis1, clip_model_vis2):
+    def __init__(self, cfg, clip_model_photo, clip_model_sketch):
         super().__init__()
 
         self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
@@ -270,100 +263,163 @@ class VisualVisualPromptLearner(nn.Module):
 
         assert self.prompt_depth >= 1
 
-        dtype = clip_model_vis1.dtype
-        # visual embedding dims — use the transformer's internal width (conv1 out channels)
-        # for ViT backbones this corresponds to the d_model (e.g., 768). Fallback to
-        # visual.output_dim only if conv1 is not present.
-        if hasattr(clip_model_vis1.visual, 'conv1') and hasattr(clip_model_vis2.visual, 'conv1'):
-            v1_dim = clip_model_vis1.visual.conv1.weight.shape[0]
-            v2_dim = clip_model_vis2.visual.conv1.weight.shape[0]
-        else:
-            v1_dim = clip_model_vis1.visual.output_dim if hasattr(clip_model_vis1.visual, 'output_dim') else None
-            v2_dim = clip_model_vis2.visual.output_dim if hasattr(clip_model_vis2.visual, 'output_dim') else None
-
-        assert v1_dim == v2_dim and v1_dim is not None, "Both visual branches must have same embedding dimension"
-        v_dim = v1_dim
+        dtype = clip_model_photo.dtype
+        # photo đóng vai text → dùng conv1 output dim làm "ctx_dim"
+        p_dim = clip_model_photo.visual.conv1.weight.shape[0]   # 768, analog ctx_dim
+        s_dim = clip_model_sketch.visual.conv1.weight.shape[0]  # 768, analog v_dim
+        assert p_dim == s_dim, "Both branches must have same embedding dimension"
 
         self.dtype = dtype
         self.n_ctx = n_ctx
-        self.clip_model_vis1 = clip_model_vis1
-        self.clip_model_vis2 = clip_model_vis2
 
-        # initialize visual prompts for both branches
-        visual_vectors = torch.empty(n_ctx, v_dim, dtype=dtype)
-        nn.init.normal_(visual_vectors, std=0.02)
-        self.cross_prompts_vis1 = nn.ParameterList([nn.Parameter(visual_vectors.clone()) for _ in range(self.prompt_depth)])
-        self.cross_prompts_vis2 = nn.ParameterList([nn.Parameter(visual_vectors.clone()) for _ in range(self.prompt_depth)])
+        ######## photo prompt initialization (analog: text initialization) ########
+        # Text gốc dùng token_embedding("a photo of a") để có semantic prior
+        # Photo analog: dùng conv1 patch embedding của ảnh mẫu để có visual prior
+        # Nếu không có sample, fallback về random như visual gốc
+        photo_vectors = torch.empty(n_ctx, p_dim, dtype=dtype)
+        nn.init.normal_(photo_vectors, std=0.02)
+        
+        # Layer 0: learnable (analog self.ctx trong gốc)
+        self.ctx_photo = nn.Parameter(photo_vectors)
+        # Deeper layers: random init như gốc
+        cross_prompts_photo = nn.ParameterList(
+            [self.ctx_photo] + 
+            [nn.Parameter(torch.empty(n_ctx, p_dim, dtype=dtype)) 
+             for _ in range(self.prompt_depth - 1)]
+        )
+        for single_para in cross_prompts_photo[1:]:
+            nn.init.normal_(single_para, std=0.02)
+        self.cross_prompts_photo = cross_prompts_photo
+        ######## photo prompt initialization end ########
 
-        # cross-attention mappers between visual branches
-        self.vis1to2_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
-        self.vis2to1_net = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=v_dim, num_attention_heads=8)
+        ######## sketch prompt initialization (analog: visual initialization) ########
+        sketch_vectors = torch.empty(n_ctx, s_dim, dtype=dtype)
+        nn.init.normal_(sketch_vectors, std=0.02)
+        cross_prompts_sketch = nn.ParameterList(
+            [nn.Parameter(sketch_vectors.clone()) 
+             for _ in range(self.prompt_depth)]
+        )
+        self.cross_prompts_sketch = cross_prompts_sketch
+        ######## sketch prompt initialization end ########
+
+        ######## knowledge mapper: photo2sketch and sketch2photo ########
+        # Analog: text2visual_net và visual2text_net
+        # Vì p_dim == s_dim = 768, hidden_size = encoder_hidden_size = 768
+        self.photo2sketch_net = CrossPromptAttention(
+            hidden_size=s_dim, encoder_hidden_size=p_dim, num_attention_heads=8
+        )
+        self.sketch2photo_net = CrossPromptAttention(
+            hidden_size=p_dim, encoder_hidden_size=s_dim, num_attention_heads=8
+        )
         if prec == 'fp16':
-            self.vis1to2_net = self.vis1to2_net.half()
-            self.vis2to1_net = self.vis2to1_net.half()
+            self.photo2sketch_net = self.photo2sketch_net.half()
+            self.sketch2photo_net = self.sketch2photo_net.half()
 
-        # Layer-specific knowledge proxies (LKP)
-        attn_pooling_vis = AttentionPooling(hidden_size=v_dim, num_attention_heads=8)
-        self.attn_pooling_vis1 = _get_clones(attn_pooling_vis, self.cross_layer)
-        self.attn_pooling_vis2 = _get_clones(attn_pooling_vis, self.prompt_depth - self.cross_layer)
+        # LKP: photo pools (analog: attn_pooling_text_nets, cross_layer cái)
+        attn_pooling_photo = AttentionPooling(hidden_size=p_dim, num_attention_heads=8)
+        self.attn_pooling_photo_nets = _get_clones(attn_pooling_photo, self.cross_layer)
 
-        # proxy tokens
-        vis1_proxy_token = torch.randn(1, v_dim, dtype=dtype)
-        self.vis1_proxy_tokens = nn.ParameterList([nn.Parameter(vis1_proxy_token) for _ in range(self.cross_layer)])
-        vis2_proxy_token = torch.randn(1, v_dim, dtype=dtype)
-        self.vis2_proxy_tokens = nn.ParameterList([nn.Parameter(vis2_proxy_token) for _ in range(self.cross_layer, self.prompt_depth)])
+        # LKP: sketch pools (analog: attn_pooling_visual_nets, prompt_depth - cross_layer cái)
+        attn_pooling_sketch = AttentionPooling(hidden_size=s_dim, num_attention_heads=8)
+        self.attn_pooling_sketch_nets = _get_clones(
+            attn_pooling_sketch, self.prompt_depth - self.cross_layer
+        )
+
+        # Proxy tokens: photo proxy cho shallow (analog: text_proxy_tokens)
+        photo_proxy_token = torch.randn(1, p_dim, dtype=dtype)
+        self.photo_proxy_tokens = nn.ParameterList(
+            [nn.Parameter(photo_proxy_token.clone()) for _ in range(self.cross_layer)]
+        )
+
+        # Proxy tokens: sketch proxy cho deep (analog: visual_proxy_tokens)
+        sketch_proxy_token = torch.randn(1, s_dim, dtype=dtype)
+        self.sketch_proxy_tokens = nn.ParameterList(
+            [nn.Parameter(sketch_proxy_token.clone()) 
+             for _ in range(self.cross_layer, self.prompt_depth)]
+        )
 
         if prec == 'fp16':
-            self.attn_pooling_vis1 = self.attn_pooling_vis1.half()
-            self.attn_pooling_vis2 = self.attn_pooling_vis2.half()
+            self.attn_pooling_photo_nets = self.attn_pooling_photo_nets.half()
+            self.attn_pooling_sketch_nets = self.attn_pooling_sketch_nets.half()
+        ######## knowledge mapper end ########
 
     def forward(self):
-        # V2 -> V1 mapping first (photo -> sketch)
-        visual2_prompts = torch.cat([self.cross_prompts_vis2[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)
-        proxy_v2_tokens = []
-        for i in range(self.cross_layer, self.prompt_depth):
-            proxy = self.attn_pooling_vis2[i - self.cross_layer](
-                token_query=self.vis2_proxy_tokens[i - self.cross_layer],
-                sequence_key=self.cross_prompts_vis2[i],
-                sequence_value=self.cross_prompts_vis2[i]
-            )
-            proxy_v2_tokens.append(proxy)
-        proxy_v2_prompts = torch.cat(proxy_v2_tokens, dim=0)
-
-        visual1_prompts_deeper = torch.cat([self.cross_prompts_vis1[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)
-        visual1_prompts_flat = visual1_prompts_deeper.view(-1, visual1_prompts_deeper.shape[-1])
-        proxy_v2_flat = proxy_v2_prompts.view(-1, proxy_v2_prompts.shape[-1])
-        updated_vis1 = self.vis2to1_net(visual1_prompts_flat, proxy_v2_flat, proxy_v2_flat)
-        updated_vis1 = updated_vis1.view(self.prompt_depth - self.cross_layer, -1, updated_vis1.shape[-1])
-        for i in range(self.cross_layer, self.prompt_depth):
-            self.cross_prompts_vis1[i].data.copy_(updated_vis1[i - self.cross_layer])
-
-        # V1 -> V2 mapping after that (sketch -> photo)
-        visual1_prompts = torch.cat([self.cross_prompts_vis1[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)
-        proxy_v1_tokens = []
+        ######## P->S mapping (analog: T->I mapping) ########
+        # Photo guides sketch ở shallow layers [0..cross_layer]
+        sketch_prompts = torch.cat(
+            [self.cross_prompts_sketch[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0
+        )
+        # LKP: compress photo prompts thành proxy
+        proxy_photo_tokens = []
         for i in range(self.cross_layer):
-            proxy = self.attn_pooling_vis1[i](
-                token_query=self.vis1_proxy_tokens[i],
-                sequence_key=self.cross_prompts_vis1[i],
-                sequence_value=self.cross_prompts_vis1[i]
+            photo_proxy = self.attn_pooling_photo_nets[i](
+                token_query=self.photo_proxy_tokens[i],
+                sequence_key=self.cross_prompts_photo[i],
+                sequence_value=self.cross_prompts_photo[i]
             )
-            proxy_v1_tokens.append(proxy)
-        proxy_v1_prompts = torch.cat(proxy_v1_tokens, dim=0)
+            proxy_photo_tokens.append(photo_proxy)
+        proxy_photo_prompts = torch.cat(proxy_photo_tokens, dim=0)
 
-        visual2_prompts_shallow = torch.cat([self.cross_prompts_vis2[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)
+        sketch_prompts_flat = sketch_prompts.view(-1, sketch_prompts.shape[-1])
+        proxy_photo_flat = proxy_photo_prompts.view(-1, proxy_photo_prompts.shape[-1])
 
-        visual2_prompts_flat = visual2_prompts_shallow.view(-1, visual2_prompts_shallow.shape[-1])
-        proxy_v1_flat = proxy_v1_prompts.view(-1, proxy_v1_prompts.shape[-1])
-        updated_vis2 = self.vis1to2_net(visual2_prompts_flat, proxy_v1_flat, proxy_v1_flat)
-        updated_vis2 = updated_vis2.view(self.cross_layer, -1, updated_vis2.shape[-1])
+        updated_sketch_prompts = self.photo2sketch_net(
+            sketch_prompts_flat, proxy_photo_flat, proxy_photo_flat
+        )
+        updated_sketch_prompts = updated_sketch_prompts.view(
+            self.cross_layer, -1, updated_sketch_prompts.shape[-1]
+        )
         for i in range(self.cross_layer):
-            self.cross_prompts_vis2[i].data.copy_(updated_vis2[i])
+            self.cross_prompts_sketch[i].data.copy_(updated_sketch_prompts[i])
+        ######## P->S mapping end ########
 
-        vis1_deeper = [self.cross_prompts_vis1[i] for i in range(1, len(self.cross_prompts_vis1))]
-        vis2_deeper = [self.cross_prompts_vis2[i] for i in range(1, len(self.cross_prompts_vis2))]
+        ######## S->P mapping (analog: I->T mapping) ########
+        # Sketch guides photo ở deep layers [cross_layer..prompt_depth]
+        photo_prompts = torch.cat(
+            [self.cross_prompts_photo[i].unsqueeze(0) 
+             for i in range(self.cross_layer, self.prompt_depth)], dim=0
+        )
+        # LKP: compress sketch prompts thành proxy
+        proxy_sketch_tokens = []
+        for i in range(self.cross_layer, self.prompt_depth):
+            sketch_proxy = self.attn_pooling_sketch_nets[i - self.cross_layer](
+                token_query=self.sketch_proxy_tokens[i - self.cross_layer],
+                sequence_key=self.cross_prompts_sketch[i],
+                sequence_value=self.cross_prompts_sketch[i]
+            )
+            proxy_sketch_tokens.append(sketch_proxy)
+            proxy_sketch_prompts = torch.cat(proxy_sketch_tokens, dim=0)
 
-        return self.cross_prompts_vis1[0], self.cross_prompts_vis2[0], vis1_deeper, vis2_deeper
+        photo_prompts_flat = photo_prompts.view(-1, photo_prompts.shape[-1])
+        proxy_sketch_flat = proxy_sketch_prompts.view(-1, proxy_sketch_prompts.shape[-1])
 
+        updated_photo_prompts = self.sketch2photo_net(
+            photo_prompts_flat, proxy_sketch_flat, proxy_sketch_flat
+        )
+        updated_photo_prompts = updated_photo_prompts.view(
+            self.prompt_depth - self.cross_layer, -1, updated_photo_prompts.shape[-1]
+        )
+        for i in range(self.cross_layer, self.prompt_depth):
+            self.cross_prompts_photo[i].data.copy_(updated_photo_prompts[i - self.cross_layer])
+        ######## S->P mapping end ########
+
+        # Extract deeper prompts (analog: cross_prompts_text_deeper, cross_prompts_visual_deeper)
+        cross_prompts_photo_deeper = [
+            self.cross_prompts_photo[i] for i in range(1, len(self.cross_prompts_photo))
+        ]
+        cross_prompts_sketch_deeper = [
+            self.cross_prompts_sketch[i] for i in range(1, len(self.cross_prompts_sketch))
+        ]
+
+        # Returns analog: (text_input, visual_ctx[0], text_deeper, visual_deeper)
+        # Ở đây không có text_input vì đây là visual-visual
+        # photo[0] = shallow photo prompt, sketch[0] = shallow sketch prompt
+        return (
+            self.cross_prompts_photo[0],   # analog: visual_ctx (first layer prompt)
+            self.cross_prompts_sketch[0],  # analog: visual_ctx cho branch kia
+            cross_prompts_photo_deeper,    # analog: cross_prompts_text_deeper
+            cross_prompts_sketch_deeper    # analog: cross_prompts_visual_deeper
+        )
 class SimpleTextPromptLearner(nn.Module):
     """Minimal text-only prompt learner: prepares tokenized prompts and text prompt tensors.
 
