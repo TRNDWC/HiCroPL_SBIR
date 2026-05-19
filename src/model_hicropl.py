@@ -161,7 +161,8 @@ class CustomCLIP(nn.Module):
         if visual_prompt is not None and visual_prompt.numel() > 0:
             visual_ctx = visual_prompt.to(device=x.device, dtype=x.dtype)
             visual_ctx = visual_ctx.expand(x.shape[0], -1, -1)
-            x = torch.cat([x, visual_ctx], dim=1)
+            # Match the legacy VPT-style layout: [CLS] [prompt] [patches]
+            x = torch.cat([x[:, :1, :], visual_ctx, x[:, 1:, :]], dim=1)
 
         x = visual.ln_pre(x)
         x = x.permute(1, 0, 2)
