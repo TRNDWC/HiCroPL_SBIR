@@ -45,10 +45,7 @@ def loss_fn_hicropl(args, features):
         photo_feat, logits_photo,
         sketch_feat, logits_sketch,
         neg_feat, label,
-        photo_aug_feat, sketch_aug_feat,
-        logits_photo_aug, logits_sketch_aug,
         text_feat_photo, text_feat_sketch,
-        text_distill_photo, text_distill_sketch,
         *_
     ) = features
 
