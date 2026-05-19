@@ -173,11 +173,11 @@ class CustomCLIP(nn.Module):
         self.clip_distill = self.clip_distill_photo
 
         # 2. Set Trainable LayerNorms
-        self.clip_photo.apply(freeze_all_but_bn)
-        self.clip_sketch.apply(freeze_all_but_bn)
+        self.clip_photo.apply(freeze_model)
+        self.clip_sketch.apply(freeze_model)
 
-        self.clip_distill_photo.apply(freeze_all_but_bn)
-        self.clip_distill_sketch.apply(freeze_all_but_bn)
+        self.clip_distill_photo.apply(freeze_model)
+        self.clip_distill_sketch.apply(freeze_model)
 
         # Print trainable param counts per branch for verification
         def _count_trainable(m):
