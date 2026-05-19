@@ -12,6 +12,8 @@ import torch
 import torch.nn as nn
 import unittest
 
+raise unittest.SkipTest("src.hicropl was removed; legacy HiCroPL component tests are skipped.")
+
 
 class TestAttentionPooling(unittest.TestCase):
     """Test Layer-specific Knowledge Proxy (LKP).
