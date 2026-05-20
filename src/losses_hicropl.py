@@ -62,13 +62,16 @@ def loss_fn_hicropl(args, features):
     lambda_text_consistency = getattr(args, 'lambda_text_consistency', lambda_consistency)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
     triplet_margin = getattr(args, 'triplet_margin', 0.3)
+    triplet_distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
 
     # --- L1: cross-modal alignment ---
     # Category mode keeps the original InfoNCE objective.
     # Fine-grained mode can replace it with triplet loss using the paired negative photo.
-    dist_pos = 1.0 - F.cosine_similarity(sketch_feat, photo_feat)
-    dist_neg = 1.0 - F.cosine_similarity(sketch_feat, neg_feat)
-    loss_cross_modal = lambda_cross_modal * F.relu(dist_pos - dist_neg + triplet_margin).mean()
+    triplet_loss = nn.TripletMarginWithDistanceLoss(
+        distance_function=triplet_distance_fn,
+        margin=triplet_margin,
+    )
+    loss_cross_modal = lambda_cross_modal * triplet_loss(sketch_feat, photo_feat, neg_feat)
 
 
     # --- L2: Visual distill consistency ---
