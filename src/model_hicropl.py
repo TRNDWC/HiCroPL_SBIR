@@ -14,13 +14,20 @@ def freeze_model(m):
         param.requires_grad_(False)
 
 
-def freeze_all_but_bn(m):
-    """Freeze all parameters except LayerNorm weights/biases."""
-    if not isinstance(m, torch.nn.LayerNorm):
-        if hasattr(m, "weight") and m.weight is not None:
-            m.weight.requires_grad_(False)
-        if hasattr(m, "bias") and m.bias is not None:
-            m.bias.requires_grad_(False)
+def freeze_all_but_ln(clip_model):
+    """Freeze every parameter in `clip_model`, then unfreeze LayerNorm params only.
+
+    The previous implementation walked modules and only touched `.weight` / `.bias`,
+    which silently left `nn.MultiheadAttention.in_proj_weight/bias` and several loose
+    Parameters (visual.proj, text_projection, positional/class embeddings, logit_scale)
+    trainable — making "LN-only tuning" effectively fine-tune ~30M params.
+    """
+    for p in clip_model.parameters():
+        p.requires_grad_(False)
+    for m in clip_model.modules():
+        if isinstance(m, torch.nn.LayerNorm):
+            for p in m.parameters(recurse=False):
+                p.requires_grad_(True)
 
 
 
@@ -43,8 +50,8 @@ class CustomCLIP(nn.Module):
         # Shared CLIP backbone
         self.clip = copy.deepcopy(clip_model).to(original_device)
 
-        # Trainable LayerNorms
-        self.clip.apply(freeze_all_but_bn)
+        # Trainable LayerNorms only (true LN-only freeze; see freeze_all_but_ln docstring)
+        freeze_all_but_ln(self.clip)
 
         # Print trainable param counts for verification
         def _count_trainable(m):
