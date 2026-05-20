@@ -23,57 +23,6 @@ def freeze_all_but_bn(m):
             m.bias.requires_grad_(False)
 
 
-class SimpleTextPromptLearner(nn.Module):
-    """CoOp-style text prompt learner with shallow context tokens only."""
-
-    def __init__(self, cfg, classnames, clip_model):
-        super().__init__()
-        n_ctx = int(getattr(cfg, "n_ctx", 0))
-        ctx_init = getattr(cfg, "ctx_init", "a photo of a")
-        dtype = clip_model.dtype
-        ctx_dim = clip_model.ln_final.weight.shape[0]
-
-        if ctx_init and n_ctx > 0:
-            prompt = _clip.tokenize(ctx_init.replace("_", " "))
-            prompt = prompt.to(clip_model.token_embedding.weight.device)
-            with torch.no_grad():
-                embedding = clip_model.token_embedding(prompt).type(dtype)
-            ctx_vectors = embedding[0, 1: 1 + n_ctx, :]
-            prompt_prefix = ctx_init.replace("_", " ")
-        else:
-            ctx_vectors = torch.empty(n_ctx, ctx_dim, dtype=dtype)
-            if n_ctx > 0:
-                nn.init.normal_(ctx_vectors, std=0.02)
-            prompt_prefix = " ".join(["X"] * n_ctx) if n_ctx > 0 else ""
-
-        self.ctx = nn.Parameter(ctx_vectors)
-
-        classnames = [name.replace("_", " ") for name in classnames]
-        prompts = [f"{prompt_prefix} {name}.".strip() for name in classnames]
-        tokenized_prompts = torch.cat([_clip.tokenize(p) for p in prompts]).to(
-            clip_model.token_embedding.weight.device
-        )
-        with torch.no_grad():
-            embedding = clip_model.token_embedding(tokenized_prompts).type(dtype)
-
-        self.register_buffer("token_prefix", embedding[:, :1, :])
-        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx:, :])
-        self.register_buffer("tokenized_prompts", tokenized_prompts)
-
-    def forward(self, label=None):
-        ctx = self.ctx
-        if ctx.dim() == 2:
-            ctx = ctx.unsqueeze(0).expand(self.tokenized_prompts.shape[0], -1, -1)
-
-        if label is not None:
-            prefix = self.token_prefix[label]
-            suffix = self.token_suffix[label]
-            ctx = ctx[label]
-        else:
-            prefix = self.token_prefix
-            suffix = self.token_suffix
-
-        return torch.cat([prefix, ctx, suffix], dim=1)
 
 
 class CustomCLIP(nn.Module):
@@ -95,9 +44,7 @@ class CustomCLIP(nn.Module):
         self.clip = copy.deepcopy(clip_model).to(original_device)
 
         # Trainable LayerNorms
-        self.clip.apply(freeze_model)
-        if hasattr(self.clip.visual, "VPT"):
-            self.clip.visual.VPT.requires_grad_(False)
+        self.clip.apply(freeze_all_but_bn)
 
         # Print trainable param counts for verification
         def _count_trainable(m):
@@ -114,16 +61,15 @@ class CustomCLIP(nn.Module):
 
         self.logit_scale = self.clip.logit_scale
 
-        # Text prompt learners (shallow only)
-        cfg_photo = copy.copy(cfg)
-        cfg_photo.ctx_init = getattr(cfg, "ctx_init", "a photo of a")
-        cfg_photo.prompt_depth = 1
-        self.text_prompt_photo = SimpleTextPromptLearner(cfg_photo, classnames, self.clip)
-
-        cfg_sketch = copy.copy(cfg)
-        cfg_sketch.ctx_init = getattr(cfg, "ctx_init_sketch", "a sketch of a")
-        cfg_sketch.prompt_depth = 1
-        self.text_prompt_sketch = SimpleTextPromptLearner(cfg_sketch, classnames, self.clip)
+        # Tokenize classnames for standard CLIP text encoder
+        ctx_init_photo = getattr(cfg, "ctx_init", "a photo of a")
+        ctx_init_sketch = getattr(cfg, "ctx_init_sketch", "a sketch of a")
+        
+        prompts_photo = [f"{ctx_init_photo} {name}.".replace("_", " ").strip() for name in classnames]
+        prompts_sketch = [f"{ctx_init_sketch} {name}.".replace("_", " ").strip() for name in classnames]
+        
+        self.register_buffer("tokenized_photo", _clip.tokenize(prompts_photo))
+        self.register_buffer("tokenized_sketch", _clip.tokenize(prompts_sketch))
 
         # Visual prompts (shallow only), separate for photo and sketch
         prompt_dim = self.clip.visual.conv1.weight.shape[0]
@@ -134,56 +80,15 @@ class CustomCLIP(nn.Module):
             nn.init.normal_(self.visual_prompt_photo, std=0.02)
             nn.init.normal_(self.visual_prompt_sketch, std=0.02)
 
-    def _encode_text_vanilla(self, clip_model, prompts, tokenized_prompts):
-        x = prompts + clip_model.positional_embedding.type(self.dtype)
-        x = x.permute(1, 0, 2)  # NLD -> LND
-        x = clip_model.transformer(x)
-        x = x.permute(1, 0, 2)  # LND -> NLD
-        x = clip_model.ln_final(x).type(self.dtype)
-        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ clip_model.text_projection
-        return x
 
-    def _encode_image_with_prompt(self, clip_model, image, visual_prompt):
-        visual = clip_model.visual
-        x = visual.conv1(image.type(self.dtype))
-        x = x.reshape(x.shape[0], x.shape[1], -1)
-        x = x.permute(0, 2, 1)
-        x = torch.cat(
-            [
-                visual.class_embedding.to(x.dtype)
-                + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device),
-                x,
-            ],
-            dim=1,
-        )
-        x = x + visual.positional_embedding.to(x.dtype)
-
-        if visual_prompt is not None and visual_prompt.numel() > 0:
-            visual_ctx = visual_prompt.to(device=x.device, dtype=x.dtype)
-            visual_ctx = visual_ctx.expand(x.shape[0], -1, -1)
-            # Match the legacy VPT-style layout: [CLS] [prompt] [patches]
-            x = torch.cat([x[:, :1, :], visual_ctx, x[:, 1:, :]], dim=1)
-
-        x = visual.ln_pre(x)
-        x = x.permute(1, 0, 2)
-        x = visual.transformer(x)
-        x = x.permute(1, 0, 2)
-
-        x = visual.ln_post(x[:, 0, :])
-        if visual.proj is not None:
-            x = x @ visual.proj
-        return x
 
     def forward(self, x, classnames):
         sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
 
-        text_input_photo_all = self.text_prompt_photo(label=None)  # All classes
-        text_features_all_photo = self._encode_text_vanilla(
-            self.clip, text_input_photo_all, self.text_prompt_photo.tokenized_prompts
-        )
-        image_features_photo = self._encode_image_with_prompt(
-            self.clip, photo_tensor, self.visual_prompt_photo
-        )
+        text_features_all_photo = self.clip.encode_text(self.tokenized_photo)
+        vp_photo = self.visual_prompt_photo.expand(photo_tensor.shape[0], -1, -1) if self.visual_prompt_photo.numel() > 0 else None
+        image_features_photo = self.clip.encode_image(photo_tensor, prompt=vp_photo)
+        
         out_p = {
             "image_features": image_features_photo,
             "text_features": text_features_all_photo,
@@ -191,13 +96,10 @@ class CustomCLIP(nn.Module):
             "logit_scale": self.logit_scale.exp(),
         }
 
-        text_input_sketch_all = self.text_prompt_sketch(label=None)  # All classes
-        text_features_all_sketch = self._encode_text_vanilla(
-            self.clip, text_input_sketch_all, self.text_prompt_sketch.tokenized_prompts
-        )
-        image_features_sketch = self._encode_image_with_prompt(
-            self.clip, sk_tensor, self.visual_prompt_sketch
-        )
+        text_features_all_sketch = self.clip.encode_text(self.tokenized_sketch)
+        vp_sketch = self.visual_prompt_sketch.expand(sk_tensor.shape[0], -1, -1) if self.visual_prompt_sketch.numel() > 0 else None
+        image_features_sketch = self.clip.encode_image(sk_tensor, prompt=vp_sketch)
+        
         out_s = {
             "image_features": image_features_sketch,
             "text_features": text_features_all_sketch,
@@ -205,9 +107,9 @@ class CustomCLIP(nn.Module):
             "logit_scale": self.logit_scale.exp(),
         }
 
-        image_features_neg = self._encode_image_with_prompt(
-            self.clip, neg_tensor, self.visual_prompt_photo
-        )
+        vp_neg = self.visual_prompt_photo.expand(neg_tensor.shape[0], -1, -1) if self.visual_prompt_photo.numel() > 0 else None
+        image_features_neg = self.clip.encode_image(neg_tensor, prompt=vp_neg)
+        
         out_neg = {
             "image_features": image_features_neg,
             "text_features": text_features_all_photo,
@@ -282,10 +184,6 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         tokens_text_photo = 0
         tokens_text_sketch = 0
-        if hasattr(self.model.text_prompt_photo, "ctx"):
-            tokens_text_photo = self.model.text_prompt_photo.ctx.shape[0]
-        if hasattr(self.model.text_prompt_sketch, "ctx"):
-            tokens_text_sketch = self.model.text_prompt_sketch.ctx.shape[0]
 
         # Log to Lightning logger and print for immediate visibility
         self.print(f"Learnable tokens - visual/photo: {tokens_visual_photo}, visual/sketch: {tokens_visual_sketch}, text/photo: {tokens_text_photo}, text/sketch: {tokens_text_sketch}")
@@ -310,21 +208,13 @@ class HiCroPL_SBIR(pl.LightningModule):
         seen_ids = set()
 
         prompt_params = []
-        add_unique_params(self.model.text_prompt_photo.parameters(), prompt_params, seen_ids)
-        add_unique_params(self.model.text_prompt_sketch.parameters(), prompt_params, seen_ids)
         add_unique_params([self.model.visual_prompt_photo], prompt_params, seen_ids)
         add_unique_params([self.model.visual_prompt_sketch], prompt_params, seen_ids)
 
         ln_params = []
-        # Only collect LayerNorms from clip encoders (NOT from learners, already included above)
-        learner_modules = {
-            'text_prompt_photo', 'text_prompt_sketch'
-        }
         for name, module in self.model.named_modules():
             if isinstance(module, torch.nn.LayerNorm):
-                # Skip if inside a learner module (already included with learner params)
-                if not any(learner_name in name for learner_name in learner_modules):
-                    add_unique_params(module.parameters(recurse=False), ln_params, seen_ids)
+                add_unique_params(module.parameters(recurse=False), ln_params, seen_ids)
 
         extra_trainable_params = []
         for _, p in self.model.named_parameters():
@@ -360,13 +250,11 @@ class HiCroPL_SBIR(pl.LightningModule):
     def extract_eval_features(self, tensor, modality):
         """Extract visual features: Prompted + Distill Fixed (Residual Mix)"""
         if modality == 'photo':
-            feat = self.model._encode_image_with_prompt(
-                self.model.clip, tensor, self.model.visual_prompt_photo
-            )
+            vp = self.model.visual_prompt_photo.expand(tensor.shape[0], -1, -1) if self.model.visual_prompt_photo.numel() > 0 else None
+            feat = self.model.clip.encode_image(tensor, prompt=vp)
         else:
-            feat = self.model._encode_image_with_prompt(
-                self.model.clip, tensor, self.model.visual_prompt_sketch
-            )
+            vp = self.model.visual_prompt_sketch.expand(tensor.shape[0], -1, -1) if self.model.visual_prompt_sketch.numel() > 0 else None
+            feat = self.model.clip.encode_image(tensor, prompt=vp)
         return feat / feat.norm(dim=-1, keepdim=True)
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
