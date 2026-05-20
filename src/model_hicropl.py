@@ -95,9 +95,9 @@ class CustomCLIP(nn.Module):
         self.clip = copy.deepcopy(clip_model).to(original_device)
 
         # Trainable LayerNorms
-        self.clip.apply(freeze_all_but_bn)
+        self.clip.apply(freeze_model)
         if hasattr(self.clip.visual, "VPT"):
-            self.clip.visual.VPT.requires_grad_(True)
+            self.clip.visual.VPT.requires_grad_(False)
 
         # Print trainable param counts for verification
         def _count_trainable(m):
