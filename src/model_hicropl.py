@@ -14,22 +14,13 @@ def freeze_model(m):
         param.requires_grad_(False)
 
 
-def freeze_all_but_ln(clip_model):
-    """Freeze every parameter in `clip_model`, then unfreeze LayerNorm params only.
-
-    The previous implementation walked modules and only touched `.weight` / `.bias`,
-    which silently left `nn.MultiheadAttention.in_proj_weight/bias` and several loose
-    Parameters (visual.proj, text_projection, positional/class embeddings, logit_scale)
-    trainable — making "LN-only tuning" effectively fine-tune ~30M params.
-    """
-    for p in clip_model.parameters():
-        p.requires_grad_(False)
-    for m in clip_model.modules():
-        if isinstance(m, torch.nn.LayerNorm):
-            for p in m.parameters(recurse=False):
-                p.requires_grad_(True)
-
-
+def freeze_all_but_bn(m):
+    """Freeze all parameters except LayerNorm weights/biases."""
+    if not isinstance(m, torch.nn.LayerNorm):
+        if hasattr(m, "weight") and m.weight is not None:
+            m.weight.requires_grad_(False)
+        if hasattr(m, "bias") and m.bias is not None:
+            m.bias.requires_grad_(False)
 
 
 class CustomCLIP(nn.Module):
@@ -51,7 +42,7 @@ class CustomCLIP(nn.Module):
         self.clip = copy.deepcopy(clip_model).to(original_device)
 
         # Trainable LayerNorms only (true LN-only freeze; see freeze_all_but_ln docstring)
-        freeze_all_but_ln(self.clip)
+        self.clip.apply(freeze_all_but_bn)
 
         # Print trainable param counts for verification
         def _count_trainable(m):
@@ -75,8 +66,8 @@ class CustomCLIP(nn.Module):
         prompts_photo = [f"{ctx_init_photo} {name}.".replace("_", " ").strip() for name in classnames]
         prompts_sketch = [f"{ctx_init_sketch} {name}.".replace("_", " ").strip() for name in classnames]
         
-        self.register_buffer("tokenized_photo", _clip.tokenize(prompts_photo))
-        self.register_buffer("tokenized_sketch", _clip.tokenize(prompts_sketch))
+        self.register_buffer("tokenized_photo", _clip.tokenize(prompts_photo).to(original_device))
+        self.register_buffer("tokenized_sketch", _clip.tokenize(prompts_sketch).to(original_device))
 
         # Visual prompts (shallow only), separate for photo and sketch
         prompt_dim = self.clip.visual.conv1.weight.shape[0]
@@ -87,12 +78,61 @@ class CustomCLIP(nn.Module):
             nn.init.normal_(self.visual_prompt_photo, std=0.02)
             nn.init.normal_(self.visual_prompt_sketch, std=0.02)
 
+        # Text prompts (CoOp-style, shallow). Replaces tokens 1..1+n_ctx
+        # (the "a photo of a" / "a sketch of a" context) with learnable vectors.
+        # Init from the original ctx embedding for semantic warm-start.
+        text_dim = self.clip.ln_final.weight.shape[0]
+        with torch.no_grad():
+            photo_embed_full = self.clip.token_embedding(self.tokenized_photo).type(self.dtype)
+            sketch_embed_full = self.clip.token_embedding(self.tokenized_sketch).type(self.dtype)
+
+        if n_ctx > 0:
+            self.text_prompt_photo = nn.Parameter(photo_embed_full[0, 1:1 + n_ctx].clone())
+            self.text_prompt_sketch = nn.Parameter(sketch_embed_full[0, 1:1 + n_ctx].clone())
+        else:
+            self.text_prompt_photo = nn.Parameter(torch.empty(0, text_dim, dtype=self.dtype))
+            self.text_prompt_sketch = nn.Parameter(torch.empty(0, text_dim, dtype=self.dtype))
+
+        # Frozen prefix [SOS] and suffix [classname + EOT + PAD] for each branch.
+        self.register_buffer("token_prefix_photo", photo_embed_full[:, :1])
+        self.register_buffer("token_suffix_photo", photo_embed_full[:, 1 + n_ctx:])
+        self.register_buffer("token_prefix_sketch", sketch_embed_full[:, :1])
+        self.register_buffer("token_suffix_sketch", sketch_embed_full[:, 1 + n_ctx:])
+
+    def encode_text_prompted(self, modality):
+        """Encode text with a learnable context replacing the original ctx tokens."""
+        if modality == "photo":
+            ctx, prefix, suffix, tokenized = (
+                self.text_prompt_photo, self.token_prefix_photo,
+                self.token_suffix_photo, self.tokenized_photo,
+            )
+        else:
+            ctx, prefix, suffix, tokenized = (
+                self.text_prompt_sketch, self.token_prefix_sketch,
+                self.token_suffix_sketch, self.tokenized_sketch,
+            )
+
+        if ctx.numel() == 0:
+            return self.clip.encode_text(tokenized)
+
+        n_cls = prefix.shape[0]
+        ctx_expanded = ctx.unsqueeze(0).expand(n_cls, -1, -1)
+        x = torch.cat([prefix, ctx_expanded, suffix], dim=1)
+
+        x = x + self.clip.positional_embedding.type(self.dtype)
+        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = self.clip.transformer(x)
+        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = self.clip.ln_final(x).type(self.dtype)
+        x = x[torch.arange(x.shape[0]), tokenized.argmax(dim=-1)] @ self.clip.text_projection
+        return x
+
 
 
     def forward(self, x, classnames):
         sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
 
-        text_features_all_photo = self.clip.encode_text(self.tokenized_photo)
+        text_features_all_photo = self.encode_text_prompted("photo")
         vp_photo = self.visual_prompt_photo.expand(photo_tensor.shape[0], -1, -1) if self.visual_prompt_photo.numel() > 0 else None
         image_features_photo = self.clip.encode_image(photo_tensor, prompt=vp_photo)
         
@@ -103,7 +143,7 @@ class CustomCLIP(nn.Module):
             "logit_scale": self.logit_scale.exp(),
         }
 
-        text_features_all_sketch = self.clip.encode_text(self.tokenized_sketch)
+        text_features_all_sketch = self.encode_text_prompted("sketch")
         vp_sketch = self.visual_prompt_sketch.expand(sk_tensor.shape[0], -1, -1) if self.visual_prompt_sketch.numel() > 0 else None
         image_features_sketch = self.clip.encode_image(sk_tensor, prompt=vp_sketch)
         
@@ -191,6 +231,10 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         tokens_text_photo = 0
         tokens_text_sketch = 0
+        if hasattr(self.model, "text_prompt_photo"):
+            tokens_text_photo = self.model.text_prompt_photo.shape[0]
+        if hasattr(self.model, "text_prompt_sketch"):
+            tokens_text_sketch = self.model.text_prompt_sketch.shape[0]
 
         # Log to Lightning logger and print for immediate visibility
         self.print(f"Learnable tokens - visual/photo: {tokens_visual_photo}, visual/sketch: {tokens_visual_sketch}, text/photo: {tokens_text_photo}, text/sketch: {tokens_text_sketch}")
@@ -217,6 +261,8 @@ class HiCroPL_SBIR(pl.LightningModule):
         prompt_params = []
         add_unique_params([self.model.visual_prompt_photo], prompt_params, seen_ids)
         add_unique_params([self.model.visual_prompt_sketch], prompt_params, seen_ids)
+        add_unique_params([self.model.text_prompt_photo], prompt_params, seen_ids)
+        add_unique_params([self.model.text_prompt_sketch], prompt_params, seen_ids)
 
         ln_params = []
         for name, module in self.model.named_modules():
