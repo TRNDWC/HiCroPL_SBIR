@@ -45,9 +45,16 @@ class CustomCLIP(nn.Module):
         original_device = next(clip_model.parameters()).device
         self.dtype = clip_model.dtype
 
-        # Keep full CLIP only for text encoding; text branch is fully frozen.
+        # Full CLIP holds the text encoder (+ unused visual; we use visual_sketch/photo instead).
+        # Unfreeze only LayerNorms (mirrors what we do for the visual branches).
         self.clip = copy.deepcopy(clip_model).to(original_device)
         freeze_model(self.clip)
+        for m in self.clip.transformer.modules():
+            if isinstance(m, torch.nn.LayerNorm):
+                for p in m.parameters(recurse=False):
+                    p.requires_grad_(True)
+        for p in self.clip.ln_final.parameters(recurse=False):
+            p.requires_grad_(True)
 
         # Two separate visual encoders (paper: F_s, F_p both init from CLIP visual).
         self.visual_sketch = copy.deepcopy(clip_model.visual).to(original_device)
@@ -68,23 +75,43 @@ class CustomCLIP(nn.Module):
         t_tot, t_tr = _count_trainable(self.clip)
         print(f"visual_sketch: trainable {v_tr_s:,} / total {v_tot_s:,}")
         print(f"visual_photo : trainable {v_tr_p:,} / total {v_tot_p:,}")
-        print(f"clip (text branch, frozen): trainable {t_tr:,} / total {t_tot:,}")
+        print(f"clip (text-branch LN trainable): trainable {t_tr:,} / total {t_tot:,}")
 
         self.logit_scale = self.clip.logit_scale
 
-        # Hard text template, applied to BOTH modalities (paper: "a photo of a [CLS]").
+        # Tokenize a shared hard template. The first n_ctx context tokens after [SOS]
+        # will be REPLACED at forward time by learnable per-modality prompts (CoOp style),
+        # so the literal string here is only a structural template.
         ctx_init = getattr(cfg, "ctx_init", "a photo of a")
         prompts = [f"{ctx_init} {name}.".replace("_", " ").strip() for name in classnames]
         self.register_buffer("tokenized_text", _clip.tokenize(prompts).to(original_device))
 
         # Two separate shallow visual prompts. Paper: K = 3 tokens, dim = 768.
-        prompt_dim = self.visual_sketch.conv1.weight.shape[0]
+        prompt_dim_v = self.visual_sketch.conv1.weight.shape[0]
         n_ctx = int(getattr(cfg, "n_ctx", 3))
-        self.visual_prompt_sketch = nn.Parameter(torch.empty(n_ctx, prompt_dim, dtype=self.dtype))
-        self.visual_prompt_photo = nn.Parameter(torch.empty(n_ctx, prompt_dim, dtype=self.dtype))
+        self.n_ctx = n_ctx
+        self.visual_prompt_sketch = nn.Parameter(torch.empty(n_ctx, prompt_dim_v, dtype=self.dtype))
+        self.visual_prompt_photo = nn.Parameter(torch.empty(n_ctx, prompt_dim_v, dtype=self.dtype))
         if n_ctx > 0:
             nn.init.normal_(self.visual_prompt_sketch, std=0.02)
             nn.init.normal_(self.visual_prompt_photo, std=0.02)
+
+        # Two separate learnable text prompts, CoOp-style, injected at the first text-encoder layer.
+        # They REPLACE the n_ctx context tokens right after [SOS]; class-name suffix + [EOT] + pad
+        # are held as frozen buffers.
+        prompt_dim_t = self.clip.ln_final.weight.shape[0]
+        self.text_prompt_sketch = nn.Parameter(torch.empty(n_ctx, prompt_dim_t, dtype=self.dtype))
+        self.text_prompt_photo = nn.Parameter(torch.empty(n_ctx, prompt_dim_t, dtype=self.dtype))
+        if n_ctx > 0:
+            nn.init.normal_(self.text_prompt_sketch, std=0.02)
+            nn.init.normal_(self.text_prompt_photo, std=0.02)
+
+        # Cache the frozen [SOS] prefix and [class + EOT + pad] suffix embeddings.
+        with torch.no_grad():
+            full_embed = self.clip.token_embedding(self.tokenized_text).type(self.dtype)
+        # full_embed: (n_cls, 77, d_t). prefix = token 0 ([SOS]); suffix = tokens 1+n_ctx :
+        self.register_buffer("token_prefix", full_embed[:, :1, :])              # (n_cls, 1, d_t)
+        self.register_buffer("token_suffix", full_embed[:, 1 + n_ctx:, :])      # (n_cls, 77-1-n_ctx, d_t)
 
     def encode_visual(self, x, modality):
         """Encode image through the modality-specific visual branch with its visual prompt."""
@@ -97,9 +124,35 @@ class CustomCLIP(nn.Module):
         prompt = vp.expand(x.shape[0], -1, -1) if vp.numel() > 0 else None
         return encoder(x.type(self.dtype), prompt=prompt)
 
-    def encode_text_fixed(self):
-        """Encode all class-prompts once (text encoder is frozen, template is fixed)."""
-        return self.clip.encode_text(self.tokenized_text)
+    def encode_text_prompted(self, modality):
+        """CoOp-style prompted text encoding.
+
+        Splice [SOS, learnable_ctx_modality, class_suffix] for every class, then run the
+        (mostly frozen — LN trainable) text transformer and pick the [EOT] position.
+        """
+        if modality == "sketch":
+            ctx = self.text_prompt_sketch
+        else:
+            ctx = self.text_prompt_photo
+
+        n_cls = self.token_prefix.shape[0]
+        if ctx.numel() == 0:
+            # Degenerate fallback — no learnable tokens; replay the frozen full embedding.
+            return self.clip.encode_text(self.tokenized_text)
+
+        ctx_expanded = ctx.unsqueeze(0).expand(n_cls, -1, -1)                # (n_cls, n_ctx, d_t)
+        x = torch.cat([self.token_prefix, ctx_expanded, self.token_suffix], dim=1)  # (n_cls, 77, d_t)
+
+        x = x + self.clip.positional_embedding.type(self.dtype)
+        x = x.permute(1, 0, 2)            # NLD -> LND
+        x = self.clip.transformer(x)
+        x = x.permute(1, 0, 2)            # LND -> NLD
+        x = self.clip.ln_final(x).type(self.dtype)
+
+        # CLIP picks the embedding at the [EOT] position, found via argmax over token ids.
+        eot_idx = self.tokenized_text.argmax(dim=-1)
+        x = x[torch.arange(x.shape[0]), eot_idx] @ self.clip.text_projection
+        return x
 
     def forward(self, x, classnames):
         sk_tensor = x[0]
@@ -111,23 +164,25 @@ class CustomCLIP(nn.Module):
         photo_feat = self.encode_visual(photo_tensor, "photo")
         neg_feat = self.encode_visual(neg_tensor, "photo")
 
-        text_feat = self.encode_text_fixed()
+        text_feat_photo = self.encode_text_prompted("photo")
+        text_feat_sketch = self.encode_text_prompted("sketch")
 
         # L2-normalise for cosine similarity / cosine-distance triplet
         sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
         photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
         neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
-        text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
+        text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
+        text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
 
         logit_scale = self.logit_scale.exp()
-        logits_photo = logit_scale * photo_feat @ text_feat.t()
-        logits_sketch = logit_scale * sketch_feat @ text_feat.t()
+        logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
+        logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
 
         return (
             photo_feat, logits_photo,
             sketch_feat, logits_sketch,
             neg_feat, label,
-            text_feat, text_feat,
+            text_feat_photo, text_feat_sketch,
         )
 
 
@@ -153,24 +208,34 @@ class HiCroPL_SBIR(pl.LightningModule):
     def on_fit_start(self):
         tokens_visual_sketch = self.model.visual_prompt_sketch.shape[0]
         tokens_visual_photo = self.model.visual_prompt_photo.shape[0]
+        tokens_text_sketch = self.model.text_prompt_sketch.shape[0]
+        tokens_text_photo = self.model.text_prompt_photo.shape[0]
         self.print(
-            f"Learnable visual prompt tokens - sketch: {tokens_visual_sketch}, "
-            f"photo: {tokens_visual_photo} (text prompts disabled, hard template)"
+            f"Learnable prompt tokens - visual/sketch: {tokens_visual_sketch}, "
+            f"visual/photo: {tokens_visual_photo}, "
+            f"text/sketch: {tokens_text_sketch}, text/photo: {tokens_text_photo}"
         )
         try:
             self.log('tokens_visual_sketch', tokens_visual_sketch, prog_bar=True, logger=True)
             self.log('tokens_visual_photo', tokens_visual_photo, prog_bar=True, logger=True)
+            self.log('tokens_text_sketch', tokens_text_sketch, prog_bar=True, logger=True)
+            self.log('tokens_text_photo', tokens_text_photo, prog_bar=True, logger=True)
         except Exception:
             pass
 
     def configure_optimizers(self):
         prompt_params = [
-            p for p in [self.model.visual_prompt_sketch, self.model.visual_prompt_photo]
+            p for p in [
+                self.model.visual_prompt_sketch, self.model.visual_prompt_photo,
+                self.model.text_prompt_sketch, self.model.text_prompt_photo,
+            ]
             if p.requires_grad
         ]
 
         ln_params = []
         seen_ids = set(id(p) for p in prompt_params)
+
+        # Visual branch LayerNorms (sketch + photo encoders)
         for branch in [self.model.visual_sketch, self.model.visual_photo]:
             for m in branch.modules():
                 if isinstance(m, torch.nn.LayerNorm):
@@ -179,8 +244,20 @@ class HiCroPL_SBIR(pl.LightningModule):
                             seen_ids.add(id(p))
                             ln_params.append(p)
 
-        self.print(f"Trainable visual-prompt params: {sum(p.numel() for p in prompt_params):,}")
-        self.print(f"Trainable LayerNorm params (sketch+photo branches): {sum(p.numel() for p in ln_params):,}")
+        # Text encoder LayerNorms (inside self.clip.transformer + ln_final)
+        for m in self.model.clip.transformer.modules():
+            if isinstance(m, torch.nn.LayerNorm):
+                for p in m.parameters(recurse=False):
+                    if p.requires_grad and id(p) not in seen_ids:
+                        seen_ids.add(id(p))
+                        ln_params.append(p)
+        for p in self.model.clip.ln_final.parameters(recurse=False):
+            if p.requires_grad and id(p) not in seen_ids:
+                seen_ids.add(id(p))
+                ln_params.append(p)
+
+        self.print(f"Trainable prompt params (visual + text, both modalities): {sum(p.numel() for p in prompt_params):,}")
+        self.print(f"Trainable LayerNorm params (visual + text encoders): {sum(p.numel() for p in ln_params):,}")
 
         prompt_lr = getattr(self.cfg, 'prompt_lr', 1e-5)
         clip_ln_lr = getattr(self.cfg, 'clip_LN_lr', 1e-5)
