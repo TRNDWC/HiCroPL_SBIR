@@ -44,6 +44,13 @@ parser.add_argument('--num_trainable_ln', type=int, default=-1,
 parser.add_argument('--prompt_dim', type=int, default=768)
 parser.add_argument('--n_prompts', type=int, default=3)
 
+# Cross-domain (XDom) deep prompt params - port of HiCroPL re-purposed for sketch<->photo.
+parser.add_argument('--prompt_depth', type=int, default=9, help='Number of ViT layers to inject deep prompts into (1..vision_layers). XDom: photo->sketch on layers [1,cross_layer), sketch->photo on [cross_layer, prompt_depth).')
+parser.add_argument('--cross_layer', type=int, default=4, help='Split layer for cross-domain direction (photo guides sketch at i<cross_layer; sketch guides photo at i>=cross_layer).')
+parser.add_argument('--mapper_lr', type=float, default=1e-5, help='LR for cross-domain mappers (photo<->sketch CrossPromptAttention).')
+parser.add_argument('--lkp_lr', type=float, default=1e-5, help='LR for LKP modules (AttentionPooling + proxy tokens).')
+parser.add_argument('--mapper_heads', type=int, default=8, help='Number of attention heads in CrossPromptAttention and AttentionPooling.')
+
 # CLIP-AT baseline params (Sain et al. CVPR'23)
 parser.add_argument('--n_ctx', type=int, default=3, help='Number of visual prompt tokens (CLIP-AT: K=3)')
 parser.add_argument('--ctx_init', type=str, default='a photo of a', help='Hard text template for the photo modality (replaced by learnable text_prompt_photo)')

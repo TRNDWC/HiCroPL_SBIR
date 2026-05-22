@@ -2,36 +2,37 @@ import torch
 from src.clip import clip
 
 def load_clip_to_cpu(opts, zero_shot_model=False):
-    """
-    Load CLIP model to CPU and rebuild with design details (HiCroPL/MaPLe style).
-    
+    """Load CLIP and build with cross-domain (XDom) deep-prompt routing on the visual side.
+
+    With ``trainer='XDom'`` and ``vision_depth>0``, the visual Transformer uses
+    ``ResidualAttentionBlock_XDom`` for the first ``vision_depth`` layers, which lets
+    layer-i deep prompts swap into the trailing ``n_ctx`` slots of the patch stream.
+    The text Transformer always stays vanilla.
+
     Args:
-        opts: Configuration object with backbone, prompt_depth, n_ctx, etc.
-        zero_shot_model: If True, uses 'IVLP' trainer with zero prompt depth.
+        opts: Config; reads ``backbone``, ``prompt_depth``, ``n_ctx``.
+        zero_shot_model: If True, returns a vanilla CLIP (no deep-prompt blocks)
+            suitable as a frozen teacher for distillation.
     """
     backbone_name = opts.backbone
-    
-    if not zero_shot_model:
-        trainer = opts.clip_trainer if opts.clip_trainer in {"CoOp", "CoCoOp"} else "CoOp"
+
+    if zero_shot_model:
         design_details = {
-            "trainer": trainer,
+            "trainer": "IVLP",
             "vision_depth": 0,
             "language_depth": 0,
             "vision_ctx": 0,
             "language_ctx": 0,
         }
     else:
-        # Return base CLIP model (IVLP with depth 0) for generating frozen VL features
         design_details = {
-            "trainer": 'IVLP',
-            "vision_depth": 0,
+            "trainer": "XDom",
+            "vision_depth": int(getattr(opts, "prompt_depth", 1)),
             "language_depth": 0,
-            "vision_ctx": 0,
+            "vision_ctx": int(getattr(opts, "n_ctx", 3)),
             "language_ctx": 0,
         }
-    
-    # clip.load already handles build_model internally if design_details is provided.
-    # We use "cpu" to match the original HiCroPL function name, though it can be moved to GPU later.
+
     model, _ = clip.load(backbone_name, device="cpu", design_details=design_details)
     return model
 

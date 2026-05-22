@@ -192,19 +192,84 @@ class ResidualAttentionBlock(nn.Module):
         return x
 
 
+class ResidualAttentionBlock_XDom(nn.Module):
+    """Visual-only deep-prompt block for cross-domain (sketch/photo) prompt learning.
+
+    Mirrors HiCroPL's ResidualAttentionBlock_HiCroPL on the visual branch: when
+    `add_prompt=True` and `i > 0`, the trailing `n_ctx` tokens of `x` (the prompt
+    slots concatenated at layer 0) are swapped out for `deeper_prompts[i-1]` before
+    self-attention runs. At `i == 0`, the block is a no-op on the prompts (they
+    were already injected by VisionTransformer.forward).
+
+    Param structure (attn / ln_1 / mlp / ln_2) matches the vanilla
+    `ResidualAttentionBlock`, so CLIP state_dict loads with identical keys.
+    """
+
+    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None,
+                 add_prompt: bool = False, i: int = 0, n_ctx: int = 0):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(d_model, n_head)
+        self.ln_1 = LayerNorm(d_model)
+        self.mlp = nn.Sequential(OrderedDict([
+            ("c_fc", nn.Linear(d_model, d_model * 4)),
+            ("gelu", QuickGELU()),
+            ("c_proj", nn.Linear(d_model * 4, d_model)),
+        ]))
+        self.ln_2 = LayerNorm(d_model)
+        self.attn_mask = attn_mask
+        self.i = i
+        self.n_ctx = n_ctx
+        self.add_prompt = add_prompt if i != 0 else False
+
+    def attention(self, x: torch.Tensor):
+        self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
+        return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
+
+    def forward(self, inputs):
+        x, deeper_prompts = inputs
+        if self.add_prompt and self.n_ctx > 0 and deeper_prompts is not None \
+                and len(deeper_prompts) >= self.i:
+            # x: [L, N, D]; trailing n_ctx slots are the prompt tokens from previous layer.
+            prefix = x[: x.shape[0] - self.n_ctx, :, :]
+            ctx = deeper_prompts[self.i - 1]            # [n_ctx, D]
+            ctx = ctx.unsqueeze(1).expand(-1, x.shape[1], -1).to(x.dtype)
+            x = torch.cat([prefix, ctx], dim=0)
+        x = x + self.attention(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        return [x, deeper_prompts]
+
+
 class Transformer(nn.Module):
-    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None):
+    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None,
+                 design_details: dict = None):
         super().__init__()
         self.width = width
         self.layers = layers
-        self.resblocks = nn.Sequential(*[ResidualAttentionBlock(width, heads, attn_mask) for _ in range(layers)])
+        self.use_xdom = False
+        if design_details is not None and design_details.get("trainer") == "XDom" \
+                and design_details.get("vision_depth", 0) > 0:
+            prompts_needed = design_details["vision_depth"]
+            n_ctx = design_details["vision_ctx"]
+            self.use_xdom = True
+            self.resblocks = nn.Sequential(*[
+                ResidualAttentionBlock_XDom(width, heads, attn_mask,
+                                            add_prompt=(i < prompts_needed),
+                                            i=i, n_ctx=n_ctx)
+                for i in range(layers)
+            ])
+        else:
+            self.resblocks = nn.Sequential(*[ResidualAttentionBlock(width, heads, attn_mask) for _ in range(layers)])
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, deeper_prompts: list = None):
+        if self.use_xdom:
+            out = self.resblocks([x, deeper_prompts if deeper_prompts is not None else []])
+            return out[0]
         return self.resblocks(x)
 
 
 class VisionTransformer(nn.Module):
-    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int,
+                 output_dim: int, design_details: dict = None):
         super().__init__()
         self.input_resolution = input_resolution
         self.output_dim = output_dim
@@ -215,12 +280,12 @@ class VisionTransformer(nn.Module):
         self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))
         self.ln_pre = LayerNorm(width)
 
-        self.transformer = Transformer(width, layers, heads)
+        self.transformer = Transformer(width, layers, heads, design_details=design_details)
 
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
-    def forward(self, x: torch.Tensor, prompt: torch.Tensor = None):
+    def forward(self, x: torch.Tensor, prompt: torch.Tensor = None, deeper_prompts: list = None):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
@@ -232,7 +297,7 @@ class VisionTransformer(nn.Module):
         x = self.ln_pre(x)
 
         x = x.permute(1, 0, 2)  # NLD -> LND
-        x = self.transformer(x)
+        x = self.transformer(x, deeper_prompts=deeper_prompts)
         x = x.permute(1, 0, 2)  # LND -> NLD
 
         x = self.ln_post(x[:, 0, :])
@@ -256,7 +321,8 @@ class CLIP(nn.Module):
                  vocab_size: int,
                  transformer_width: int,
                  transformer_heads: int,
-                 transformer_layers: int
+                 transformer_layers: int,
+                 design_details: dict = None,
                  ):
         super().__init__()
 
@@ -279,7 +345,8 @@ class CLIP(nn.Module):
                 width=vision_width,
                 layers=vision_layers,
                 heads=vision_heads,
-                output_dim=embed_dim
+                output_dim=embed_dim,
+                design_details=design_details,
             )
 
         self.transformer = Transformer(
@@ -340,11 +407,13 @@ class CLIP(nn.Module):
     def dtype(self):
         return self.visual.conv1.weight.dtype
 
-    def encode_image(self, image, prompt=None):
+    def encode_image(self, image, prompt=None, deeper_prompts=None):
+        kwargs = {}
         if prompt is not None:
-            return self.visual(image.type(self.dtype), prompt.type(self.dtype))
-        else:
-            return self.visual(image.type(self.dtype))
+            kwargs["prompt"] = prompt.type(self.dtype)
+        if deeper_prompts is not None:
+            kwargs["deeper_prompts"] = [p.type(self.dtype) for p in deeper_prompts]
+        return self.visual(image.type(self.dtype), **kwargs)
 
     def encode_text(self, text):
         x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
@@ -402,7 +471,7 @@ def convert_weights(model: nn.Module):
     model.apply(_convert_weights_to_fp16)
 
 
-def build_model(state_dict: dict):
+def build_model(state_dict: dict, design_details: dict = None):
     vit = "visual.proj" in state_dict
 
     if vit:
@@ -430,7 +499,8 @@ def build_model(state_dict: dict):
     model = CLIP(
         embed_dim,
         image_resolution, vision_layers, vision_width, vision_patch_size,
-        context_length, vocab_size, transformer_width, transformer_heads, transformer_layers
+        context_length, vocab_size, transformer_width, transformer_heads, transformer_layers,
+        design_details=design_details,
     )
 
     for key in ["input_resolution", "context_length", "vocab_size"]:
