@@ -3,18 +3,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def info_nce(sketch_feat, photo_feat, temperature):
-    """Base InfoNCE (sketch -> photo).
+def cross_loss(feature_1, feature_2, temperature):
+    """Symmetric NT-Xent / InfoNCE over two views (ported from feature/check).
 
-    Query = sketch, keys = in-batch photos. For sketch i the positive is photo i (diagonal);
-    the other B-1 photos are negatives. Single direction, matching the SBIR retrieval
-    objective (query a photo gallery with a sketch).
+    Treats (feature_1[i], feature_2[i]) as the only positive pair; every other sample in
+    the 2*B stack is a negative. This is instance-level contrast (category labels ignored).
     """
-    sketch = F.normalize(sketch_feat, dim=1)
-    photo = F.normalize(photo_feat, dim=1)
-    logits = sketch @ photo.t() / temperature          # (B, B)
-    labels = torch.arange(sketch.shape[0], device=sketch.device)
-    return F.cross_entropy(logits, labels)
+    device = feature_1.device
+    labels = torch.cat([torch.arange(len(feature_1)) for _ in range(2)], dim=0)
+    labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float().to(device)
+
+    feature_1 = F.normalize(feature_1, dim=1)
+    feature_2 = F.normalize(feature_2, dim=1)
+    features = torch.cat((feature_1, feature_2), dim=0)            # (2B, D)
+
+    similarity_matrix = torch.matmul(features, features.T)         # (2B, 2B)
+
+    mask = torch.eye(labels.shape[0], dtype=torch.bool).to(device)
+    labels = labels[~mask].view(labels.shape[0], -1)
+    similarity_matrix = similarity_matrix[~mask].view(similarity_matrix.shape[0], -1)
+
+    positives = similarity_matrix[labels.bool()].view(labels.shape[0], -1)   # (2B, 1)
+    negatives = similarity_matrix[~labels.bool()].view(similarity_matrix.shape[0], -1)
+
+    logits = torch.cat([positives, negatives], dim=1) / temperature
+    targets = torch.zeros(logits.shape[0], dtype=torch.long, device=device)
+    return F.cross_entropy(logits, targets)
 
 
 def loss_fn_hicropl(args, features):
@@ -50,7 +64,7 @@ def loss_fn_hicropl(args, features):
         loss_align = lambda_cross_modal * triplet_fn(sketch_feat, photo_feat, neg_feat)
     else:
         temperature = getattr(args, 'temperature', 0.07)
-        loss_align = lambda_cross_modal * info_nce(sketch_feat, photo_feat, temperature)
+        loss_align = lambda_cross_modal * cross_loss(sketch_feat, photo_feat, temperature)
 
     loss_ce_photo = F.cross_entropy(logits_photo, label)
     loss_ce_sketch = F.cross_entropy(logits_sketch, label)
