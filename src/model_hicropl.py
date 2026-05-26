@@ -309,56 +309,86 @@ class HiCroPL_SBIR(pl.LightningModule):
         similarity_matrix = query_features @ gallery_features.t()
 
         dataset = getattr(self.args, 'dataset', 'sketchy')
-        if dataset == "sketchy_2" or dataset == "sketchy_ext":
-            map_k = 200
+        if dataset in ("sketchy_2", "sketchy_ext"):
+            map_k = 200      # primary metric = mAP@200 (Sketchy extended protocol)
             p_k = 200
         elif dataset == "quickdraw":
-            map_k = 0
+            map_k = 0        # primary metric = mAP@all
             p_k = 200
         else:
             map_k = 0
             p_k = 100
 
-        ap = torch.zeros(len(query_features), device=self.device)
-        precision = torch.zeros(len(query_features), device=self.device)
+        n_g = gallery_features.shape[0]
+        ranks = torch.arange(1, n_g + 1, device=self.device, dtype=torch.float32)
+        kk = min(map_k, n_g) if map_k != 0 else n_g
+
+        ap_all = torch.zeros(len(query_features), device=self.device)          # mAP@all (chuẩn, chia R)
+        ap_k_std = torch.zeros(len(query_features), device=self.device)        # mAP@k chuẩn SBIR (chia min(R,k))
+        ap_k_lenient = torch.zeros(len(query_features), device=self.device)    # torchmetrics top_k (bản cũ, để đối chiếu)
+        precision = torch.zeros(len(query_features), device=self.device)       # P@p_k = relevant trong top-p_k / p_k
 
         for idx in range(len(query_features)):
             category = all_sketch_category[idx]
-            distance = similarity_matrix[idx]
+            sim = similarity_matrix[idx]
             target = (all_photo_category == category)
+            R = target.sum().clamp(min=1).float()
 
+            # Sắp xếp gallery theo similarity giảm dần, lấy relevance theo thứ hạng.
+            order = torch.argsort(sim, descending=True)
+            rel = target[order].float()
+            cum = torch.cumsum(rel, dim=0)
+            prec_at = cum / ranks                                # precision@mỗi rank
+
+            # mAP@all: sum(precision@hit) / tổng số relevant
+            ap_all[idx] = (prec_at * rel).sum() / R
+
+            # mAP@k chuẩn SBIR: chỉ xét top-k, chuẩn hoá theo min(R, k)
+            denom_k = torch.minimum(R, torch.tensor(float(kk), device=self.device))
+            ap_k_std[idx] = (prec_at[:kk] * rel[:kk]).sum() / denom_k
+
+            # Bản lenient cũ (chuẩn hoá theo relevant-trong-top-k) — chỉ để so sánh
             if map_k != 0:
-                top_k_actual = min(map_k, len(gallery_features))
-                ap[idx] = retrieval_average_precision(distance, target, top_k=top_k_actual)
+                ap_k_lenient[idx] = retrieval_average_precision(sim, target, top_k=kk)
             else:
-                ap[idx] = retrieval_average_precision(distance, target)
+                ap_k_lenient[idx] = ap_all[idx]
 
-            precision[idx] = retrieval_precision(distance, target, top_k=p_k)
+            # P@p_k = (relevant trong top-p_k) / p_k
+            pk_actual = min(p_k, n_g)
+            precision[idx] = rel[:pk_actual].sum() / p_k
 
-        mAP = torch.mean(ap)
+        m_ap_all = torch.mean(ap_all)
+        m_ap_k_std = torch.mean(ap_k_std)
+        m_ap_k_lenient = torch.mean(ap_k_lenient)
         mean_precision = torch.mean(precision)
 
-        self.log("mAP", mAP, on_step=False, on_epoch=True)
-        self.log(f"P@{p_k}", mean_precision, on_step=False, on_epoch=True)
-        self.log("val_mAP", mAP, on_step=False, on_epoch=True, prog_bar=False)
-        self.log(f"val_P@{p_k}", mean_precision, on_step=False, on_epoch=True)
-        self.log("best_mAP", self.best_metric, on_step=False, on_epoch=True, prog_bar=False)
+        # mAP chính thức theo giao thức dataset: ext -> mAP@200 chuẩn; còn lại -> mAP@all.
+        mAP = m_ap_k_std if map_k != 0 else m_ap_all
 
+        # Log đầy đủ cả 3 biến thể để đối chiếu với paper.
+        self.log("mAP", mAP, on_step=False, on_epoch=True)
+        self.log("val_mAP", mAP, on_step=False, on_epoch=True, prog_bar=False)
+        self.log("val_map_all", m_ap_all, on_step=False, on_epoch=True)
         if map_k != 0:
-            self.log(f"val_map_{map_k}", mAP, on_step=False, on_epoch=True)
-        else:
-            self.log("val_map_all", mAP, on_step=False, on_epoch=True)
+            self.log(f"val_map_{map_k}", m_ap_k_std, on_step=False, on_epoch=True)
+            self.log(f"val_map_{map_k}_lenient", m_ap_k_lenient, on_step=False, on_epoch=True)
+        self.log(f"P@{p_k}", mean_precision, on_step=False, on_epoch=True)
+        self.log(f"val_P@{p_k}", mean_precision, on_step=False, on_epoch=True)
         self.log(f"val_p_{p_k}", mean_precision, on_step=False, on_epoch=True)
+        self.log("best_mAP", self.best_metric, on_step=False, on_epoch=True, prog_bar=False)
 
         if self.global_step > 0:
             self.best_metric = self.best_metric if (self.best_metric > mAP.item()) else mAP.item()
 
         if map_k != 0:
-            self.print('mAP@{}: {:.4f}, P@{}: {:.4f}, Best mAP: {:.4f}'.format(
-                map_k, mAP.item(), p_k, mean_precision.item(), self.best_metric))
+            self.print(
+                'mAP@{} (SBIR-std): {:.4f} | mAP@all: {:.4f} | mAP@{} (lenient/old): {:.4f} | '
+                'P@{}: {:.4f} | Best mAP: {:.4f}'.format(
+                    map_k, m_ap_k_std.item(), m_ap_all.item(), map_k, m_ap_k_lenient.item(),
+                    p_k, mean_precision.item(), self.best_metric))
         else:
-            self.print('mAP@all: {:.4f}, P@{}: {:.4f}, Best mAP: {:.4f}'.format(
-                mAP.item(), p_k, mean_precision.item(), self.best_metric))
+            self.print('mAP@all: {:.4f} | P@{}: {:.4f} | Best mAP: {:.4f}'.format(
+                m_ap_all.item(), p_k, mean_precision.item(), self.best_metric))
 
         train_loss = self.trainer.callback_metrics.get("train_loss", None)
         if train_loss is not None:
