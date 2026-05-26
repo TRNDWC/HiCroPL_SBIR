@@ -131,6 +131,11 @@ class CustomCLIP(nn.Module):
 
         self.logit_scale = self.clip.logit_scale
 
+        # ZS-residual ensemble (CoPrompt/HiCroPL style): combine the deep-prompted feature with
+        # a prompt-free pass through the SAME (LN+QKV-trainable) backbone, then renormalize.
+        # A robust generalist stream (prompt-free) regularizes the prompt-adapted specialist.
+        self.use_residual = bool(int(getattr(cfg, "zs_residual", 1)))
+
         # Per-modality hard templates. The first n_ctx context tokens after [SOS] will be
         # REPLACED at forward time by learnable per-modality prompts (CoOp style); the literal
         # context words here only set positional structure. The class-name suffix differs
@@ -274,12 +279,23 @@ class CustomCLIP(nn.Module):
             photo_layers, sketch_layers = self.compute_cross_prompts()
 
         layers = sketch_layers if modality == "sketch" else photo_layers
+        x = x.type(self.dtype)
         if self.n_ctx == 0 or self.prompt_depth == 0:
-            return self.clip.encode_image(x.type(self.dtype))
+            prompted = self.clip.encode_image(x)
+        else:
+            shallow = layers[0].unsqueeze(0).expand(x.shape[0], -1, -1)    # [B, n_ctx, vis_dim]
+            deeper = layers[1:] if self.prompt_depth > 1 else None
+            prompted = self.clip.encode_image(x, prompt=shallow, deeper_prompts=deeper)
 
-        shallow = layers[0].unsqueeze(0).expand(x.shape[0], -1, -1)        # [B, n_ctx, vis_dim]
-        deeper = layers[1:] if self.prompt_depth > 1 else None
-        return self.clip.encode_image(x.type(self.dtype), prompt=shallow, deeper_prompts=deeper)
+        if not self.use_residual:
+            return prompted
+
+        # Prompt-free generalist stream through the same backbone, ensembled with the prompted one.
+        plain = self.clip.encode_image(x)
+        prompted = prompted / prompted.norm(dim=-1, keepdim=True)
+        plain = plain / plain.norm(dim=-1, keepdim=True)
+        mixed = prompted + plain
+        return mixed / mixed.norm(dim=-1, keepdim=True)
 
     def encode_text_prompted(self, modality):
         """CoOp-style prompted text encoding (per modality).

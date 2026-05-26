@@ -50,6 +50,7 @@ parser.add_argument('--cross_layer', type=int, default=4, help='Split layer for 
 parser.add_argument('--mapper_lr', type=float, default=1e-5, help='LR for cross-domain mappers (photo<->sketch CrossPromptAttention).')
 parser.add_argument('--lkp_lr', type=float, default=1e-5, help='LR for LKP modules (AttentionPooling + proxy tokens).')
 parser.add_argument('--mapper_heads', type=int, default=8, help='Number of attention heads in CrossPromptAttention and AttentionPooling.')
+parser.add_argument('--zs_residual', type=int, default=1, help='1=ensemble prompted feature with a prompt-free pass through the same backbone (CoPrompt/HiCroPL residual); 0=prompted only.')
 
 # CLIP-AT baseline params (Sain et al. CVPR'23)
 parser.add_argument('--n_ctx', type=int, default=3, help='Number of visual prompt tokens (CLIP-AT: K=3)')
