@@ -322,35 +322,44 @@ class HiCroPL_SBIR(pl.LightningModule):
         ranks = torch.arange(1, n_g + 1, device=self.device, dtype=torch.float32)
         kk = min(map_k, n_g) if map_k != 0 else n_g
 
-        ap = torch.zeros(len(query_features), device=self.device)
+        ap_lenient = torch.zeros(len(query_features), device=self.device)  # mAP@k ÷ relevant-in-top-k (CDUF/doodle2search)
+        ap_all = torch.zeros(len(query_features), device=self.device)      # mAP@all ÷ R (CLIP-AT / ZSE-SBIR map_all)
+        ap_strict = torch.zeros(len(query_features), device=self.device)   # mAP@k ÷ min(R,k) (SAKE / ZSE-SBIR strict)
         precision = torch.zeros(len(query_features), device=self.device)
 
         for idx in range(len(query_features)):
             category = all_sketch_category[idx]
             sim = similarity_matrix[idx]
             target = (all_photo_category == category)
+            R = target.sum().clamp(min=1).float()
 
             # Xếp gallery theo similarity giảm dần, lấy relevance theo thứ hạng.
             order = torch.argsort(sim, descending=True)
             rel = target[order].float()
             prec_at = torch.cumsum(rel, dim=0) / ranks           # precision@mỗi rank
 
-            # mAP lenient: trung bình precision@hit trên các relevant nằm trong top-k,
-            # chia theo số relevant-trong-top-k. k=200 (ext) -> mAP@200 khớp CDUF/doodle2search;
-            # k=all (còn lại) -> mAP@all chuẩn (chia tổng relevant R).
-            rel_k = rel[:kk]
-            ap[idx] = (prec_at[:kk] * rel_k).sum() / rel_k.sum().clamp(min=1)
+            # Tử số chung cho top-k = tổng precision@hit của các relevant trong top-k.
+            hit_k = (prec_at[:kk] * rel[:kk]).sum()
+            ap_lenient[idx] = hit_k / rel[:kk].sum().clamp(min=1)                                  # ÷ rel-in-top-k
+            ap_strict[idx] = hit_k / torch.minimum(R, torch.tensor(float(kk), device=self.device))  # ÷ min(R,k)
+            ap_all[idx] = (prec_at * rel).sum() / R                                                # ÷ R, full ranking
 
             # P@p_k = (relevant trong top-p_k) / p_k
             precision[idx] = rel[:min(p_k, n_g)].sum() / p_k
 
-        mAP = torch.mean(ap)
+        m_lenient = torch.mean(ap_lenient)
+        m_all = torch.mean(ap_all)
+        m_strict = torch.mean(ap_strict)
         mean_precision = torch.mean(precision)
 
-        map_key = f"val_map_{map_k}" if map_k != 0 else "val_map_all"
+        # Monitor: ext -> mAP@200 lenient (val_map_200); còn lại -> mAP@all (lenient@all == mAP@all).
+        mAP = m_lenient
         self.log("mAP", mAP, on_step=False, on_epoch=True)
         self.log("val_mAP", mAP, on_step=False, on_epoch=True, prog_bar=False)
-        self.log(map_key, mAP, on_step=False, on_epoch=True)
+        self.log("val_map_all", m_all, on_step=False, on_epoch=True)
+        if map_k != 0:
+            self.log(f"val_map_{map_k}", m_lenient, on_step=False, on_epoch=True)
+            self.log(f"val_map_{map_k}_strict", m_strict, on_step=False, on_epoch=True)
         self.log(f"P@{p_k}", mean_precision, on_step=False, on_epoch=True)
         self.log(f"val_P@{p_k}", mean_precision, on_step=False, on_epoch=True)
         self.log(f"val_p_{p_k}", mean_precision, on_step=False, on_epoch=True)
@@ -359,9 +368,15 @@ class HiCroPL_SBIR(pl.LightningModule):
         if self.global_step > 0:
             self.best_metric = max(self.best_metric, mAP.item())
 
-        map_label = f"mAP@{map_k} (lenient)" if map_k != 0 else "mAP@all"
-        self.print('{}: {:.4f} | P@{}: {:.4f} | Best mAP: {:.4f}'.format(
-            map_label, mAP.item(), p_k, mean_precision.item(), self.best_metric))
+        if map_k != 0:
+            self.print(
+                'mAP@{} lenient: {:.4f} | mAP@all: {:.4f} | mAP@{} strict: {:.4f} | '
+                'P@{}: {:.4f} | Best mAP: {:.4f}'.format(
+                    map_k, m_lenient.item(), m_all.item(), map_k, m_strict.item(),
+                    p_k, mean_precision.item(), self.best_metric))
+        else:
+            self.print('mAP@all: {:.4f} | P@{}: {:.4f} | Best mAP: {:.4f}'.format(
+                m_all.item(), p_k, mean_precision.item(), self.best_metric))
 
         train_loss = self.trainer.callback_metrics.get("train_loss", None)
         if train_loss is not None:
