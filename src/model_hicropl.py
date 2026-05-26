@@ -90,15 +90,23 @@ class CustomCLIP(nn.Module):
             nn.init.normal_(self.visual_prompt_sketch, std=0.02)
             nn.init.normal_(self.visual_prompt_photo, std=0.02)
 
-        # Two separate learnable text prompts, CoOp-style, injected at the first text-encoder layer.
-        # They REPLACE the n_ctx context tokens right after [SOS]; class-name suffix + [EOT] + pad
-        # are held as frozen buffers.
+        # Text branch mode:
+        #   'template'  -> CLIP-AT style: hard frozen template ("a photo/sketch of a {cls}"),
+        #                  encoded by the (LN-trainable) text encoder, NO learnable text prompt.
+        #   'learnable' -> CoOp-style: learnable context tokens replace the template words.
+        self.text_prompt_mode = getattr(cfg, "text_prompt_mode", "template")
+
+        # Per-modality context tokens. Kept as Parameters for both modes, but frozen (unused)
+        # under 'template' so the optimizer skips them.
         prompt_dim_t = self.clip.ln_final.weight.shape[0]
         self.text_prompt_sketch = nn.Parameter(torch.empty(n_ctx, prompt_dim_t, dtype=self.dtype))
         self.text_prompt_photo = nn.Parameter(torch.empty(n_ctx, prompt_dim_t, dtype=self.dtype))
         if n_ctx > 0:
             nn.init.normal_(self.text_prompt_sketch, std=0.02)
             nn.init.normal_(self.text_prompt_photo, std=0.02)
+        if self.text_prompt_mode == "template":
+            self.text_prompt_sketch.requires_grad_(False)
+            self.text_prompt_photo.requires_grad_(False)
 
         # Cache the frozen [SOS] prefix and [class + EOT + pad] suffix embeddings PER MODALITY.
         with torch.no_grad():
@@ -134,7 +142,8 @@ class CustomCLIP(nn.Module):
             tokenized = self.tokenized_photo
 
         n_cls = prefix.shape[0]
-        if ctx.numel() == 0:
+        # CLIP-AT template mode: encode the hard template directly (no learnable context).
+        if self.text_prompt_mode == "template" or ctx.numel() == 0:
             return self.clip.encode_text(tokenized)
 
         ctx_expanded = ctx.unsqueeze(0).expand(n_cls, -1, -1)                  # (n_cls, n_ctx, d_t)
