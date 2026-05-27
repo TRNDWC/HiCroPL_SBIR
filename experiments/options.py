@@ -25,6 +25,8 @@ parser.add_argument('--clip_lr', type=float, default=1e-4)
 parser.add_argument('--clip_LN_lr', type=float, default=1e-5)
 parser.add_argument('--prompt_lr', type=float, default=1e-5)
 parser.add_argument('--linear_lr', type=float, default=1e-4)
+parser.add_argument('--weight_decay', type=float, default=0.0,
+                    help='Adam weight decay. CLIP-AT paper does not use weight decay (=0).')
 parser.add_argument('--batch_size', type=int, default=64)
 parser.add_argument('--test_batch_size', type=int, default=1024)
 parser.add_argument('--epochs', type=int, default=60)

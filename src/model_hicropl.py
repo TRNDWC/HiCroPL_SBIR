@@ -262,7 +262,7 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         prompt_lr = getattr(self.cfg, 'prompt_lr', 1e-5)
         clip_ln_lr = getattr(self.cfg, 'clip_LN_lr', 1e-5)
-        weight_decay = getattr(self.cfg, 'weight_decay', 1e-4)
+        weight_decay = getattr(self.cfg, 'weight_decay', 0.0)
 
         return torch.optim.Adam([
             {'params': clip_params, 'lr': clip_ln_lr},
