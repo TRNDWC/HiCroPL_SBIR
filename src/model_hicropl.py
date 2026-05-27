@@ -58,6 +58,16 @@ class CustomCLIP(nn.Module):
         self.clip = copy.deepcopy(clip_model).to(original_device)
         self.clip.apply(freeze_all_but_bn)
 
+        # Optionally freeze the whole text branch (incl. its LayerNorm) so only the visual
+        # branch (LN + prompts) learns; text features become fixed zero-shot CLIP features.
+        if getattr(cfg, "freeze_text", False):
+            freeze_model(self.clip.transformer)        # text transformer (visual is self.clip.visual)
+            freeze_model(self.clip.token_embedding)
+            freeze_model(self.clip.ln_final)
+            self.clip.positional_embedding.requires_grad_(False)   # text positional embedding
+            self.clip.text_projection.requires_grad_(False)
+            print("freeze_text=True: text branch fully frozen (LN included); logit_scale stays shared.")
+
         def _count_trainable(m):
             total = sum(p.numel() for p in m.parameters())
             trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)

@@ -32,8 +32,10 @@ parser.add_argument('--workers', type=int, default=4)
 parser.add_argument('--backbone', type=str, default='ViT-B/32', 
                     choices=['ViT-B/32'], 
                     help='CLIP backbone name')
-parser.add_argument('--num_trainable_ln', type=int, default=-1, 
+parser.add_argument('--num_trainable_ln', type=int, default=-1,
                     help='Number of LayerNorm layers to train (counting from the end). -1 means all.')
+parser.add_argument('--freeze_text', action='store_true',
+                    help='Freeze the ENTIRE text branch (text transformer + token/positional embedding + ln_final + text_projection), including its LayerNorm. Visual branch still trains LN + prompts.')
 
 # Patch shuffle options (self-supervised auxiliary loss)
 # (patch-shuffle handled in FG training code; no CLI options required)
