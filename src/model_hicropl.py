@@ -178,25 +178,25 @@ class CustomCLIP(nn.Module):
         photo_feat = self.encode_visual(photo_tensor, "photo")
         neg_feat = self.encode_visual(neg_tensor, "photo")
 
-        text_feat_photo = self.encode_text_prompted("photo")
-        text_feat_sketch = self.encode_text_prompted("sketch")
+        # CLIP-AT: L_cls dùng MỘT bộ text anchor "a photo of a [class]" cho CẢ hai modality
+        # (paper không dùng template riêng cho sketch).
+        text_feat = self.encode_text_prompted("photo")
 
         # L2-normalise for cosine similarity / cosine-distance triplet
         sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
         photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
         neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
-        text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
-        text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
+        text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
 
         logit_scale = self.logit_scale.exp()
-        logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
-        logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
+        logits_photo = logit_scale * photo_feat @ text_feat.t()
+        logits_sketch = logit_scale * sketch_feat @ text_feat.t()
 
         return (
             photo_feat, logits_photo,
             sketch_feat, logits_sketch,
             neg_feat, label,
-            text_feat_photo, text_feat_sketch,
+            text_feat, text_feat,
         )
 
 
