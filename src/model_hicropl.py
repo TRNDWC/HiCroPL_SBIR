@@ -39,9 +39,9 @@ class CustomCLIP(nn.Module):
         LN + MHA QKV projections + naked Parameters open (~21.7M visual params).
       - Two visual prompts (sketch / photo), shallow, injected at the first ViT layer.
 
-    Extensions we keep on top of the official baseline (not in `model_LN_prompt.py`):
-      - Two CoOp-style learnable text prompts (sketch / photo), shallow.
-      - Text-template classification loss (L_class) using these prompted text features.
+    EXPERIMENT (đang chạy):
+      - TOÀN BỘ backbone (visual + text) đóng băng — chỉ 2 visual prompt train được.
+      - Nhánh text: hard template, KHÔNG learnable text token.
     """
 
     def __init__(self, cfg, clip_model, clip_model_frozen=None, classnames=None):
@@ -55,18 +55,10 @@ class CustomCLIP(nn.Module):
         self.dtype = clip_model.dtype
 
         # Single shared CLIP backbone (official CLIP-AT uses `self.clip` for both modalities).
+        # EXPERIMENT: freeze TOÀN BỘ (kể cả LayerNorm + MHA QKV + naked Params).
+        # Chỉ 4 bộ prompt (visual_sketch/photo, text_sketch/photo) train được.
         self.clip = copy.deepcopy(clip_model).to(original_device)
-        self.clip.apply(freeze_all_but_bn)
-
-        # Optionally freeze the whole text branch (incl. its LayerNorm) so only the visual
-        # branch (LN + prompts) learns; text features become fixed zero-shot CLIP features.
-        if getattr(cfg, "freeze_text", False):
-            freeze_model(self.clip.transformer)        # text transformer (visual is self.clip.visual)
-            freeze_model(self.clip.token_embedding)
-            freeze_model(self.clip.ln_final)
-            self.clip.positional_embedding.requires_grad_(False)   # text positional embedding
-            self.clip.text_projection.requires_grad_(False)
-            print("freeze_text=True: text branch fully frozen (LN included); logit_scale stays shared.")
+        freeze_model(self.clip)
 
         def _count_trainable(m):
             total = sum(p.numel() for p in m.parameters())
@@ -74,14 +66,22 @@ class CustomCLIP(nn.Module):
             return total, trainable
 
         c_tot, c_tr = _count_trainable(self.clip)
-        print(f"clip (visual + text, freeze_all_but_bn): trainable {c_tr:,} / total {c_tot:,}")
+        print(f"clip (visual + text, FROZEN ENTIRELY): trainable {c_tr:,} / total {c_tot:,}")
+
+        # Tách 2 visual encoder RIÊNG cho sketch và photo, cùng init từ CLIP pretrained.
+        # EXPERIMENT: cả 2 visual encoder đóng băng hoàn toàn — không train LN, QKV, naked Params.
+        self.visual_sketch = copy.deepcopy(clip_model.visual).to(original_device)
+        self.visual_photo = copy.deepcopy(clip_model.visual).to(original_device)
+        freeze_model(self.visual_sketch)
+        freeze_model(self.visual_photo)
+        vs_tot, vs_tr = _count_trainable(self.visual_sketch)
+        vp_tot, vp_tr = _count_trainable(self.visual_photo)
+        print(f"visual_sketch (FROZEN ENTIRELY): trainable {vs_tr:,} / total {vs_tot:,}")
+        print(f"visual_photo  (FROZEN ENTIRELY): trainable {vp_tr:,} / total {vp_tot:,}")
 
         self.logit_scale = self.clip.logit_scale
 
-        # Per-modality hard templates. The first n_ctx context tokens after [SOS] will be
-        # REPLACED at forward time by learnable per-modality prompts (CoOp style); the literal
-        # context words here only set positional structure. The class-name suffix differs
-        # only in whether tokens 1..1+n_ctx originally read 'a photo of a' or 'a sketch of a'.
+        # Per-modality hard templates encoded as-is qua text encoder (đông cứng).
         ctx_init_photo = getattr(cfg, "ctx_init", "a photo of a")
         ctx_init_sketch = getattr(cfg, "ctx_init_sketch", "a sketch of a")
         prompts_photo = [f"{ctx_init_photo} {name}.".replace("_", " ").strip() for name in classnames]
@@ -99,74 +99,31 @@ class CustomCLIP(nn.Module):
             nn.init.normal_(self.visual_prompt_sketch, std=0.02)
             nn.init.normal_(self.visual_prompt_photo, std=0.02)
 
-        # Text branch mode:
-        #   'template'  -> CLIP-AT style: hard frozen template ("a photo/sketch of a {cls}"),
-        #                  encoded by the (LN-trainable) text encoder, NO learnable text prompt.
-        #   'learnable' -> CoOp-style: learnable context tokens replace the template words.
-        self.text_prompt_mode = getattr(cfg, "text_prompt_mode", "template")
-
-        # Per-modality context tokens. Kept as Parameters for both modes, but frozen (unused)
-        # under 'template' so the optimizer skips them.
-        prompt_dim_t = self.clip.ln_final.weight.shape[0]
-        self.text_prompt_sketch = nn.Parameter(torch.empty(n_ctx, prompt_dim_t, dtype=self.dtype))
-        self.text_prompt_photo = nn.Parameter(torch.empty(n_ctx, prompt_dim_t, dtype=self.dtype))
-        if n_ctx > 0:
-            nn.init.normal_(self.text_prompt_sketch, std=0.02)
-            nn.init.normal_(self.text_prompt_photo, std=0.02)
-        if self.text_prompt_mode == "template":
-            self.text_prompt_sketch.requires_grad_(False)
-            self.text_prompt_photo.requires_grad_(False)
-
-        # Cache the frozen [SOS] prefix and [class + EOT + pad] suffix embeddings PER MODALITY.
-        with torch.no_grad():
-            embed_photo = self.clip.token_embedding(self.tokenized_photo).type(self.dtype)
-            embed_sketch = self.clip.token_embedding(self.tokenized_sketch).type(self.dtype)
-        # full_embed: (n_cls, 77, d_t). prefix = token 0 ([SOS]); suffix = tokens 1+n_ctx :
-        self.register_buffer("token_prefix_photo", embed_photo[:, :1, :])
-        self.register_buffer("token_suffix_photo", embed_photo[:, 1 + n_ctx:, :])
-        self.register_buffer("token_prefix_sketch", embed_sketch[:, :1, :])
-        self.register_buffer("token_suffix_sketch", embed_sketch[:, 1 + n_ctx:, :])
+        # Nhánh text: chỉ encode hard template "a photo of a [class]" / "a sketch of a [class]"
+        # qua text encoder (đã đóng băng hoàn toàn). KHÔNG có learnable token text.
 
     def encode_visual(self, x, modality):
-        """Encode image through the shared CLIP visual encoder with the modality-specific prompt."""
-        vp = self.visual_prompt_sketch if modality == "sketch" else self.visual_prompt_photo
-        prompt = vp.expand(x.shape[0], -1, -1) if vp.numel() > 0 else None
-        return self.clip.encode_image(x.type(self.dtype), prompt=prompt)
+        """Encode image through the MODALITY-SPECIFIC visual encoder + its prompt.
 
-    def encode_text_prompted(self, modality):
-        """CoOp-style prompted text encoding (per modality).
-
-        Splice [SOS, learnable_ctx_modality, class_suffix_modality] for every class, then run
-        the (LN-trainable) text transformer and pick the [EOT] position.
+        Hai visual encoder riêng (visual_sketch, visual_photo), cùng init từ CLIP pretrained
+        nhưng train độc lập (lệch CLIP-AT — paper dùng 1 backbone chung).
         """
         if modality == "sketch":
-            ctx = self.text_prompt_sketch
-            prefix = self.token_prefix_sketch
-            suffix = self.token_suffix_sketch
-            tokenized = self.tokenized_sketch
+            vp = self.visual_prompt_sketch
+            visual = self.visual_sketch
         else:
-            ctx = self.text_prompt_photo
-            prefix = self.token_prefix_photo
-            suffix = self.token_suffix_photo
-            tokenized = self.tokenized_photo
+            vp = self.visual_prompt_photo
+            visual = self.visual_photo
+        prompt = vp.expand(x.shape[0], -1, -1) if vp.numel() > 0 else None
+        x_typed = x.type(self.dtype)
+        if prompt is None:
+            return visual(x_typed)
+        return visual(x_typed, prompt.type(self.dtype))
 
-        n_cls = prefix.shape[0]
-        # CLIP-AT template mode: encode the hard template directly (no learnable context).
-        if self.text_prompt_mode == "template" or ctx.numel() == 0:
-            return self.clip.encode_text(tokenized)
-
-        ctx_expanded = ctx.unsqueeze(0).expand(n_cls, -1, -1)                  # (n_cls, n_ctx, d_t)
-        x = torch.cat([prefix, ctx_expanded, suffix], dim=1)                   # (n_cls, 77, d_t)
-
-        x = x + self.clip.positional_embedding.type(self.dtype)
-        x = x.permute(1, 0, 2)            # NLD -> LND
-        x = self.clip.transformer(x)
-        x = x.permute(1, 0, 2)            # LND -> NLD
-        x = self.clip.ln_final(x).type(self.dtype)
-
-        eot_idx = tokenized.argmax(dim=-1)
-        x = x[torch.arange(x.shape[0]), eot_idx] @ self.clip.text_projection
-        return x
+    def encode_text_template(self, modality):
+        """Encode hard template qua shared text encoder. KHÔNG có learnable token text."""
+        tokenized = self.tokenized_sketch if modality == "sketch" else self.tokenized_photo
+        return self.clip.encode_text(tokenized)
 
     def forward(self, x, classnames):
         sk_tensor = x[0]
@@ -180,7 +137,7 @@ class CustomCLIP(nn.Module):
 
         # CLIP-AT: L_cls dùng MỘT bộ text anchor "a photo of a [class]" cho CẢ hai modality
         # (paper không dùng template riêng cho sketch).
-        text_feat = self.encode_text_prompted("photo")
+        text_feat = self.encode_text_template("photo")
 
         # L2-normalise for cosine similarity / cosine-distance triplet
         sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
@@ -222,18 +179,13 @@ class HiCroPL_SBIR(pl.LightningModule):
     def on_fit_start(self):
         tokens_visual_sketch = self.model.visual_prompt_sketch.shape[0]
         tokens_visual_photo = self.model.visual_prompt_photo.shape[0]
-        tokens_text_sketch = self.model.text_prompt_sketch.shape[0]
-        tokens_text_photo = self.model.text_prompt_photo.shape[0]
         self.print(
             f"Learnable prompt tokens - visual/sketch: {tokens_visual_sketch}, "
-            f"visual/photo: {tokens_visual_photo}, "
-            f"text/sketch: {tokens_text_sketch}, text/photo: {tokens_text_photo}"
+            f"visual/photo: {tokens_visual_photo} (no text prompts)"
         )
         try:
             self.log('tokens_visual_sketch', tokens_visual_sketch, prog_bar=True, logger=True)
             self.log('tokens_visual_photo', tokens_visual_photo, prog_bar=True, logger=True)
-            self.log('tokens_text_sketch', tokens_text_sketch, prog_bar=True, logger=True)
-            self.log('tokens_text_photo', tokens_text_photo, prog_bar=True, logger=True)
         except Exception:
             pass
 
@@ -249,12 +201,13 @@ class HiCroPL_SBIR(pl.LightningModule):
         prompt_params = [
             p for p in [
                 self.model.visual_prompt_sketch, self.model.visual_prompt_photo,
-                self.model.text_prompt_sketch, self.model.text_prompt_photo,
             ]
             if p.requires_grad
         ]
 
-        clip_params = list(self.model.clip.parameters())
+        clip_params = (list(self.model.clip.parameters())
+                       + list(self.model.visual_sketch.parameters())
+                       + list(self.model.visual_photo.parameters()))
         clip_trainable = sum(p.numel() for p in clip_params if p.requires_grad)
 
         self.print(f"Trainable prompt params (visual + text, both modalities): {sum(p.numel() for p in prompt_params):,}")

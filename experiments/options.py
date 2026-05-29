@@ -36,8 +36,6 @@ parser.add_argument('--backbone', type=str, default='ViT-B/32',
                     help='CLIP backbone name')
 parser.add_argument('--num_trainable_ln', type=int, default=-1,
                     help='Number of LayerNorm layers to train (counting from the end). -1 means all.')
-parser.add_argument('--freeze_text', action='store_true',
-                    help='Freeze the ENTIRE text branch (text transformer + token/positional embedding + ln_final + text_projection), including its LayerNorm. Visual branch still trains LN + prompts.')
 
 # Patch shuffle options (self-supervised auxiliary loss)
 # (patch-shuffle handled in FG training code; no CLI options required)
@@ -50,13 +48,12 @@ parser.add_argument('--n_prompts', type=int, default=3)
 
 # CLIP-AT baseline params (Sain et al. CVPR'23)
 parser.add_argument('--n_ctx', type=int, default=3, help='Number of visual prompt tokens (CLIP-AT: K=3)')
-parser.add_argument('--ctx_init', type=str, default='a photo of a', help='Hard text template for the photo modality (replaced by learnable text_prompt_photo)')
-parser.add_argument('--ctx_init_sketch', type=str, default='a sketch of a', help='Hard text template for the sketch modality (replaced by learnable text_prompt_sketch)')
+parser.add_argument('--ctx_init', type=str, default='a photo of a', help='Hard text template for the photo modality (no learnable text tokens)')
+parser.add_argument('--ctx_init_sketch', type=str, default='a sketch of a', help='Hard text template for the sketch modality (no learnable text tokens)')
 parser.add_argument('--triplet_margin', type=float, default=0.2, help='Margin for triplet loss (CLIP-AT official: 0.2)')
 parser.add_argument('--temperature', type=float, default=0.07, help='Temperature for classification softmax')
 parser.add_argument('--lambda_cross_modal', type=float, default=1.0, help='Weight for sketch-photo alignment loss (triplet or InfoNCE)')
 parser.add_argument('--cross_modal_loss', type=str, default='triplet', choices=['infonce', 'triplet'], help='Sketch-photo alignment: triplet (CLIP-AT, default) or InfoNCE (in-batch negatives)')
-parser.add_argument('--text_prompt_mode', type=str, default='template', choices=['template', 'learnable'], help="Text branch: 'template' (CLIP-AT hard template, default) or 'learnable' (CoOp context tokens)")
 parser.add_argument('--lambda_ce', type=float, default=0.5, help='Weight for visual-text classification loss (CLIP-AT lambda1)')
 parser.add_argument('--lambda_consistency', type=float, default=1.0, help='Weight for visual distill consistency loss')
 parser.add_argument('--lambda_text_consistency', type=float, default=1.0, help='Weight for GPT text distill consistency loss')
