@@ -13,6 +13,20 @@ def freeze_model(m):
         param.requires_grad_(False)
 
 
+def unfreeze_ln(m):
+    """Mở lại weight/bias của mọi LayerNorm trong module.
+
+    Dùng SAU `freeze_model(...)` để thực thi pattern "chỉ LN trainable":
+        freeze_model(encoder)           # đông cứng tất cả
+        encoder.apply(unfreeze_ln)      # chỉ mở LN
+    """
+    if isinstance(m, nn.LayerNorm):
+        if hasattr(m, 'weight') and m.weight is not None:
+            m.weight.requires_grad_(True)
+        if hasattr(m, 'bias') and m.bias is not None:
+            m.bias.requires_grad_(True)
+
+
 def freeze_all_but_bn(m):
     """Official CLIP-AT freeze hook (Sain et al. CVPR'23).
 
@@ -40,8 +54,9 @@ class CustomCLIP(nn.Module):
       - Two visual prompts (sketch / photo), shallow, injected at the first ViT layer.
 
     EXPERIMENT (đang chạy):
-      - TOÀN BỘ backbone (visual + text) đóng băng — chỉ 2 visual prompt train được.
-      - Nhánh text: hard template, KHÔNG learnable text token.
+      - Backbone đóng băng, CHỈ LayerNorm trainable (visual_sketch, visual_photo, và text branch
+        trong self.clip). Orphan self.clip.visual giữ frozen.
+      - 2 visual prompt train được. Nhánh text: hard template, không learnable text token.
     """
 
     def __init__(self, cfg, clip_model, clip_model_frozen=None, classnames=None):
@@ -54,11 +69,13 @@ class CustomCLIP(nn.Module):
         original_device = next(clip_model.parameters()).device
         self.dtype = clip_model.dtype
 
-        # Single shared CLIP backbone (official CLIP-AT uses `self.clip` for both modalities).
-        # EXPERIMENT: freeze TOÀN BỘ (kể cả LayerNorm + MHA QKV + naked Params).
-        # Chỉ 4 bộ prompt (visual_sketch/photo, text_sketch/photo) train được.
+        # Single shared CLIP backbone. Pattern: freeze hết, rồi mở LN ở các encoder thực dùng.
+        # self.clip.visual là orphan (không dùng) -> giữ đông cứng hoàn toàn, KHÔNG mở LN ở đó.
+        # Nhánh text trong self.clip có dùng -> mở LN.
         self.clip = copy.deepcopy(clip_model).to(original_device)
         freeze_model(self.clip)
+        self.clip.transformer.apply(unfreeze_ln)        # text transformer: mở ln_1, ln_2 mỗi block
+        self.clip.ln_final.apply(unfreeze_ln)           # ln_final của text
 
         def _count_trainable(m):
             total = sum(p.numel() for p in m.parameters())
@@ -66,18 +83,20 @@ class CustomCLIP(nn.Module):
             return total, trainable
 
         c_tot, c_tr = _count_trainable(self.clip)
-        print(f"clip (visual + text, FROZEN ENTIRELY): trainable {c_tr:,} / total {c_tot:,}")
+        print(f"clip (text LN mở, orphan visual frozen): trainable {c_tr:,} / total {c_tot:,}")
 
         # Tách 2 visual encoder RIÊNG cho sketch và photo, cùng init từ CLIP pretrained.
-        # EXPERIMENT: cả 2 visual encoder đóng băng hoàn toàn — không train LN, QKV, naked Params.
+        # Pattern: freeze hết -> mở LN (ln_pre, ln_post, ln_1/ln_2 mỗi block).
         self.visual_sketch = copy.deepcopy(clip_model.visual).to(original_device)
         self.visual_photo = copy.deepcopy(clip_model.visual).to(original_device)
         freeze_model(self.visual_sketch)
         freeze_model(self.visual_photo)
+        self.visual_sketch.apply(unfreeze_ln)
+        self.visual_photo.apply(unfreeze_ln)
         vs_tot, vs_tr = _count_trainable(self.visual_sketch)
         vp_tot, vp_tr = _count_trainable(self.visual_photo)
-        print(f"visual_sketch (FROZEN ENTIRELY): trainable {vs_tr:,} / total {vs_tot:,}")
-        print(f"visual_photo  (FROZEN ENTIRELY): trainable {vp_tr:,} / total {vp_tot:,}")
+        print(f"visual_sketch (LN-only mở): trainable {vs_tr:,} / total {vs_tot:,}")
+        print(f"visual_photo  (LN-only mở): trainable {vp_tr:,} / total {vp_tot:,}")
 
         self.logit_scale = self.clip.logit_scale
 
