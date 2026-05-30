@@ -125,9 +125,11 @@ class Sketchy(torch.utils.data.Dataset):
         img_path = np.random.choice(self.all_photos_path[category])
         neg_path = np.random.choice(self.all_photos_path[np.random.choice(neg_classes)])
 
-        sk_data  = Image.open(sk_path).convert('RGB')
-        img_data = Image.open(img_path).convert('RGB')
-        neg_data = Image.open(neg_path).convert('RGB')
+        # ImageOps.pad: giữ tỉ lệ ảnh + đệm pixel đen ra vuông (khớp official CLIP-AT,
+        # tránh squash méo nét sketch khi Resize sau đó).
+        sk_data  = ImageOps.pad(Image.open(sk_path).convert('RGB'),  size=(self.opts.max_size, self.opts.max_size))
+        img_data = ImageOps.pad(Image.open(img_path).convert('RGB'), size=(self.opts.max_size, self.opts.max_size))
+        neg_data = ImageOps.pad(Image.open(neg_path).convert('RGB'), size=(self.opts.max_size, self.opts.max_size))
 
         sk_tensor  = self.transform(sk_data)
         img_tensor = self.transform(img_data)
@@ -191,14 +193,15 @@ class ValidDataset(torch.utils.data.Dataset):
                 self.paths.extend(sorted(glob.glob(os.path.join(self.args.data_dir, 'sketch', category, '*'))))
 
     def __getitem__(self, index):
-        filepath = self.paths[index]                
+        filepath = self.paths[index]
         category = filepath.split(os.path.sep)[-2]
-        
-        image = Image.open(filepath).convert('RGB')
+
+        max_size = getattr(self.args, 'max_size', 224)
+        image = ImageOps.pad(Image.open(filepath).convert('RGB'), size=(max_size, max_size))
         image_tensor = self.transform(image)
-        
+
         return image_tensor, self.all_categories.index(category)
-    
+
     def __len__(self):
         return len(self.paths)
 
