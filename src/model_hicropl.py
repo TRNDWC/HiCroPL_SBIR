@@ -89,8 +89,8 @@ class CustomCLIP(nn.Module):
         # Pattern: freeze hết -> mở LN (ln_pre, ln_post, ln_1/ln_2 mỗi block).
         self.visual_sketch = copy.deepcopy(clip_model.visual).to(original_device)
         self.visual_photo = copy.deepcopy(clip_model.visual).to(original_device)
-        freeze_model(self.visual_sketch)
-        freeze_model(self.visual_photo)
+        self.visual_sketch.apply(freeze_model)
+        self.visual_photo.apply(freeze_model)
         self.visual_sketch.apply(unfreeze_ln)
         self.visual_photo.apply(unfreeze_ln)
         vs_tot, vs_tr = _count_trainable(self.visual_sketch)
