@@ -25,12 +25,14 @@ class HiCroPL_SBIR_FG(HiCroPL_SBIR):
         reordered = (batch[1], batch[0], batch[4], batch[3], batch[2], batch[5])
 
         features = self.model(reordered, self.classnames)
-        loss = loss_fn_hicropl(self.args, features)
+        loss, loss_dict = loss_fn_hicropl(self.args, features)
 
         total_loss = loss
 
         self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False)
         self.log('train_loss', total_loss, on_step=False, on_epoch=True, prog_bar=False)
+        for k, v in loss_dict.items():
+            self.log(f'loss_parts/{k}', v, on_step=True, on_epoch=True, prog_bar=False, logger=True)
 
         self.train_loss_epoch.append(total_loss.detach())
 
