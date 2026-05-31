@@ -54,8 +54,9 @@ class CustomCLIP(nn.Module):
       - Two visual prompts (sketch / photo), shallow, injected at the first ViT layer.
 
     EXPERIMENT (đang chạy):
-      - Backbone đóng băng, CHỈ LayerNorm trainable (visual_sketch, visual_photo, và text branch
-        trong self.clip). Orphan self.clip.visual giữ frozen.
+      - **1 SHARED CLIP backbone** (self.clip), đúng official aneeshan95/Sketch_LVM.
+      - Freeze pattern: strict LN-only — `freeze_model(self.clip)` rồi `self.clip.apply(unfreeze_ln)`.
+        Mở LN ở MỌI block (visual ln_pre/ln_post/ln_1/ln_2 + text ln_1/ln_2 + ln_final).
       - 2 visual prompt train được. Nhánh text: hard template, không learnable text token.
     """
 
@@ -69,13 +70,14 @@ class CustomCLIP(nn.Module):
         original_device = next(clip_model.parameters()).device
         self.dtype = clip_model.dtype
 
-        # Single shared CLIP backbone. Pattern: freeze hết, rồi mở LN ở các encoder thực dùng.
-        # self.clip.visual là orphan (không dùng) -> giữ đông cứng hoàn toàn, KHÔNG mở LN ở đó.
-        # Nhánh text trong self.clip có dùng -> mở LN.
+        # 1 SHARED CLIP backbone — đúng official (aneeshan95/Sketch_LVM/model_LN_prompt.py).
+        # Tách 2 modality CHỈ bằng 2 visual prompt riêng. Pattern freeze: strict LN-only.
+        #   freeze_model(self.clip)      -> đông cứng TẤT CẢ params
+        #   self.clip.apply(unfreeze_ln) -> mở LN ở mọi nơi (visual: ln_pre/ln_post/ln_1/ln_2,
+        #                                                    text:   ln_1/ln_2 mỗi block + ln_final)
         self.clip = copy.deepcopy(clip_model).to(original_device)
         freeze_model(self.clip)
-        self.clip.transformer.apply(unfreeze_ln)        # text transformer: mở ln_1, ln_2 mỗi block
-        self.clip.ln_final.apply(unfreeze_ln)           # ln_final của text
+        self.clip.apply(unfreeze_ln)
 
         def _count_trainable(m):
             total = sum(p.numel() for p in m.parameters())
@@ -83,20 +85,11 @@ class CustomCLIP(nn.Module):
             return total, trainable
 
         c_tot, c_tr = _count_trainable(self.clip)
-        print(f"clip (text LN mở, orphan visual frozen): trainable {c_tr:,} / total {c_tot:,}")
-
-        # Tách 2 visual encoder RIÊNG cho sketch và photo, cùng init từ CLIP pretrained.
-        # Pattern: freeze hết -> mở LN (ln_pre, ln_post, ln_1/ln_2 mỗi block).
-        self.visual_sketch = copy.deepcopy(clip_model.visual).to(original_device)
-        self.visual_photo = copy.deepcopy(clip_model.visual).to(original_device)
-        self.visual_sketch.apply(freeze_model)
-        self.visual_photo.apply(freeze_model)
-        self.visual_sketch.apply(unfreeze_ln)
-        self.visual_photo.apply(unfreeze_ln)
-        vs_tot, vs_tr = _count_trainable(self.visual_sketch)
-        vp_tot, vp_tr = _count_trainable(self.visual_photo)
-        print(f"visual_sketch (LN-only mở): trainable {vs_tr:,} / total {vs_tot:,}")
-        print(f"visual_photo  (LN-only mở): trainable {vp_tr:,} / total {vp_tot:,}")
+        _, cv_tr = _count_trainable(self.clip.visual)
+        ct_tr = c_tr - cv_tr
+        print(f"clip (1 shared, LN-only): trainable {c_tr:,} / total {c_tot:,}")
+        print(f"  - visual side LN: {cv_tr:,}")
+        print(f"  - text   side LN: {ct_tr:,}")
 
         self.logit_scale = self.clip.logit_scale
 
@@ -122,22 +115,14 @@ class CustomCLIP(nn.Module):
         # qua text encoder (đã đóng băng hoàn toàn). KHÔNG có learnable token text.
 
     def encode_visual(self, x, modality):
-        """Encode image through the MODALITY-SPECIFIC visual encoder + its prompt.
+        """Encode image through the SHARED CLIP visual encoder + modality-specific prompt.
 
-        Hai visual encoder riêng (visual_sketch, visual_photo), cùng init từ CLIP pretrained
-        nhưng train độc lập (lệch CLIP-AT — paper dùng 1 backbone chung).
+        1 backbone chung `self.clip.visual`, tách bằng 2 visual prompt (v^s, v^p) —
+        đúng official aneeshan95/Sketch_LVM.
         """
-        if modality == "sketch":
-            vp = self.visual_prompt_sketch
-            visual = self.visual_sketch
-        else:
-            vp = self.visual_prompt_photo
-            visual = self.visual_photo
+        vp = self.visual_prompt_sketch if modality == "sketch" else self.visual_prompt_photo
         prompt = vp.expand(x.shape[0], -1, -1) if vp.numel() > 0 else None
-        x_typed = x.type(self.dtype)
-        if prompt is None:
-            return visual(x_typed)
-        return visual(x_typed, prompt.type(self.dtype))
+        return self.clip.encode_image(x.type(self.dtype), prompt=prompt)
 
     def encode_text_template(self, modality):
         """Encode hard template qua shared text encoder. KHÔNG có learnable token text."""
@@ -224,9 +209,7 @@ class HiCroPL_SBIR(pl.LightningModule):
             if p.requires_grad
         ]
 
-        clip_params = (list(self.model.clip.parameters())
-                       + list(self.model.visual_sketch.parameters())
-                       + list(self.model.visual_photo.parameters()))
+        clip_params = list(self.model.clip.parameters())
         clip_trainable = sum(p.numel() for p in clip_params if p.requires_grad)
 
         self.print(f"Trainable prompt params (visual + text, both modalities): {sum(p.numel() for p in prompt_params):,}")
