@@ -252,6 +252,9 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         self.best_metric = 1e-3
         self.distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
+        
+        # Lưu lại giá trị gốc do User cấu hình để dùng cho Warm-up
+        self.base_lambda_consistency = getattr(self.args, 'lambda_consistency', 1.0)
 
         self.test_photo_features = []
         self.test_sketch_features = []
@@ -259,7 +262,24 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.test_sketch_labels = []
 
     def on_train_epoch_start(self):
-        pass
+        # Thiết lập cơ chế Warm-up cho Visual Consistency Loss
+        warm_up_epochs = getattr(self.cfg, 'warmup_epochs', 5)
+        
+        if self.current_epoch < warm_up_epochs:
+            # Tăng tuyến tính từ 0.1 đến trọng số gốc (base_lambda_consistency)
+            progress = self.current_epoch / warm_up_epochs
+            current_lambda = 0.1 + (self.base_lambda_consistency - 0.1) * progress
+        else:
+            current_lambda = self.base_lambda_consistency
+            
+        # Ghi đè vào args để loss_fn_hicropl.py đọc được
+        self.args.lambda_consistency = current_lambda
+        
+        # Log vào TensorBoard để User theo dõi trực quan
+        self.log('hyperparams/lambda_consistency', current_lambda, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+        
+        if self.global_step == 0 or self.current_epoch <= warm_up_epochs:
+            self.print(f"[Warm-up] Epoch {self.current_epoch}: lambda_consistency = {current_lambda:.4f}")
 
     def on_fit_start(self):
         tokens_visual_sketch = self.model.visual_prompt_sketch.shape[0]
