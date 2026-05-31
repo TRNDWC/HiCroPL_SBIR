@@ -53,11 +53,11 @@ class CustomCLIP(nn.Module):
         LN + MHA QKV projections + naked Parameters open (~21.7M visual params).
       - Two visual prompts (sketch / photo), shallow, injected at the first ViT layer.
 
-    EXPERIMENT (đang chạy):
-      - **1 SHARED CLIP backbone** (self.clip), đúng official aneeshan95/Sketch_LVM.
-      - Freeze pattern: strict LN-only — `freeze_model(self.clip)` rồi `self.clip.apply(unfreeze_ln)`.
-        Mở LN ở MỌI block (visual ln_pre/ln_post/ln_1/ln_2 + text ln_1/ln_2 + ln_final).
-      - 2 visual prompt train được. Nhánh text: hard template, không learnable text token.
+    Freeze pattern (`clip.apply(freeze_all_but_bn)`):
+      - LN weight/bias: trainable (mọi block visual + text)
+      - MHA in_proj_weight / in_proj_bias: trainable (naked params, không bị freeze_all_but_bn chạm vào)
+      - class_embedding, positional_embedding, proj, token_embedding, text_projection: trainable
+      - Conv/Linear weight/bias: frozen
     """
 
     def __init__(self, cfg, clip_model, clip_model_frozen=None, classnames=None):
@@ -71,13 +71,10 @@ class CustomCLIP(nn.Module):
         self.dtype = clip_model.dtype
 
         # 1 SHARED CLIP backbone — đúng official (aneeshan95/Sketch_LVM/model_LN_prompt.py).
-        # Tách 2 modality CHỈ bằng 2 visual prompt riêng. Pattern freeze: strict LN-only.
-        #   freeze_model(self.clip)      -> đông cứng TẤT CẢ params
-        #   self.clip.apply(unfreeze_ln) -> mở LN ở mọi nơi (visual: ln_pre/ln_post/ln_1/ln_2,
-        #                                                    text:   ln_1/ln_2 mỗi block + ln_final)
+        # freeze_all_but_bn: freeze .weight/.bias của mọi module KHÔNG phải LayerNorm,
+        # để lại LN + naked params (in_proj, class_embedding, positional_embedding, proj...) trainable.
         self.clip = copy.deepcopy(clip_model).to(original_device)
-        freeze_model(self.clip)
-        self.clip.apply(unfreeze_ln)
+        self.clip.apply(freeze_all_but_bn)
 
         def _count_trainable(m):
             total = sum(p.numel() for p in m.parameters())
