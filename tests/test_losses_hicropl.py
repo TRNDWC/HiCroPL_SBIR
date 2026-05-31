@@ -66,14 +66,18 @@ class TestHiCroPLLosses(unittest.TestCase):
         expected_ce_sketch = F.cross_entropy(self.logits_sketch, self.label)
         expected_ce = self.args.lambda_ce * (expected_ce_photo + expected_ce_sketch)
 
-        # Specification 3: Text Consistency Loss (prompted text vs W_desc)
-        expected_cons_text_sketch = (1.0 - F.cosine_similarity(self.text_feat_sketch, self.W_sketch_desc, dim=-1)).mean()
-        expected_cons_text_photo = (1.0 - F.cosine_similarity(self.text_feat_photo, self.W_photo_desc, dim=-1)).mean()
+        # Specification 3: Text Consistency Loss (Residual Cosine)
+        res_text_sketch = self.text_feat_sketch + self.W_sketch_desc
+        res_text_photo = self.text_feat_photo + self.W_photo_desc
+        expected_cons_text_sketch = (1.0 - F.cosine_similarity(res_text_sketch, self.text_feat_sketch, dim=-1)).mean()
+        expected_cons_text_photo = (1.0 - F.cosine_similarity(res_text_photo, self.text_feat_photo, dim=-1)).mean()
         expected_cons_text = self.args.lambda_text_consistency * (expected_cons_text_sketch + expected_cons_text_photo)
 
-        # Specification 4: Visual Consistency Loss (visual feats vs W_desc[label])
-        expected_cons_vis_sketch = (1.0 - F.cosine_similarity(self.sketch_feat, self.W_sketch_desc[self.label], dim=-1)).mean()
-        expected_cons_vis_photo = (1.0 - F.cosine_similarity(self.photo_feat, self.W_photo_desc[self.label], dim=-1)).mean()
+        # Specification 4: Visual Consistency Loss (Residual Cosine)
+        res_vis_sketch = self.sketch_feat + self.W_sketch_desc[self.label]
+        res_vis_photo = self.photo_feat + self.W_photo_desc[self.label]
+        expected_cons_vis_sketch = (1.0 - F.cosine_similarity(res_vis_sketch, self.sketch_feat, dim=-1)).mean()
+        expected_cons_vis_photo = (1.0 - F.cosine_similarity(res_vis_photo, self.photo_feat, dim=-1)).mean()
         expected_cons_visual = self.args.lambda_consistency * (expected_cons_vis_sketch + expected_cons_vis_photo)
 
         # Total expected logic

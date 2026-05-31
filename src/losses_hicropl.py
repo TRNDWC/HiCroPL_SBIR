@@ -73,14 +73,23 @@ def loss_fn_hicropl(args, features):
     lambda_text_cons = getattr(args, 'lambda_text_consistency', 1.0)
     lambda_vis_cons = getattr(args, 'lambda_consistency', 1.0)
 
-    # Text Consistency Loss (pulling prompted text to LLM anchor)
-    loss_cons_text_sketch = 1.0 - F.cosine_similarity(text_feat_sketch, W_sketch_desc, dim=-1).mean()
-    loss_cons_text_photo = 1.0 - F.cosine_similarity(text_feat_photo, W_photo_desc, dim=-1).mean()
+    # 4. LLM-Guided Text Consistency Loss (Residual Cosine)
+    # Kéo mồi văn bản học được (Learnable Text Prompts) bám sát theo mô tả chuẩn của LLM
+    # Sử dụng Residual Cosine: 1 - cos(V + W, V)
+    res_text_sketch = text_feat_sketch + W_sketch_desc
+    res_text_photo = text_feat_photo + W_photo_desc
+    
+    loss_cons_text_sketch = 1.0 - F.cosine_similarity(res_text_sketch, text_feat_sketch, dim=-1).mean()
+    loss_cons_text_photo = 1.0 - F.cosine_similarity(res_text_photo, text_feat_photo, dim=-1).mean()
     loss_cons_text = lambda_text_cons * (loss_cons_text_sketch + loss_cons_text_photo)
 
-    # Visual Consistency Loss (pulling visual features to LLM anchor of their class)
-    loss_cons_vis_sketch = 1.0 - F.cosine_similarity(sketch_feat, W_sketch_desc[label], dim=-1).mean()
-    loss_cons_vis_photo = 1.0 - F.cosine_similarity(photo_feat, W_photo_desc[label], dim=-1).mean()
+    # 5. LLM-Guided Visual Consistency Loss (Residual Cosine)
+    # Ép đặc trưng Hình ảnh và Phác thảo phải hội tụ về mỏ neo chung của LLM tương ứng với Label
+    res_vis_sketch = sketch_feat + W_sketch_desc[label]
+    res_vis_photo = photo_feat + W_photo_desc[label]
+    
+    loss_cons_vis_sketch = 1.0 - F.cosine_similarity(res_vis_sketch, sketch_feat, dim=-1).mean()
+    loss_cons_vis_photo = 1.0 - F.cosine_similarity(res_vis_photo, photo_feat, dim=-1).mean()
     loss_cons_visual = lambda_vis_cons * (loss_cons_vis_sketch + loss_cons_vis_photo)
 
     total_loss = loss_align + loss_ce + loss_cons_text + loss_cons_visual
