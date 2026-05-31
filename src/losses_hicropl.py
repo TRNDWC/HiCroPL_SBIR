@@ -45,7 +45,7 @@ def loss_fn_hicropl(args, features):
         sketch_feat, logits_sketch,
         neg_feat, label,
         text_feat_photo, text_feat_sketch,
-        *_
+        W_photo_desc, W_sketch_desc
     ) = features
 
     device = logits_photo.device
@@ -70,4 +70,17 @@ def loss_fn_hicropl(args, features):
     loss_ce_sketch = F.cross_entropy(logits_sketch, label)
     loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
-    return loss_align + loss_ce
+    lambda_text_cons = getattr(args, 'lambda_text_consistency', 1.0)
+    lambda_vis_cons = getattr(args, 'lambda_consistency', 1.0)
+
+    # Text Consistency Loss (pulling prompted text to LLM anchor)
+    loss_cons_text_sketch = 1.0 - F.cosine_similarity(text_feat_sketch, W_sketch_desc, dim=-1).mean()
+    loss_cons_text_photo = 1.0 - F.cosine_similarity(text_feat_photo, W_photo_desc, dim=-1).mean()
+    loss_cons_text = lambda_text_cons * (loss_cons_text_sketch + loss_cons_text_photo)
+
+    # Visual Consistency Loss (pulling visual features to LLM anchor of their class)
+    loss_cons_vis_sketch = 1.0 - F.cosine_similarity(sketch_feat, W_sketch_desc[label], dim=-1).mean()
+    loss_cons_vis_photo = 1.0 - F.cosine_similarity(photo_feat, W_photo_desc[label], dim=-1).mean()
+    loss_cons_visual = lambda_vis_cons * (loss_cons_vis_sketch + loss_cons_vis_photo)
+
+    return loss_align + loss_ce + loss_cons_text + loss_cons_visual

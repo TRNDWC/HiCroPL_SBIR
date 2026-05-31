@@ -1,0 +1,1252 @@
+[
+  {
+    "class": "airplane",
+    "input": "a sketch of a airplane",
+    "output": "Winged fuselage, swept wings, pointed nose, tail fin."
+  },
+  {
+    "class": "airplane",
+    "input": "a photo of a airplane",
+    "output": "Silver metallic body, bright white wings, window reflections, clear sky."
+  },
+  {
+    "class": "alarm_clock",
+    "input": "a sketch of a alarm_clock",
+    "output": "Rectangular body, circular dial, button top, stand."
+  },
+  {
+    "class": "alarm_clock",
+    "input": "a photo of a alarm_clock",
+    "output": "Metallic silver casing, black plastic buttons, glowing red digital numbers."
+  },
+  {
+    "class": "ant",
+    "input": "a sketch of a ant",
+    "output": "Elongated body, six stick legs, segmented head and abdomen, antennae."
+  },
+  {
+    "class": "ant",
+    "input": "a photo of a ant",
+    "output": "Dark glossy exoskeleton, segmented body, tiny hairs, granular texture."
+  },
+  {
+    "class": "ape",
+    "input": "a sketch of a ape",
+    "output": "Upright posture, long arms, curved spine, round head."
+  },
+  {
+    "class": "ape",
+    "input": "a photo of a ape",
+    "output": "Shaggy dark fur, wrinkled skin, brown eyes, grasping hands."
+  },
+  {
+    "class": "apple",
+    "input": "a sketch of a apple",
+    "output": "Round shape, short stem. Simple apple outline."
+  },
+  {
+    "class": "apple",
+    "input": "a photo of a apple",
+    "output": "Shiny red skin, smooth surface. Crisp texture, vibrant color."
+  },
+  {
+    "class": "armor",
+    "input": "a sketch of a armor",
+    "output": "Elongated helmet, shoulder pauldrons, chest plate, segmented gauntlets, greaves."
+  },
+  {
+    "class": "armor",
+    "input": "a photo of a armor",
+    "output": "Polished steel, weathered leather straps, intricate engraving, dark metallic sheen."
+  },
+  {
+    "class": "axe",
+    "input": "a sketch of a axe",
+    "output": "Sharp blade, long handle, angled head, tool outline."
+  },
+  {
+    "class": "axe",
+    "input": "a photo of a axe",
+    "output": "Weathered steel blade, worn wooden handle, rough texture."
+  },
+  {
+    "class": "banana",
+    "input": "a sketch of a banana",
+    "output": "Curved yellow fruit outline. Simple, elongated shape."
+  },
+  {
+    "class": "banana",
+    "input": "a photo of a banana",
+    "output": "Bright yellow peel, smooth, slightly curved surface."
+  },
+  {
+    "class": "bear",
+    "input": "a sketch of a bear",
+    "output": "Large, round body, short stubby legs, prominent snout."
+  },
+  {
+    "class": "bear",
+    "input": "a photo of a bear",
+    "output": "Thick, shaggy brown fur, dark wet nose, powerful build."
+  },
+  {
+    "class": "bee",
+    "input": "a sketch of a bee",
+    "output": "Oval body, thin segmented legs, antennae. Simple outline."
+  },
+  {
+    "class": "bee",
+    "input": "a photo of a bee",
+    "output": "Black and yellow striped fuzzy body, translucent wings, pollen baskets."
+  },
+  {
+    "class": "beetle",
+    "input": "a sketch of a beetle",
+    "output": "Oval body, segmented legs, antennae, simple form."
+  },
+  {
+    "class": "beetle",
+    "input": "a photo of a beetle",
+    "output": "Shiny black exoskeleton, iridescent sheen, segmented body texture."
+  },
+  {
+    "class": "bell",
+    "input": "a sketch of a bell",
+    "output": "Circular body, clapper shape, handle on top."
+  },
+  {
+    "class": "bell",
+    "input": "a photo of a bell",
+    "output": "Bronze metallic surface, tarnished patina, hanging loop."
+  },
+  {
+    "class": "bench",
+    "input": "a sketch of a bench",
+    "output": "Bench shape: straight seat, angled legs, backrest lines."
+  },
+  {
+    "class": "bench",
+    "input": "a photo of a bench",
+    "output": "Wooden bench texture, weathered grey slats, metallic frame details."
+  },
+  {
+    "class": "bicycle",
+    "input": "a sketch of a bicycle",
+    "output": "Two wheels, frame, handlebars, seat. Simple outline."
+  },
+  {
+    "class": "bicycle",
+    "input": "a photo of a bicycle",
+    "output": "Shiny metal frame, black rubber tires, worn leather seat, colorful reflections."
+  },
+  {
+    "class": "blimp",
+    "input": "a sketch of a blimp",
+    "output": "Large oblong shape, gondola underneath, fin tail."
+  },
+  {
+    "class": "blimp",
+    "input": "a photo of a blimp",
+    "output": "Shiny silver skin, large letters visible, slow movement."
+  },
+  {
+    "class": "bread",
+    "input": "a sketch of a bread",
+    "output": "Crusty loaf shape, rounded top, flat bottom, simple outline."
+  },
+  {
+    "class": "bread",
+    "input": "a photo of a bread",
+    "output": "Golden brown crust, airy crumb texture, slightly shiny surface."
+  },
+  {
+    "class": "butterfly",
+    "input": "a sketch of a butterfly",
+    "output": "Winged insect silhouette, segmented body, thin antennae, simple wing shapes."
+  },
+  {
+    "class": "butterfly",
+    "input": "a photo of a butterfly",
+    "output": "Vibrant patterned wings, delicate powdery scales, colorful eye spots, fuzzy body."
+  },
+  {
+    "class": "camel",
+    "input": "a sketch of a camel",
+    "output": "Curved back, long neck, humps, thin legs, defined outline."
+  },
+  {
+    "class": "camel",
+    "input": "a photo of a camel",
+    "output": "Sandy brown textured fur, dry leathery skin, coarse mane detail."
+  },
+  {
+    "class": "candle",
+    "input": "a sketch of a candle",
+    "output": "Tall, cylindrical body. Tapered top, flat base. Flame crest."
+  },
+  {
+    "class": "candle",
+    "input": "a photo of a candle",
+    "output": "Melting wax drips, glowing orange flame, subtle textured surface."
+  },
+  {
+    "class": "cannon",
+    "input": "a sketch of a cannon",
+    "output": "Rectangular barrel, circular wheels, simple frame, cannon shape."
+  },
+  {
+    "class": "cannon",
+    "input": "a photo of a cannon",
+    "output": "Dark weathered metal, wooden carriage, iron cannon barrel, aged surface."
+  },
+  {
+    "class": "car_(sedan)",
+    "input": "a sketch of a car_(sedan)",
+    "output": "Sleek sedan silhouette, four wheels, boxy cabin, distinct trunk."
+  },
+  {
+    "class": "car_(sedan)",
+    "input": "a photo of a car_(sedan)",
+    "output": "Shiny black paint, chrome accents, tinted windows, polished metal."
+  },
+  {
+    "class": "castle",
+    "input": "a sketch of a castle",
+    "output": "Towering fortress silhouette, angular battlements, blocky structure, sharp peaks."
+  },
+  {
+    "class": "castle",
+    "input": "a photo of a castle",
+    "output": "Gray stone walls, mossy texture, weathered surfaces, dark imposing windows, flag banners."
+  },
+  {
+    "class": "cat",
+    "input": "a sketch of a cat",
+    "output": "Curved ears, slender body outline, pointed tail silhouette, four stick legs."
+  },
+  {
+    "class": "cat",
+    "input": "a photo of a cat",
+    "output": "Soft, short orange fur, bright green eyes, white chest patch."
+  },
+  {
+    "class": "chair",
+    "input": "a sketch of a chair",
+    "output": "Four legs, a back, a seat. Simple geometric chair silhouette."
+  },
+  {
+    "class": "chair",
+    "input": "a photo of a chair",
+    "output": "Brown leather upholstery, wooden legs, smooth surface, comfortable seat."
+  },
+  {
+    "class": "chicken",
+    "input": "a sketch of a chicken",
+    "output": "Oval body, thin legs, pointed beak, comb crest, feathered outline."
+  },
+  {
+    "class": "chicken",
+    "input": "a photo of a chicken",
+    "output": "Brown feathers, red wattle, yellow beak, beady black eyes, textured skin."
+  },
+  {
+    "class": "church",
+    "input": "a sketch of a church",
+    "output": "Tall steeple, rectangular base, pointed roof silhouette."
+  },
+  {
+    "class": "church",
+    "input": "a photo of a church",
+    "output": "Weathered stone facade, stained glass windows, wooden doors."
+  },
+  {
+    "class": "couch",
+    "input": "a sketch of a couch",
+    "output": "U-shaped form, blocky base, straight backrest, armrests."
+  },
+  {
+    "class": "couch",
+    "input": "a photo of a couch",
+    "output": "Soft grey fabric, plush cushions, wooden legs, textured upholstery."
+  },
+  {
+    "class": "crab",
+    "input": "a sketch of a crab",
+    "output": "Carapace outline, stalk eyes, five segmented legs, pincers."
+  },
+  {
+    "class": "crab",
+    "input": "a photo of a crab",
+    "output": "Red-orange chitinous shell, grainy texture, sharp claws."
+  },
+  {
+    "class": "crocodilian",
+    "input": "a sketch of a crocodilian",
+    "output": "Long snout, powerful tail, angular body, reptilian outline."
+  },
+  {
+    "class": "crocodilian",
+    "input": "a photo of a crocodilian",
+    "output": "Rough, scaly green-brown skin, reptilian texture, sun-baked appearance."
+  },
+  {
+    "class": "cup",
+    "input": "a sketch of a cup",
+    "output": "Cylindrical body, handle loop, rim outline."
+  },
+  {
+    "class": "cup",
+    "input": "a photo of a cup",
+    "output": "White ceramic surface, smooth, reflective, slight shadow."
+  },
+  {
+    "class": "deer",
+    "input": "a sketch of a deer",
+    "output": "Antlered head, slender body, thin legs, bounding outline."
+  },
+  {
+    "class": "deer",
+    "input": "a photo of a deer",
+    "output": "Brown spotted coat, soft fur, alert ears, gentle eyes."
+  },
+  {
+    "class": "dog",
+    "input": "a sketch of a dog",
+    "output": "Canine silhouette, pointed ears, four legs, tail. Basic dog shape."
+  },
+  {
+    "class": "dog",
+    "input": "a photo of a dog",
+    "output": "Fluffy golden fur, wet nose, panting tongue, playful eyes. Brown and white patches."
+  },
+  {
+    "class": "duck",
+    "input": "a sketch of a duck",
+    "output": "Oval body, webbed feet, long neck, beak shape."
+  },
+  {
+    "class": "duck",
+    "input": "a photo of a duck",
+    "output": "Iridescent feathers, smooth bill, wet plumage, yellow feet."
+  },
+  {
+    "class": "elephant",
+    "input": "a sketch of a elephant",
+    "output": "Large body, trunk, tusks, rounded ears, thick legs, solid shape."
+  },
+  {
+    "class": "elephant",
+    "input": "a photo of a elephant",
+    "output": "Gray wrinkled skin, coarse texture, dusty hide, dark toenails, wide flapping ears."
+  },
+  {
+    "class": "eyeglasses",
+    "input": "a sketch of a eyeglasses",
+    "output": "Rectangular frames, thin temples, nose bridge, simple outline."
+  },
+  {
+    "class": "eyeglasses",
+    "input": "a photo of a eyeglasses",
+    "output": "Black acetate, polished finish, clear lenses, subtle branding."
+  },
+  {
+    "class": "fan",
+    "input": "a sketch of a fan",
+    "output": "Oval body, radiating lines, thin handle, compact shape."
+  },
+  {
+    "class": "fan",
+    "input": "a photo of a fan",
+    "output": "White plastic blades, metal housing, metallic sheen, smooth surface."
+  },
+  {
+    "class": "fish",
+    "input": "a sketch of a fish",
+    "output": "Elongated oval body, pointed head, dorsal fin, tail fin, no legs."
+  },
+  {
+    "class": "fish",
+    "input": "a photo of a fish",
+    "output": "Iridescent scales, wet skin, blue and silver fins, translucent gill covers."
+  },
+  {
+    "class": "flower",
+    "input": "a sketch of a flower",
+    "output": "Petal outlines, stem, leaf shapes, circular center."
+  },
+  {
+    "class": "flower",
+    "input": "a photo of a flower",
+    "output": "Vibrant red petals, soft velvety texture, dew drops."
+  },
+  {
+    "class": "frog",
+    "input": "a sketch of a frog",
+    "output": "Oval body, stick legs, dot eyes, simple lines."
+  },
+  {
+    "class": "frog",
+    "input": "a photo of a frog",
+    "output": "Green, bumpy, wet skin, smooth texture, wet sheen."
+  },
+  {
+    "class": "geyser",
+    "input": "a sketch of a geyser",
+    "output": "Tall conical shape, steam plume rising, rocky base outline."
+  },
+  {
+    "class": "geyser",
+    "input": "a photo of a geyser",
+    "output": "White bubbling hot water, steam mist, rocky earth texture."
+  },
+  {
+    "class": "guitar",
+    "input": "a sketch of a guitar",
+    "output": "Curved body, long neck, six tuning pegs, fretted board."
+  },
+  {
+    "class": "guitar",
+    "input": "a photo of a guitar",
+    "output": "Brown polished wood, metal strings, intricate soundhole design."
+  },
+  {
+    "class": "hamburger",
+    "input": "a sketch of a hamburger",
+    "output": "Round bun, patty outline, lettuce leaf shape, tomato circle, onion rings."
+  },
+  {
+    "class": "hamburger",
+    "input": "a photo of a hamburger",
+    "output": "Brown toasted bun, juicy beef patty, fresh green lettuce, red tomato slice."
+  },
+  {
+    "class": "hammer",
+    "input": "a sketch of a hammer",
+    "output": "Curved head, long handle, simple outline."
+  },
+  {
+    "class": "hammer",
+    "input": "a photo of a hammer",
+    "output": "Metal head, wooden handle, textured grip."
+  },
+  {
+    "class": "harp",
+    "input": "a sketch of a harp",
+    "output": "Curved frame, strings, pedestal base, abstract wing shape."
+  },
+  {
+    "class": "harp",
+    "input": "a photo of a harp",
+    "output": "Gleaming polished wood, taut metallic strings, detailed craftsmanship."
+  },
+  {
+    "class": "hat",
+    "input": "a sketch of a hat",
+    "output": "Dome shape, brim, simple lines, outline."
+  },
+  {
+    "class": "hat",
+    "input": "a photo of a hat",
+    "output": "Soft felt texture, dark color, woven band, classic shape."
+  },
+  {
+    "class": "hedgehog",
+    "input": "a sketch of a hedgehog",
+    "output": "Spiky oval body, short legs, pointy snout."
+  },
+  {
+    "class": "hedgehog",
+    "input": "a photo of a hedgehog",
+    "output": "Brown quills, coarse fur texture, dark beady eyes."
+  },
+  {
+    "class": "hermit_crab",
+    "input": "a sketch of a hermit_crab",
+    "output": "Crustacean shape, dome shell, jointed legs, abstract form."
+  },
+  {
+    "class": "hermit_crab",
+    "input": "a photo of a hermit_crab",
+    "output": "Hard textured shell, mottled brown and orange, crab-like appendages."
+  },
+  {
+    "class": "horse",
+    "input": "a sketch of a horse",
+    "output": "Curved body, long legs, elegant equine silhouette, flowing mane."
+  },
+  {
+    "class": "horse",
+    "input": "a photo of a horse",
+    "output": "Shiny brown coat, coarse mane, muscular physique, soft muzzle."
+  },
+  {
+    "class": "hot-air_balloon",
+    "input": "a sketch of a hot-air_balloon",
+    "output": "Large teardrop shape, basket underneath, rope details."
+  },
+  {
+    "class": "hot-air_balloon",
+    "input": "a photo of a hot-air_balloon",
+    "output": "Vibrant fabric, woven basket texture, wispy smoke."
+  },
+  {
+    "class": "hotdog",
+    "input": "a sketch of a hotdog",
+    "output": "Long bun, sausage shape, simple outline, minimalist form."
+  },
+  {
+    "class": "hotdog",
+    "input": "a photo of a hotdog",
+    "output": "Red glossy skin, soft bun texture, grilled char marks."
+  },
+  {
+    "class": "hourglass",
+    "input": "a sketch of a hourglass",
+    "output": "Two triangles, joined at apex, open bottom. Simple hourglass shape."
+  },
+  {
+    "class": "hourglass",
+    "input": "a photo of a hourglass",
+    "output": "Clear glass, sandy texture, golden grains flowing. Elegant timekeeper."
+  },
+  {
+    "class": "jack-o-lantern",
+    "input": "a sketch of a jack-o-lantern",
+    "output": "Round body, triangular eyes, jagged mouth, stem top."
+  },
+  {
+    "class": "jack-o-lantern",
+    "input": "a photo of a jack-o-lantern",
+    "output": "Orange textured skin, carved openings, glowing interior."
+  },
+  {
+    "class": "jellyfish",
+    "input": "a sketch of a jellyfish",
+    "output": "Bell shape, flowing tentacles, simple outline."
+  },
+  {
+    "class": "jellyfish",
+    "input": "a photo of a jellyfish",
+    "output": "Translucent, gelatinous body, shimmering bioluminescence, delicate tendrils."
+  },
+  {
+    "class": "kangaroo",
+    "input": "a sketch of a kangaroo",
+    "output": "Long tail curve, large hind legs, small head, upright body."
+  },
+  {
+    "class": "kangaroo",
+    "input": "a photo of a kangaroo",
+    "output": "Brown furry body, coarse fur texture, long bushy tail."
+  },
+  {
+    "class": "knife",
+    "input": "a sketch of a knife",
+    "output": "Blade, handle, sharp edge, pointed tip, slender silhouette."
+  },
+  {
+    "class": "knife",
+    "input": "a photo of a knife",
+    "output": "Polished steel blade, wooden handle, reflecting light, smooth metallic surface."
+  },
+  {
+    "class": "lion",
+    "input": "a sketch of a lion",
+    "output": "Lions: Mane, muscular body, powerful legs, strong jaw outline."
+  },
+  {
+    "class": "lion",
+    "input": "a photo of a lion",
+    "output": "Golden tawny fur, shaggy mane, fierce eyes, weathered skin texture."
+  },
+  {
+    "class": "lizard",
+    "input": "a sketch of a lizard",
+    "output": "Elongated body, four stick legs, triangular head, tail curve."
+  },
+  {
+    "class": "lizard",
+    "input": "a photo of a lizard",
+    "output": "Green scaly skin, dry textured surface, subtle earthy tones."
+  },
+  {
+    "class": "lobster",
+    "input": "a sketch of a lobster",
+    "output": "Elongated body, segmented tail, two large claws, thin legs, antenna."
+  },
+  {
+    "class": "lobster",
+    "input": "a photo of a lobster",
+    "output": "Red segmented shell, bumpy texture, dark beady eyes, sharp claws."
+  },
+  {
+    "class": "motorcycle",
+    "input": "a sketch of a motorcycle",
+    "output": "Two wheels, handlebars, engine shape, seat outline, angular body."
+  },
+  {
+    "class": "motorcycle",
+    "input": "a photo of a motorcycle",
+    "output": "Shiny chrome, black leather seat, metallic paint, rubber tires, engine details."
+  },
+  {
+    "class": "mushroom",
+    "input": "a sketch of a mushroom",
+    "output": "Bell-shaped cap, stalk, circular base."
+  },
+  {
+    "class": "mushroom",
+    "input": "a photo of a mushroom",
+    "output": "Brown, textured cap, white gills underneath."
+  },
+  {
+    "class": "owl",
+    "input": "a sketch of a owl",
+    "output": "Round head, pointed ears, sharp beak, silhouette, wing shape."
+  },
+  {
+    "class": "owl",
+    "input": "a photo of a owl",
+    "output": "Soft, mottled grey feathers, large golden eyes, detailed plumage texture."
+  },
+  {
+    "class": "parrot",
+    "input": "a sketch of a parrot",
+    "output": "Curved body, hooked beak, long tail feathers, two slender legs."
+  },
+  {
+    "class": "parrot",
+    "input": "a photo of a parrot",
+    "output": "Vibrant green and blue plumage, sharp black eyes, textured feathers."
+  },
+  {
+    "class": "penguin",
+    "input": "a sketch of a penguin",
+    "output": "Oval body, short stubby legs, pointed beak. Simple outline."
+  },
+  {
+    "class": "penguin",
+    "input": "a photo of a penguin",
+    "output": "Black and white tuxedo plumage, smooth wet feathers, orange beak."
+  },
+  {
+    "class": "piano",
+    "input": "a sketch of a piano",
+    "output": "Rectangular body, keyboard, black keys, white keys, angled lid."
+  },
+  {
+    "class": "piano",
+    "input": "a photo of a piano",
+    "output": "Polished black wood surface, ivory keys, felt hammers, brass pedals."
+  },
+  {
+    "class": "pickup_truck",
+    "input": "a sketch of a pickup_truck",
+    "output": "Boxy truck silhouette, rectangular bed, angular cab."
+  },
+  {
+    "class": "pickup_truck",
+    "input": "a photo of a pickup_truck",
+    "output": "Rugged metallic paint, worn tires, dusty chrome accents."
+  },
+  {
+    "class": "pig",
+    "input": "a sketch of a pig",
+    "output": "Rounded body, snout, stick legs, small tail, ear shape."
+  },
+  {
+    "class": "pig",
+    "input": "a photo of a pig",
+    "output": "Pink fleshy skin, muddy brown texture, wet snout, coarse bristles."
+  },
+  {
+    "class": "pineapple",
+    "input": "a sketch of a pineapple",
+    "output": "Rough cylindrical body, spiky crown. Oval shape."
+  },
+  {
+    "class": "pineapple",
+    "input": "a photo of a pineapple",
+    "output": "Yellow, rough skin, green leafy top. Sweet tropical fruit."
+  },
+  {
+    "class": "pistol",
+    "input": "a sketch of a pistol",
+    "output": "Angular frame, cylindrical barrel, trigger guard."
+  },
+  {
+    "class": "pistol",
+    "input": "a photo of a pistol",
+    "output": "Black metal finish, checkered grip, polished steel."
+  },
+  {
+    "class": "pizza",
+    "input": "a sketch of a pizza",
+    "output": "Circular disc with toppings, triangular slice."
+  },
+  {
+    "class": "pizza",
+    "input": "a photo of a pizza",
+    "output": "Cheesy, circular, with red sauce and browned crust."
+  },
+  {
+    "class": "pretzel",
+    "input": "a sketch of a pretzel",
+    "output": "Twisted knot shape, simple curved lines, iconic silhouette."
+  },
+  {
+    "class": "pretzel",
+    "input": "a photo of a pretzel",
+    "output": "Golden brown baked dough, coarse salt crystals, textured surface."
+  },
+  {
+    "class": "rabbit",
+    "input": "a sketch of a rabbit",
+    "output": "Oval body, long ears, short tail, thin legs, simple outline."
+  },
+  {
+    "class": "rabbit",
+    "input": "a photo of a rabbit",
+    "output": "Soft brown fur, twitching nose, alert eyes, fluffy tail, realistic texture."
+  },
+  {
+    "class": "racket",
+    "input": "a sketch of a racket",
+    "output": "Oval body, short legs, long neck, pointed beak outline."
+  },
+  {
+    "class": "racket",
+    "input": "a photo of a racket",
+    "output": "Dull green feathers, webbed feet, beak texture."
+  },
+  {
+    "class": "ray",
+    "input": "a sketch of a ray",
+    "output": "Thin lines form a ray's body and tail."
+  },
+  {
+    "class": "ray",
+    "input": "a photo of a ray",
+    "output": "Smooth, dark grey skin, translucent fins ripple."
+  },
+  {
+    "class": "rifle",
+    "input": "a sketch of a rifle",
+    "output": "Long, slender shape. Barrel, stock, trigger guard."
+  },
+  {
+    "class": "rifle",
+    "input": "a photo of a rifle",
+    "output": "Dark metal, polished wood grain, textured grip."
+  },
+  {
+    "class": "rocket",
+    "input": "a sketch of a rocket",
+    "output": "Tall, pointed cone. Fins at base. Cylindrical body."
+  },
+  {
+    "class": "rocket",
+    "input": "a photo of a rocket",
+    "output": "Shiny metallic surface. Bright orange flame exhaust. White casing."
+  },
+  {
+    "class": "sailboat",
+    "input": "a sketch of a sailboat",
+    "output": "Triangular sail, hull outline, mast silhouette, boat shape."
+  },
+  {
+    "class": "sailboat",
+    "input": "a photo of a sailboat",
+    "output": "White sail, blue hull, wooden deck, sunlight reflection."
+  },
+  {
+    "class": "saxophone",
+    "input": "a sketch of a saxophone",
+    "output": "Curved brass instrument, bell shape, keys, mouthpiece, elegant silhouette."
+  },
+  {
+    "class": "saxophone",
+    "input": "a photo of a saxophone",
+    "output": "Shiny brass, polished metal, intricate keys, smooth surface, golden sheen."
+  },
+  {
+    "class": "scorpion",
+    "input": "a sketch of a scorpion",
+    "output": "Curved body, pointed tail, claw shapes, segmented legs, stinger."
+  },
+  {
+    "class": "scorpion",
+    "input": "a photo of a scorpion",
+    "output": "Dark exoskeleton, segmented body, shiny chitin, sharp pincers, venomous stinger."
+  },
+  {
+    "class": "sea_turtle",
+    "input": "a sketch of a sea_turtle",
+    "output": "Curved shell, flippers, simple outline."
+  },
+  {
+    "class": "sea_turtle",
+    "input": "a photo of a sea_turtle",
+    "output": "Green patterned shell, leathery skin, underwater texture."
+  },
+  {
+    "class": "seal",
+    "input": "a sketch of a seal",
+    "output": "Oval body, flippers, smooth streamlined shape."
+  },
+  {
+    "class": "seal",
+    "input": "a photo of a seal",
+    "output": "Sleek dark fur, wet glistening skin, blubber texture."
+  },
+  {
+    "class": "shark",
+    "input": "a sketch of a shark",
+    "output": "Pointed fins, streamlined body, sharp teeth outline."
+  },
+  {
+    "class": "shark",
+    "input": "a photo of a shark",
+    "output": "Gray, smooth skin, rough texture, dark eye."
+  },
+  {
+    "class": "sheep",
+    "input": "a sketch of a sheep",
+    "output": "Ovular body, four stick legs, small head, woolly outline."
+  },
+  {
+    "class": "sheep",
+    "input": "a photo of a sheep",
+    "output": "Fluffy white wool, black eyes, pink nose, soft fur texture."
+  },
+  {
+    "class": "shoe",
+    "input": "a sketch of a shoe",
+    "output": "Curved sole, laced upper, rounded toe, heel."
+  },
+  {
+    "class": "shoe",
+    "input": "a photo of a shoe",
+    "output": "Brown leather texture, stitched seams, white rubber sole."
+  },
+  {
+    "class": "snail",
+    "input": "a sketch of a snail",
+    "output": "Curved shell spiral, pointed head, small antennae."
+  },
+  {
+    "class": "snail",
+    "input": "a photo of a snail",
+    "output": "Brown spiral shell, slimy textured body, wet glistening surface."
+  },
+  {
+    "class": "snake",
+    "input": "a sketch of a snake",
+    "output": "Long, sinuous body, narrow head, no legs, simple coiled shape."
+  },
+  {
+    "class": "snake",
+    "input": "a photo of a snake",
+    "output": "Green, scaled skin, dry texture, patterned surface, slight sheen."
+  },
+  {
+    "class": "spider",
+    "input": "a sketch of a spider",
+    "output": "Eight-legged silhouette, rounded body, thin segmented legs."
+  },
+  {
+    "class": "spider",
+    "input": "a photo of a spider",
+    "output": "Black fuzzy body, long hairy legs, intricate web texture."
+  },
+  {
+    "class": "spoon",
+    "input": "a sketch of a spoon",
+    "output": "Curved handle, oval bowl, thin silhouette."
+  },
+  {
+    "class": "spoon",
+    "input": "a photo of a spoon",
+    "output": "Shiny metal surface, reflective, smooth texture."
+  },
+  {
+    "class": "squirrel",
+    "input": "a sketch of a squirrel",
+    "output": "Oval body, bushy tail, stick limbs, simple outline."
+  },
+  {
+    "class": "squirrel",
+    "input": "a photo of a squirrel",
+    "output": "Furry brown coat, twitching tail, sharp claws, alert eyes."
+  },
+  {
+    "class": "starfish",
+    "input": "a sketch of a starfish",
+    "output": "Central body, five pointed arms, radial symmetry, simple outline."
+  },
+  {
+    "class": "starfish",
+    "input": "a photo of a starfish",
+    "output": "Rough textured skin, vibrant orange hue, bumpy surface, marine invertebrate."
+  },
+  {
+    "class": "strawberry",
+    "input": "a sketch of a strawberry",
+    "output": "Oval shape, small leaf crown. Simple, rounded form."
+  },
+  {
+    "class": "strawberry",
+    "input": "a photo of a strawberry",
+    "output": "Bright red, bumpy skin. Tiny seeds visible. Green leafy top."
+  },
+  {
+    "class": "swan",
+    "input": "a sketch of a swan",
+    "output": "Elegant S-curve neck, oval body, webbed feet outline."
+  },
+  {
+    "class": "swan",
+    "input": "a photo of a swan",
+    "output": "White glossy feathers, black beak, calm water surface."
+  },
+  {
+    "class": "table",
+    "input": "a sketch of a table",
+    "output": "Rectangular top, four slender legs, simple outline."
+  },
+  {
+    "class": "table",
+    "input": "a photo of a table",
+    "output": "Polished wooden surface, grain visible, solid construction."
+  },
+  {
+    "class": "tank",
+    "input": "a sketch of a tank",
+    "output": "Heavy tracked vehicle, boxy turret, long gun barrel, cylindrical shape."
+  },
+  {
+    "class": "tank",
+    "input": "a photo of a tank",
+    "output": "Olive drab metal, dusty tracks, weathered hull, dark cannon barrel."
+  },
+  {
+    "class": "teapot",
+    "input": "a sketch of a teapot",
+    "output": "Curved handle, spout, pot shape. Simple outline."
+  },
+  {
+    "class": "teapot",
+    "input": "a photo of a teapot",
+    "output": "Shiny metallic surface, reflections, ceramic texture."
+  },
+  {
+    "class": "teddy_bear",
+    "input": "a sketch of a teddy_bear",
+    "output": "Rounded body, stubby limbs, simple outline, soft curves."
+  },
+  {
+    "class": "teddy_bear",
+    "input": "a photo of a teddy_bear",
+    "output": "Soft brown fur, plush texture, button eyes, stitched nose."
+  },
+  {
+    "class": "tiger",
+    "input": "a sketch of a tiger",
+    "output": "Striped, feline silhouette. Elongated body, powerful legs, tail."
+  },
+  {
+    "class": "tiger",
+    "input": "a photo of a tiger",
+    "output": "Vibrant orange fur, black stripes, white belly, sharp claws."
+  },
+  {
+    "class": "trumpet",
+    "input": "a sketch of a trumpet",
+    "output": "Curved bell, straight valves, mouthpiece tube, conical form."
+  },
+  {
+    "class": "trumpet",
+    "input": "a photo of a trumpet",
+    "output": "Golden brass gleam, polished metallic sheen, reflective surface."
+  },
+  {
+    "class": "turtle",
+    "input": "a sketch of a turtle",
+    "output": "Oval shell, stick legs, simple head."
+  },
+  {
+    "class": "turtle",
+    "input": "a photo of a turtle",
+    "output": "Green leathery shell, wrinkled skin, wet surface."
+  },
+  {
+    "class": "umbrella",
+    "input": "a sketch of a umbrella",
+    "output": "Circular canopy, curved handle, simple pole."
+  },
+  {
+    "class": "umbrella",
+    "input": "a photo of a umbrella",
+    "output": "Black nylon fabric, silver metal ribs, water droplets."
+  },
+  {
+    "class": "violin",
+    "input": "a sketch of a violin",
+    "output": "Curved body, long neck, scroll head, F-holes."
+  },
+  {
+    "class": "violin",
+    "input": "a photo of a violin",
+    "output": "Polished wood grain, rich brown varnish, shiny surface."
+  },
+  {
+    "class": "volcano",
+    "input": "a sketch of a volcano",
+    "output": "Conical mountain, crater top, smoke plume rising."
+  },
+  {
+    "class": "volcano",
+    "input": "a photo of a volcano",
+    "output": "Fiery lava flows, smoky ash cloud, rocky dark slopes."
+  },
+  {
+    "class": "wading_bird",
+    "input": "a sketch of a wading_bird",
+    "output": "Long legs, slender body, beak curve, aquatic bird shape outline."
+  },
+  {
+    "class": "wading_bird",
+    "input": "a photo of a wading_bird",
+    "output": "White feathers, grey neck, orange beak, wet plumage, muddy legs."
+  },
+  {
+    "class": "wine_bottle",
+    "input": "a sketch of a wine_bottle",
+    "output": "Tall cylinder, narrow neck, flared base. Simple outline."
+  },
+  {
+    "class": "wine_bottle",
+    "input": "a photo of a wine_bottle",
+    "output": "Dark glass, light reflection, liquid surface. Smooth, reflective texture."
+  },
+  {
+    "class": "zebra",
+    "input": "a sketch of a zebra",
+    "output": "Striped equine shape, long body, slender legs, upright mane, tail."
+  },
+  {
+    "class": "zebra",
+    "input": "a photo of a zebra",
+    "output": "Black and white stripes, rough fur texture, animal hide patterns."
+  },
+  {
+    "class": "bat",
+    "input": "a sketch of a bat",
+    "output": "Winged silhouette, pointed ears, curved body shape, stick legs."
+  },
+  {
+    "class": "bat",
+    "input": "a photo of a bat",
+    "output": "Dark leathery wings, velvety fur, sharp teeth, beady eyes."
+  },
+  {
+    "class": "cabin",
+    "input": "a sketch of a cabin",
+    "output": "Rectangular building, pointed roof, window shapes, chimney silhouette."
+  },
+  {
+    "class": "cabin",
+    "input": "a photo of a cabin",
+    "output": "Rustic wooden cabin, weathered planks, stone chimney, green mossy roof."
+  },
+  {
+    "class": "cow",
+    "input": "a sketch of a cow",
+    "output": "Curved body, four stick legs, upright tail outline."
+  },
+  {
+    "class": "cow",
+    "input": "a photo of a cow",
+    "output": "Spotted black and white hide, rough textured skin, short glossy fur."
+  },
+  {
+    "class": "dolphin",
+    "input": "a sketch of a dolphin",
+    "output": "Sleek curved body, dorsal fin, streamlined shape, tail fluke."
+  },
+  {
+    "class": "dolphin",
+    "input": "a photo of a dolphin",
+    "output": "Smooth grey skin, wet sheen, underwater, natural light."
+  },
+  {
+    "class": "door",
+    "input": "a sketch of a door",
+    "output": "Rectangular outline, horizontal handle, framed opening, simple silhouette."
+  },
+  {
+    "class": "door",
+    "input": "a photo of a door",
+    "output": "Dark wood grain, tarnished brass knob, faint scratches, matte finish."
+  },
+  {
+    "class": "giraffe",
+    "input": "a sketch of a giraffe",
+    "output": "Tall, long neck, stick legs, angular body, pointed ears, short mane."
+  },
+  {
+    "class": "giraffe",
+    "input": "a photo of a giraffe",
+    "output": "Spotted pattern, tan and brown patches, rough textured hide, dark eyes."
+  },
+  {
+    "class": "helicopter",
+    "input": "a sketch of a helicopter",
+    "output": "Rotating blades, cylindrical body, landing skids, simple outline."
+  },
+  {
+    "class": "helicopter",
+    "input": "a photo of a helicopter",
+    "output": "Metallic silver paint, weathered metal surface, dark tinted windows, rotor blades."
+  },
+  {
+    "class": "mouse",
+    "input": "a sketch of a mouse",
+    "output": "Small ovate body, pointed snout, large rounded ears, thin tail, tiny paws."
+  },
+  {
+    "class": "mouse",
+    "input": "a photo of a mouse",
+    "output": "Soft grey fur, pink nose, delicate whiskers, shiny black eyes, light belly."
+  },
+  {
+    "class": "pear",
+    "input": "a sketch of a pear",
+    "output": "Bulbous base, tapering rounded top, distinct curved outline."
+  },
+  {
+    "class": "pear",
+    "input": "a photo of a pear",
+    "output": "Smooth green or yellow skin, subtle waxy sheen, small brown speckles."
+  },
+  {
+    "class": "raccoon",
+    "input": "a sketch of a raccoon",
+    "output": "Stocky oval body, bushy tail, short limbs, pointed muzzle, small ears."
+  },
+  {
+    "class": "raccoon",
+    "input": "a photo of a raccoon",
+    "output": "Dense coarse gray fur, black eye mask, dark ringed tail, black paws."
+  },
+  {
+    "class": "rhinoceros",
+    "input": "a sketch of a rhinoceros",
+    "output": "Bulky, barrel-shaped body, thick cylindrical legs, prominent conical horn, small ears."
+  },
+  {
+    "class": "rhinoceros",
+    "input": "a photo of a rhinoceros",
+    "output": "Thick, leathery, wrinkled grey skin, rough and dark surface texture."
+  },
+  {
+    "class": "saw",
+    "input": "a sketch of a saw",
+    "output": "Jagged rectangular blade outline, curved ergonomic handle shape."
+  },
+  {
+    "class": "saw",
+    "input": "a photo of a saw",
+    "output": "Gleaming steel blade, rough wooden handle texture, light reflections."
+  },
+  {
+    "class": "scissors",
+    "input": "a sketch of a scissors",
+    "output": "Two intersecting circular handles, long sharp parallel blades, pivot point."
+  },
+  {
+    "class": "scissors",
+    "input": "a photo of a scissors",
+    "output": "Polished silver metal blades, matte black plastic handles, reflective, sharp edges."
+  },
+  {
+    "class": "seagull",
+    "input": "a sketch of a seagull",
+    "output": "Oval body, pointed wings, small head, hooked beak, thin stick legs, flying silhouette."
+  },
+  {
+    "class": "seagull",
+    "input": "a photo of a seagull",
+    "output": "Glossy white and grey feathers, yellow beak with red spot, orange webbed feet."
+  },
+  {
+    "class": "skyscraper",
+    "input": "a sketch of a skyscraper",
+    "output": "Tall rectangular prism, sharp corners, ascending vertical lines, narrow base, pointed top."
+  },
+  {
+    "class": "skyscraper",
+    "input": "a photo of a skyscraper",
+    "output": "Gleaming reflective glass, steel facade, illuminated windows, concrete, metallic sheen."
+  },
+  {
+    "class": "songbird",
+    "input": "a sketch of a songbird",
+    "output": "Compact rounded body, small head, pointed beak, thin stick legs, slender tail."
+  },
+  {
+    "class": "songbird",
+    "input": "a photo of a songbird",
+    "output": "Soft fine feathers, smooth plumage, varied natural hues, often vibrant accents."
+  },
+  {
+    "class": "sword",
+    "input": "a sketch of a sword",
+    "output": "Long tapering blade, straight crossguard, cylindrical hilt."
+  },
+  {
+    "class": "sword",
+    "input": "a photo of a sword",
+    "output": "Polished silver steel, reflective surface, dark textured leather grip."
+  },
+  {
+    "class": "tree",
+    "input": "a sketch of a tree",
+    "output": "Dome-shaped canopy outline, cylindrical trunk, branching silhouette."
+  },
+  {
+    "class": "tree",
+    "input": "a photo of a tree",
+    "output": "Verdant green leaves, rugged brown bark, earthy surface."
+  },
+  {
+    "class": "wheelchair",
+    "input": "a sketch of a wheelchair",
+    "output": "Large circular wheels, rectangular seat, tubular frame, thin supports, ergonomic handles."
+  },
+  {
+    "class": "wheelchair",
+    "input": "a photo of a wheelchair",
+    "output": "Silver metallic frame, black matte fabric seat, smooth rubber tires, textured plastic grips."
+  },
+  {
+    "class": "windmill",
+    "input": "a sketch of a windmill",
+    "output": "Tall vertical tower, four cross-shaped blades, simple geometric outline."
+  },
+  {
+    "class": "windmill",
+    "input": "a photo of a windmill",
+    "output": "Smooth white blades, weathered stone tower texture, rusty brown metal accents."
+  },
+  {
+    "class": "window",
+    "input": "a sketch of a window",
+    "output": "Rectangular frame, internal grid, curved top outline."
+  },
+  {
+    "class": "window",
+    "input": "a photo of a window",
+    "output": "Shiny clear glass, painted white frame, reflective surface."
+  }
+]

@@ -1,3 +1,5 @@
+import json
+import os
 import copy
 import torch
 import torch.nn as nn
@@ -127,6 +129,44 @@ class CustomCLIP(nn.Module):
         self.register_buffer("token_prefix_sketch", embed_sketch[:, :1, :])
         self.register_buffer("token_suffix_sketch", embed_sketch[:, 1 + n_ctx:, :])
 
+        # 1. Load dual descriptions from JSON
+        gpt_path = getattr(cfg, "gpt_text_file", "gpt_file/sketchy_ext.json")
+        sketch_desc_dict = {}
+        photo_desc_dict = {}
+        if os.path.exists(gpt_path):
+            with open(gpt_path, 'r', encoding='utf-8') as f:
+                gpt_data = json.load(f)
+            for item in gpt_data:
+                cls_name = item.get('class', '')
+                out_desc = item.get('output', '')
+                if 'sketch' in item.get('input', ''):
+                    sketch_desc_dict[cls_name] = out_desc
+                else:
+                    photo_desc_dict[cls_name] = out_desc
+        else:
+            print(f"[WARN] GPT text file not found at {gpt_path}. Using fallback templates.")
+
+        # Build ordered list based on classnames
+        sketch_descs = [sketch_desc_dict.get(c.replace(" ", "_"), f"a sketch of a {c}") for c in classnames]
+        photo_descs = [photo_desc_dict.get(c.replace(" ", "_"), f"a photo of a {c}") for c in classnames]
+
+        # 2. Tokenize and pre-compute frozen anchors using clip_model_frozen
+        tokenized_sketch_desc = _clip.tokenize(sketch_descs).to(original_device)
+        tokenized_photo_desc = _clip.tokenize(photo_descs).to(original_device)
+
+        if clip_model_frozen is not None:
+            with torch.no_grad():
+                W_sketch_desc = clip_model_frozen.encode_text(tokenized_sketch_desc).type(self.dtype)
+                W_photo_desc = clip_model_frozen.encode_text(tokenized_photo_desc).type(self.dtype)
+                W_sketch_desc = W_sketch_desc / W_sketch_desc.norm(dim=-1, keepdim=True)
+                W_photo_desc = W_photo_desc / W_photo_desc.norm(dim=-1, keepdim=True)
+        else:
+            W_sketch_desc = torch.zeros((len(classnames), clip_model.text_projection.shape[1]), dtype=self.dtype).to(original_device)
+            W_photo_desc = torch.zeros((len(classnames), clip_model.text_projection.shape[1]), dtype=self.dtype).to(original_device)
+
+        self.register_buffer("W_sketch_desc", W_sketch_desc)
+        self.register_buffer("W_photo_desc", W_photo_desc)
+
     def encode_visual(self, x, modality):
         """Encode image through the shared CLIP visual encoder with the modality-specific prompt."""
         vp = self.visual_prompt_sketch if modality == "sketch" else self.visual_prompt_photo
@@ -178,25 +218,27 @@ class CustomCLIP(nn.Module):
         photo_feat = self.encode_visual(photo_tensor, "photo")
         neg_feat = self.encode_visual(neg_tensor, "photo")
 
-        # CLIP-AT: L_cls dùng MỘT bộ text anchor "a photo of a [class]" cho CẢ hai modality
-        # (paper không dùng template riêng cho sketch).
-        text_feat = self.encode_text_prompted("photo")
+        # Dual descriptions logic: Generate and normalize two separate text features
+        text_feat_photo = self.encode_text_prompted("photo")
+        text_feat_sketch = self.encode_text_prompted("sketch")
 
         # L2-normalise for cosine similarity / cosine-distance triplet
         sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
         photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
         neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
-        text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
+        text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
+        text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
 
         logit_scale = self.logit_scale.exp()
-        logits_photo = logit_scale * photo_feat @ text_feat.t()
-        logits_sketch = logit_scale * sketch_feat @ text_feat.t()
+        logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
+        logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
 
         return (
             photo_feat, logits_photo,
             sketch_feat, logits_sketch,
             neg_feat, label,
-            text_feat, text_feat,
+            text_feat_photo, text_feat_sketch,
+            self.W_photo_desc, self.W_sketch_desc
         )
 
 
