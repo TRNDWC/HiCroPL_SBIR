@@ -31,17 +31,18 @@ def freeze_all_but_bn(m):
 
 
 class CustomCLIP(nn.Module):
-    """CLIP-AT-aligned model (Sain et al. CVPR'23) — theo paper TEXT (loss) + official CODE (freeze).
+    """CLIP-AT-aligned model — EXPERIMENT "without LayerNorm" baseline.
 
     Architecture:
       - **1 SHARED** CLIP backbone (`self.clip`) cho cả sketch lẫn photo.
       - 2 visual prompt riêng (v^s, v^p) — shallow, chèn ở layer đầu.
       - Nhánh text: hard template "a photo of a [class]" / "a sketch of a [class]", KHÔNG learnable.
 
-    Freeze (theo official code aneeshan95/Sketch_LVM):
-      - `freeze_all_but_bn` áp dụng cho `self.clip` → LN + MHA QKV in_proj + naked Params train được.
+    EXPERIMENT — Freeze TOÀN BỘ (≈ paper "w/o LayerNorm" baseline):
+      - `freeze_model(self.clip)` → mọi param trong backbone đều đóng băng (LN, QKV, naked).
+      - Chỉ 2 visual prompts (~4.6K params) train được.
 
-    Loss (theo paper text — Eq. 3):
+    Loss (vẫn theo paper text — Eq. 3):
       - L_total = L_Tri + λ1·(L_cls^p + L_cls^s), λ1 = 0.5.
       - L_cls = CE(cosine(visual, text)/τ, class_label) với text encode từ template.
     """
@@ -58,9 +59,10 @@ class CustomCLIP(nn.Module):
 
         # 1 backbone CHUNG cho cả sketch và photo (đúng paper CLIP-AT — Sain et al. CVPR'23).
         # Chỉ tách bằng 2 bộ visual prompt riêng (v^s, v^p), không tách encoder.
-        # Freeze theo official code (`freeze_all_but_bn`): để mở LN + MHA QKV + naked Params.
+        # EXPERIMENT "without LayerNorm": freeze TOÀN BỘ backbone (kể cả LN, QKV, naked Params).
+        # Chỉ 2 visual prompts train được (~4.6K params).
         self.clip = copy.deepcopy(clip_model).to(original_device)
-        self.clip.apply(freeze_all_but_bn)
+        freeze_model(self.clip)
 
         def _count_trainable(m):
             total = sum(p.numel() for p in m.parameters())
@@ -68,7 +70,7 @@ class CustomCLIP(nn.Module):
             return total, trainable
 
         c_tot, c_tr = _count_trainable(self.clip)
-        print(f"clip (1 shared backbone, freeze_all_but_bn): trainable {c_tr:,} / total {c_tot:,}")
+        print(f"clip (1 shared backbone, FROZEN ENTIRELY): trainable {c_tr:,} / total {c_tot:,}")
 
         self.logit_scale = self.clip.logit_scale
 
