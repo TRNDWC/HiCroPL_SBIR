@@ -33,6 +33,21 @@ def freeze_all_but_bn(m):
         if hasattr(m, "bias") and m.bias is not None:
             m.bias.requires_grad_(False)
 
+
+def unfreeze_ln(m):
+    """Mở lại weight/bias của mọi LayerNorm trong module.
+
+    Dùng SAU `freeze_model(...)` để thực thi pattern "chỉ LN trainable":
+        freeze_model(encoder)           # đông cứng tất cả
+        encoder.apply(unfreeze_ln)      # chỉ mở LN
+    """
+    if isinstance(m, nn.LayerNorm):
+        if hasattr(m, 'weight') and m.weight is not None:
+            m.weight.requires_grad_(True)
+        if hasattr(m, 'bias') and m.bias is not None:
+            m.bias.requires_grad_(True)
+
+
 def set_last_k_transformer_layers_trainable(model, k: int):
     """
     Implements the user's specified 3-step algorithm:

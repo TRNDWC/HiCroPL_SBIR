@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(brew list *)",
+      "Read(//opt/homebrew/bin/**)",
+      "Bash(python3 -c \"import fitz; print\\(fitz.__version__\\)\")",
+      "Bash(python3 -c \"import pdfplumber; print\\('pdfplumber ok'\\)\")",
+      "Bash(python3 -c \"import PyPDF2; print\\('PyPDF2 ok'\\)\")",
+      "Bash(pip list *)",
+      "Bash(pip install *)",
+      "Bash(python3 -c ' *)",
+      "Read(//tmp/**)",
+      "Bash(grep -n -i -E \"sketchy-1|sketchy-2|sketchy_1|sketchy_2|sketchy 1|sketchy 2|104|21 |25 |unseen|imagenet|split|yelamarthi|shen\" /tmp/splip_paper.txt | head -80)",
+      "Read(//private/tmp/**)",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(which pdftotext *)",
+      "Read(//usr/local/bin/**)",
+      "Bash(python3 -c \"import PyPDF2\")",
+      "Bash(python3 -c \"import pdfplumber\")",
+      "Bash(python3 -c \"import fitz\")",
+      "Read(//Users/tranduc/.cache/clip/**)",
+      "Read(//Users/tranduc/**)",
+      "Read(//Users/tranduc/nckh/**)",
+      "WebFetch(domain:raw.githubusercontent.com)"
+    ]
+  }
+}
