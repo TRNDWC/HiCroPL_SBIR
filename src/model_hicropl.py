@@ -187,12 +187,15 @@ class CustomCLIP(nn.Module):
         # Backward-compatible alias for older code paths
         self.clip_distill = self.clip_distill_photo
 
-        # 2. Set Trainable LayerNorms
-        self.clip_photo.apply(freeze_all_but_bn)
-        self.clip_sketch.apply(freeze_all_but_bn)
+        self.clip_sketch.apply(freeze_model)
+        self.clip_photo.apply(freeze_model)
+        self.clip_distill_photo.apply(freeze_model)  
+        self.clip_distill_sketch.apply(freeze_model) 
 
-        self.clip_distill_photo.apply(freeze_all_but_bn)
-        self.clip_distill_sketch.apply(freeze_all_but_bn)
+        self.clip_sketch.apply(unfreeze_ln)
+        self.clip_photo.apply(unfreeze_ln)
+        self.clip_distill_photo.apply(unfreeze_ln)  
+        self.clip_distill_sketch.apply(unfreeze_ln) 
 
         # Print trainable param counts per branch for verification
         def _count_trainable(m):
@@ -393,8 +396,8 @@ class HiCroPL_SBIR(pl.LightningModule):
         try:
             vv = self.model.visual_visual_learner
             # visual tokens: number of prompt vectors (prompt_depth * n_ctx)
-            tokens_visual_photo = len(vv.cross_prompts_vis2) * vv.n_ctx
-            tokens_visual_sketch = len(vv.cross_prompts_vis1) * vv.n_ctx
+            tokens_visual_photo = len(vv.cross_prompts_photo) * vv.n_ctx
+            tokens_visual_sketch = len(vv.cross_prompts_sketch) * vv.n_ctx
         except Exception:
             tokens_visual_photo = 0
             tokens_visual_sketch = 0
