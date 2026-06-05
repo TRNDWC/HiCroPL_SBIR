@@ -47,67 +47,6 @@ def unfreeze_ln(m):
         if hasattr(m, 'bias') and m.bias is not None:
             m.bias.requires_grad_(True)
 
-
-def set_last_k_transformer_layers_trainable(model, k: int):
-    """
-    Implements the user's specified 3-step algorithm:
-    1) Freeze entire model (all params requires_grad=False)
-    2) LayerNorm global handling: if k == 0 -> close all LN; if k >=1 -> open all LN
-    3) Unfreeze all params (attention + FFN + LN) of the last-k resblocks in both
-       visual and text transformer stacks (if present).
-    This function is conservative about attribute access and will skip missing
-    components gracefully.
-    """
-    # Step 1: freeze entire model but only disable weight/bias on non-LayerNorm modules
-    for m in model.modules():
-        if not isinstance(m, torch.nn.LayerNorm):
-            if hasattr(m, "weight") and m.weight is not None:
-                m.weight.requires_grad_(False)
-            if hasattr(m, "bias") and m.bias is not None:
-                m.bias.requires_grad_(False)
-
-    # Step 2: global LayerNorm handling
-    ln_open = bool(k >= 1)
-    for module in model.modules():
-        if isinstance(module, torch.nn.LayerNorm):
-            for p in module.parameters(recurse=False):
-                p.requires_grad_(ln_open)
-
-    # Step 3: unfreeze last-k resblocks params in visual and text transformer stacks
-    if k <= 0:
-        return
-
-    def _unfreeze_resblocks(resblocks):
-        # resblocks may be a ModuleList or list-like; handle safely
-        try:
-            blocks = list(resblocks)
-        except Exception:
-            return
-        if k <= 0:
-            return
-        last_blocks = blocks[-k:]
-        for block in last_blocks:
-            for p in block.parameters():
-                p.requires_grad_(True)
-
-    # Visual encoder: model.visual.transformer.resblocks (common CLIP layout)
-    try:
-        vis = getattr(model, "visual", None)
-        if vis is not None:
-            trans = getattr(vis, "transformer", None)
-            if trans is not None and hasattr(trans, "resblocks"):
-                _unfreeze_resblocks(trans.resblocks)
-    except Exception:
-        pass
-
-    # Text encoder: model.transformer.resblocks (common CLIP layout)
-    try:
-        text_trans = getattr(model, "transformer", None)
-        if text_trans is not None and hasattr(text_trans, "resblocks"):
-            _unfreeze_resblocks(text_trans.resblocks)
-    except Exception:
-        pass
-
 def _normalize_classname(name):
     return str(name).strip().lower().replace(" ", "_")
 
@@ -187,15 +126,10 @@ class CustomCLIP(nn.Module):
         # Backward-compatible alias for older code paths
         self.clip_distill = self.clip_distill_photo
 
-        self.clip_sketch.apply(freeze_model)
-        self.clip_photo.apply(freeze_model)
-        self.clip_distill_photo.apply(freeze_model)  
-        self.clip_distill_sketch.apply(freeze_model) 
-
-        self.clip_sketch.apply(unfreeze_ln)
-        self.clip_photo.apply(unfreeze_ln)
-        self.clip_distill_photo.apply(unfreeze_ln)  
-        self.clip_distill_sketch.apply(unfreeze_ln) 
+        self.clip_sketch.apply(freeze_all_but_bn)
+        self.clip_photo.apply(freeze_all_but_bn)
+        self.clip_distill_photo.apply(freeze_all_but_bn)  
+        self.clip_distill_sketch.apply(freeze_all_but_bn) 
 
         # Print trainable param counts per branch for verification
         def _count_trainable(m):
