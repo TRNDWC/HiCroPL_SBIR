@@ -102,4 +102,12 @@ def loss_fn_hicropl(args, features):
     # Total loss: L1 (cross-modal) + L2 (visual consistency) + L4 (CE) + L_cons_text + L_cons_visual_cross
     total_loss = loss_cross_modal + loss_consistency + loss_ce + loss_cons_text + loss_cons_visual_cross
 
-    return total_loss
+    loss_dict = {
+        "cross": loss_cross_modal.detach(),
+        "vis": loss_consistency.detach(),
+        "ce": loss_ce.detach(),
+        "txt": loss_cons_text.detach(),
+        "v_cross": loss_cons_visual_cross.detach()
+    }
+
+    return total_loss, loss_dict

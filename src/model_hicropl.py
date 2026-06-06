@@ -409,10 +409,14 @@ class HiCroPL_SBIR(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         from src.losses_hicropl import loss_fn_hicropl
         features = self.model(batch, self.classnames)
-        loss = loss_fn_hicropl(self.args, features)
+        loss, loss_dict = loss_fn_hicropl(self.args, features)
         
-        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
-        self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False, logger=False)
+        # Log total loss
+        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        
+        # Log individual loss components
+        for k, v in loss_dict.items():
+            self.log(f'L_{k}', v, on_step=True, on_epoch=False, prog_bar=True, logger=True)
         
         return loss
 

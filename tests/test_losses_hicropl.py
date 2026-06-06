@@ -72,7 +72,7 @@ class TestHiCroPLLosses(unittest.TestCase):
         expected_total_loss = expected_triplet + expected_cls + expected_consist
 
         # Model output
-        actual_total_loss = loss_fn_hicropl(self.args, self.features)
+        actual_total_loss, _ = loss_fn_hicropl(self.args, self.features)
 
         self.assertTrue(
             torch.allclose(actual_total_loss, expected_total_loss, atol=1e-5),
@@ -86,7 +86,7 @@ class TestHiCroPLLosses(unittest.TestCase):
         """
         args_zeroed = DummyArgs(lambda_ce=0.0, lambda_consist=0.0)
         
-        loss_zeroed = loss_fn_hicropl(args_zeroed, self.features)
+        loss_zeroed, _ = loss_fn_hicropl(args_zeroed, self.features)
         
         # When lambdas are 0, only triplet loss should remain
         dist_pos = 1.0 - F.cosine_similarity(self.sketch_feat, self.photo_feat)
