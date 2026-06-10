@@ -272,50 +272,22 @@ class VisualVisualPromptLearner(nn.Module):
         self.dtype = dtype
         self.n_ctx = n_ctx
 
-        ######## photo prompt initialization (analog: text initialization) ########
-        # Text gốc dùng token_embedding("a photo of a") để có semantic prior
-        # Photo analog: dùng conv1 patch embedding của ảnh mẫu để có visual prior
-        # Nếu không có sample, fallback về random như visual gốc
+        # Shallow-only: single prompt vector per branch (no deep injection)
         photo_vectors = torch.empty(n_ctx, p_dim, dtype=dtype)
         nn.init.normal_(photo_vectors, std=0.02)
-        
-        # Layer 0: learnable (analog self.ctx trong gốc)
         self.ctx_photo = nn.Parameter(photo_vectors)
-        # Deeper layers: random init như gốc
-        cross_prompts_photo = nn.ParameterList(
-            [self.ctx_photo] + 
-            [nn.Parameter(torch.empty(n_ctx, p_dim, dtype=dtype)) 
-             for _ in range(self.prompt_depth - 1)]
-        )
-        for single_para in cross_prompts_photo[1:]:
-            nn.init.normal_(single_para, std=0.02)
-        self.cross_prompts_photo = cross_prompts_photo
-        ######## photo prompt initialization end ########
 
-        ######## sketch prompt initialization (analog: visual initialization) ########
         sketch_vectors = torch.empty(n_ctx, s_dim, dtype=dtype)
         nn.init.normal_(sketch_vectors, std=0.02)
-        cross_prompts_sketch = nn.ParameterList(
-            [nn.Parameter(sketch_vectors.clone()) 
-             for _ in range(self.prompt_depth)]
-        )
-        self.cross_prompts_sketch = cross_prompts_sketch
-        ######## sketch prompt initialization end ########
+        self.ctx_sketch = nn.Parameter(sketch_vectors)
 
     def forward(self):
-        # No cross-modal exchange: each branch learns its own prompts independently.
-        # photo and sketch prompt lists are used directly without update.
-        cross_prompts_photo_deeper = [
-            self.cross_prompts_photo[i] for i in range(1, len(self.cross_prompts_photo))
-        ]
-        cross_prompts_sketch_deeper = [
-            self.cross_prompts_sketch[i] for i in range(1, len(self.cross_prompts_sketch))
-        ]
+        # Shallow-only: return layer-0 prompts, empty deeper lists → no deep injection.
         return (
-            self.cross_prompts_photo[0],
-            self.cross_prompts_sketch[0],
-            cross_prompts_photo_deeper,
-            cross_prompts_sketch_deeper,
+            self.ctx_photo,
+            self.ctx_sketch,
+            [],  # photo deeper
+            [],  # sketch deeper
         )
 class SimpleTextPromptLearner(nn.Module):
     """Minimal text-only prompt learner: prepares tokenized prompts and text prompt tensors.
