@@ -108,8 +108,37 @@ class CustomCLIP(nn.Module):
             nn.init.normal_(self.visual_prompt_sketch, std=0.02)
             nn.init.normal_(self.visual_prompt_photo, std=0.02)
 
-        # Nhánh text: chỉ encode hard template "a photo of a [class]" / "a sketch of a [class]"
-        # qua text encoder (đã đóng băng hoàn toàn). KHÔNG có learnable token text.
+        # Learnable text tokens (CoOp-style, shallow, per branch).
+        with torch.no_grad():
+            def _ctx_from_init(text, n):
+                tok = _clip.tokenize(text).to(original_device)
+                emb = self.clip.token_embedding(tok).type(self.dtype)
+                return emb[0, 1:1 + n, :].clone()
+            ctx_photo_init = _ctx_from_init(ctx_init_photo, n_ctx)
+            ctx_sketch_init = _ctx_from_init(ctx_init_sketch, n_ctx)
+        self.text_ctx_photo = nn.Parameter(ctx_photo_init)
+        self.text_ctx_sketch = nn.Parameter(ctx_sketch_init)
+
+        # Prefix (SOS) and suffix (class + EOS + PAD) buffers for each branch.
+        placeholder = " ".join(["X"] * n_ctx)
+        def _build_prefix_suffix(templates):
+            tok = _clip.tokenize(templates).to(original_device)
+            with torch.no_grad():
+                emb = self.clip.token_embedding(tok).type(self.dtype)
+            prefix = emb[:, :1, :]           # [SOS]
+            suffix = emb[:, 1 + n_ctx:, :]  # [class + EOS + PAD]
+            return prefix, suffix, tok
+
+        ph_templates = [f"{placeholder} {n}.".replace("_", " ") for n in classnames]
+        sk_templates = [f"{placeholder} {n}.".replace("_", " ") for n in classnames]
+        ph_prefix, ph_suffix, ph_tok = _build_prefix_suffix(ph_templates)
+        sk_prefix, sk_suffix, sk_tok = _build_prefix_suffix(sk_templates)
+        self.register_buffer("text_prefix_photo", ph_prefix)
+        self.register_buffer("text_suffix_photo", ph_suffix)
+        self.register_buffer("text_prefix_sketch", sk_prefix)
+        self.register_buffer("text_suffix_sketch", sk_suffix)
+        self.register_buffer("text_eot_photo", ph_tok)
+        self.register_buffer("text_eot_sketch", sk_tok)
 
     def encode_visual(self, x, modality):
         """Encode image through the SHARED CLIP visual encoder + modality-specific prompt.
@@ -121,10 +150,29 @@ class CustomCLIP(nn.Module):
         prompt = vp.expand(x.shape[0], -1, -1) if vp.numel() > 0 else None
         return self.clip.encode_image(x.type(self.dtype), prompt=prompt)
 
-    def encode_text_template(self, modality):
-        """Encode hard template qua shared text encoder. KHÔNG có learnable token text."""
-        tokenized = self.tokenized_sketch if modality == "sketch" else self.tokenized_photo
-        return self.clip.encode_text(tokenized)
+    def encode_text_with_prompt(self, modality):
+        """Encode text with learnable shallow context tokens (CoOp-style)."""
+        if modality == "sketch":
+            ctx, prefix, suffix, eot = (
+                self.text_ctx_sketch, self.text_prefix_sketch,
+                self.text_suffix_sketch, self.text_eot_sketch,
+            )
+        else:
+            ctx, prefix, suffix, eot = (
+                self.text_ctx_photo, self.text_prefix_photo,
+                self.text_suffix_photo, self.text_eot_photo,
+            )
+        n_cls = prefix.shape[0]
+        ctx_exp = ctx.unsqueeze(0).expand(n_cls, -1, -1)
+        prompts = torch.cat([prefix, ctx_exp, suffix], dim=1).type(self.dtype)  # (n_cls, 77, dim)
+
+        x = prompts + self.clip.positional_embedding.type(self.dtype)
+        x = x.permute(1, 0, 2)          # NLD → LND
+        x = self.clip.transformer(x)
+        x = x.permute(1, 0, 2)          # LND → NLD
+        x = self.clip.ln_final(x).type(self.dtype)
+        x = x[torch.arange(n_cls), eot.argmax(dim=-1)] @ self.clip.text_projection
+        return x
 
     def forward(self, x, classnames):
         sk_tensor = x[0]
@@ -136,25 +184,25 @@ class CustomCLIP(nn.Module):
         photo_feat = self.encode_visual(photo_tensor, "photo")
         neg_feat = self.encode_visual(neg_tensor, "photo")
 
-        # CLIP-AT: L_cls dùng MỘT bộ text anchor "a photo of a [class]" cho CẢ hai modality
-        # (paper không dùng template riêng cho sketch).
-        text_feat = self.encode_text_template("photo")
+        # Separate text features per branch with learnable prompts
+        text_feat_photo = self.encode_text_with_prompt("photo")
+        text_feat_sketch = self.encode_text_with_prompt("sketch")
 
-        # L2-normalise for cosine similarity / cosine-distance triplet
         sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
         photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
         neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
-        text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
+        text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
+        text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
 
         logit_scale = self.logit_scale.exp()
-        logits_photo = logit_scale * photo_feat @ text_feat.t()
-        logits_sketch = logit_scale * sketch_feat @ text_feat.t()
+        logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
+        logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
 
         return (
             photo_feat, logits_photo,
             sketch_feat, logits_sketch,
             neg_feat, label,
-            text_feat, text_feat,
+            text_feat_photo, text_feat_sketch,
         )
 
 
@@ -180,13 +228,18 @@ class HiCroPL_SBIR(pl.LightningModule):
     def on_fit_start(self):
         tokens_visual_sketch = self.model.visual_prompt_sketch.shape[0]
         tokens_visual_photo = self.model.visual_prompt_photo.shape[0]
+        tokens_text_photo = self.model.text_ctx_photo.shape[0]
+        tokens_text_sketch = self.model.text_ctx_sketch.shape[0]
         self.print(
-            f"Learnable prompt tokens - visual/sketch: {tokens_visual_sketch}, "
-            f"visual/photo: {tokens_visual_photo} (no text prompts)"
+            f"Learnable tokens - visual/sketch: {tokens_visual_sketch}, "
+            f"visual/photo: {tokens_visual_photo}, "
+            f"text/photo: {tokens_text_photo}, text/sketch: {tokens_text_sketch}"
         )
         try:
             self.log('tokens_visual_sketch', tokens_visual_sketch, prog_bar=True, logger=True)
             self.log('tokens_visual_photo', tokens_visual_photo, prog_bar=True, logger=True)
+            self.log('tokens_text_photo', tokens_text_photo, prog_bar=True, logger=True)
+            self.log('tokens_text_sketch', tokens_text_sketch, prog_bar=True, logger=True)
         except Exception:
             pass
 
@@ -202,6 +255,7 @@ class HiCroPL_SBIR(pl.LightningModule):
         prompt_params = [
             p for p in [
                 self.model.visual_prompt_sketch, self.model.visual_prompt_photo,
+                self.model.text_ctx_photo, self.model.text_ctx_sketch,
             ]
             if p.requires_grad
         ]
