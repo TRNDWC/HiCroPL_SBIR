@@ -108,6 +108,7 @@ if __name__ == '__main__':
 
     # 4. Setup Checkpointing and Logger
     logger = TensorBoardLogger('tb_logs', name=opts.exp_name)
+    logger.log_hyperparams(vars(opts))
 
     if opts.eval_mode == 'fine_grained':
         checkpoint_monitor = 'top1'

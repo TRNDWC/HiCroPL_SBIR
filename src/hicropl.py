@@ -256,12 +256,14 @@ class VisualVisualPromptLearner(nn.Module):
     def __init__(self, cfg, clip_model_photo, clip_model_sketch):
         super().__init__()
 
-        self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
+        self.prompt_depth = getattr(cfg, 'vision_depth', getattr(cfg, 'prompt_depth', 9))
+        if self.prompt_depth < 0:
+            self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
         self.cross_layer = getattr(cfg, 'cross_layer', 4)
         n_ctx = getattr(cfg, 'n_ctx', 4)
         prec = getattr(cfg, 'prec', 'fp32')
 
-        assert self.prompt_depth >= 1
+        assert self.prompt_depth >= 0
 
         dtype = clip_model_photo.dtype
         # photo đóng vai text → dùng conv1 output dim làm "ctx_dim"
@@ -285,7 +287,7 @@ class VisualVisualPromptLearner(nn.Module):
         cross_prompts_photo = nn.ParameterList(
             [self.ctx_photo] + 
             [nn.Parameter(torch.empty(n_ctx, p_dim, dtype=dtype)) 
-             for _ in range(self.prompt_depth - 1)]
+             for _ in range(max(0, self.prompt_depth - 1))]
         )
         for single_para in cross_prompts_photo[1:]:
             nn.init.normal_(single_para, std=0.02)
@@ -297,7 +299,7 @@ class VisualVisualPromptLearner(nn.Module):
         nn.init.normal_(sketch_vectors, std=0.02)
         cross_prompts_sketch = nn.ParameterList(
             [nn.Parameter(sketch_vectors.clone()) 
-             for _ in range(self.prompt_depth)]
+             for _ in range(max(1, self.prompt_depth))]
         )
         self.cross_prompts_sketch = cross_prompts_sketch
         ######## sketch prompt initialization end ########
@@ -344,11 +346,20 @@ class VisualVisualPromptLearner(nn.Module):
         ######## knowledge mapper end ########
 
     def forward(self):
+        if self.prompt_depth == 0:
+            return (
+                self.cross_prompts_photo[0],
+                self.cross_prompts_sketch[0],
+                [],
+                []
+            )
+
         ######## P->S mapping (analog: T->I mapping) ########
         # Photo guides sketch ở shallow layers [0..cross_layer]
-        sketch_prompts = torch.cat(
-            [self.cross_prompts_sketch[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0
-        )
+        if self.cross_layer > 0:
+            sketch_prompts = torch.cat(
+                [self.cross_prompts_sketch[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0
+            )
         # LKP: compress photo prompts thành proxy
         proxy_photo_tokens = []
         for i in range(self.cross_layer):
@@ -375,10 +386,11 @@ class VisualVisualPromptLearner(nn.Module):
 
         ######## S->P mapping (analog: I->T mapping) ########
         # Sketch guides photo ở deep layers [cross_layer..prompt_depth]
-        photo_prompts = torch.cat(
-            [self.cross_prompts_photo[i].unsqueeze(0) 
-             for i in range(self.cross_layer, self.prompt_depth)], dim=0
-        )
+        if self.prompt_depth > self.cross_layer:
+            photo_prompts = torch.cat(
+                [self.cross_prompts_photo[i].unsqueeze(0) 
+                 for i in range(self.cross_layer, self.prompt_depth)], dim=0
+            )
         # LKP: compress sketch prompts thành proxy
         proxy_sketch_tokens = []
         for i in range(self.cross_layer, self.prompt_depth):
@@ -429,7 +441,9 @@ class SimpleTextPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
         n_cls = len(classnames)
-        self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
+        self.prompt_depth = getattr(cfg, 'language_depth', getattr(cfg, 'prompt_depth', 9))
+        if self.prompt_depth < 0:
+            self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
         n_ctx = getattr(cfg, 'n_ctx', 4)
         ctx_init = getattr(cfg, 'ctx_init', "a photo of a")
         dtype = clip_model.dtype
