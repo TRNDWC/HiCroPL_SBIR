@@ -451,10 +451,6 @@ class SimpleTextPromptLearner(nn.Module):
             prompt_prefix = " ".join(["X"] * n_ctx)
 
         self.ctx = nn.Parameter(ctx_vectors)
-        cross_prompts_text = nn.ParameterList([self.ctx] + [nn.Parameter(torch.empty(n_ctx, ctx_dim, dtype=dtype)) for _ in range(self.prompt_depth - 1)])
-        for p in cross_prompts_text[1:]:
-            nn.init.normal_(p, std=0.02)
-        self.cross_prompts_text = cross_prompts_text
 
         # register token prefix/suffix buffers for class prompts
         classnames = [name.replace("_", " ") for name in classnames]
@@ -475,12 +471,11 @@ class SimpleTextPromptLearner(nn.Module):
         return torch.cat([prefix, ctx, suffix], dim=1)
 
     def forward(self, label=None):
-        ctx = self.cross_prompts_text[0]
+        ctx = self.ctx
         if ctx.dim() == 2:
             ctx = ctx.unsqueeze(0).expand(self.tokenized_prompts.shape[0], -1, -1)
         text_input = self.construct_prompts(ctx, self.token_prefix, self.token_suffix, label=label)
-        cross_prompts_text_deeper = [self.cross_prompts_text[i] for i in range(1, len(self.cross_prompts_text))]
-        return text_input, cross_prompts_text_deeper
+        return text_input, []  # shallow-only: no deep injection
 
 
 class BranchPromptAdapter(nn.Module):

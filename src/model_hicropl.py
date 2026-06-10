@@ -377,9 +377,9 @@ class HiCroPL_SBIR(pl.LightningModule):
         """
         try:
             vv = self.model.visual_visual_learner
-            # visual tokens: number of prompt vectors (prompt_depth * n_ctx)
-            tokens_visual_photo = len(vv.cross_prompts_vis2) * vv.n_ctx
-            tokens_visual_sketch = len(vv.cross_prompts_vis1) * vv.n_ctx
+            # visual tokens: prompt_depth layers × n_ctx tokens per layer
+            tokens_visual_photo = len(vv.cross_prompts_photo) * vv.n_ctx
+            tokens_visual_sketch = len(vv.cross_prompts_sketch) * vv.n_ctx
         except Exception:
             tokens_visual_photo = 0
             tokens_visual_sketch = 0
@@ -387,8 +387,9 @@ class HiCroPL_SBIR(pl.LightningModule):
         try:
             tp = self.model.text_prompt_photo
             ts = self.model.text_prompt_sketch
-            tokens_text_photo = len(tp.cross_prompts_text) * tp.cross_prompts_text[0].shape[0]
-            tokens_text_sketch = len(ts.cross_prompts_text) * ts.cross_prompts_text[0].shape[0]
+            # text: shallow-only prompt → ctx shape[0] = n_ctx tokens (1 layer)
+            tokens_text_photo = tp.ctx.shape[0]
+            tokens_text_sketch = ts.ctx.shape[0]
         except Exception:
             tokens_text_photo = 0
             tokens_text_sketch = 0

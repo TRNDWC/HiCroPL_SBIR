@@ -293,7 +293,7 @@ class ResidualAttentionBlock_HiCroPL(nn.Module):
 
         # Will need to append the learnable tokens for this layer here
         # Check if flag was set for this layer or not
-        if self.add_prompt:  # Depending on the hyper-parameter K, self.add_prompt is set to True when i < K ,
+        if self.add_prompt and len(cross_prompts_deeper) > 0:  # Depending on the hyper-parameter K, self.add_prompt is set to True when i < K ,
             # Also see if this is textual transformer layer or not
             if not self.text_layer:  # visual
                 # Remove the outputs produced by learnable tokens of previous layer
