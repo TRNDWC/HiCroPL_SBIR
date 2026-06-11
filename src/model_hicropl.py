@@ -48,7 +48,7 @@ class CustomCLIP(nn.Module):
     """CLIP-AT-aligned model (Sain et al. CVPR'23).
 
     Faithful to the OFFICIAL repo (aneeshan95/Sketch_LVM, file `model_LN_prompt.py`):
-      - SINGLE shared CLIP backbone (`self.clip`), not two separate encoders.
+      - TWO separate CLIP backbones (`self.clip_photo`, `self.clip_sketch`), one per modality.
       - Trainable visual params come from `clip.apply(freeze_all_but_bn)` which leaves
         LN + MHA QKV projections + naked Parameters open (~21.7M visual params).
       - Two visual prompts (sketch / photo), shallow, injected at the first ViT layer.
@@ -70,36 +70,30 @@ class CustomCLIP(nn.Module):
         original_device = next(clip_model.parameters()).device
         self.dtype = clip_model.dtype
 
-        # 1 SHARED CLIP backbone — đúng official (aneeshan95/Sketch_LVM/model_LN_prompt.py).
-        # freeze_all_but_bn: freeze .weight/.bias của mọi module KHÔNG phải LayerNorm,
-        # để lại LN + naked params (in_proj, class_embedding, positional_embedding, proj...) trainable.
-        self.clip = copy.deepcopy(clip_model).to(original_device)
-        self.clip.apply(freeze_all_but_bn)
+        # 2 separate CLIP backbones — one per modality (photo / sketch).
+        # Each backbone's visual encoder handles images and text encoder handles text for that branch.
+        self.clip_photo = copy.deepcopy(clip_model).to(original_device)
+        self.clip_sketch = copy.deepcopy(clip_model).to(original_device)
+        self.clip_photo.apply(freeze_all_but_bn)
+        self.clip_sketch.apply(freeze_all_but_bn)
 
         def _count_trainable(m):
             total = sum(p.numel() for p in m.parameters())
             trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
             return total, trainable
 
-        c_tot, c_tr = _count_trainable(self.clip)
-        _, cv_tr = _count_trainable(self.clip.visual)
-        ct_tr = c_tr - cv_tr
-        print(f"clip (1 shared, LN-only): trainable {c_tr:,} / total {c_tot:,}")
-        print(f"  - visual side LN: {cv_tr:,}")
-        print(f"  - text   side LN: {ct_tr:,}")
+        for name, model in [("clip_photo", self.clip_photo), ("clip_sketch", self.clip_sketch)]:
+            tot, tr = _count_trainable(model)
+            print(f"{name}: trainable {tr:,} / total {tot:,}")
 
-        self.logit_scale = self.clip.logit_scale
+        self.logit_scale_photo = self.clip_photo.logit_scale
+        self.logit_scale_sketch = self.clip_sketch.logit_scale
 
-        # Per-modality hard templates encoded as-is qua text encoder (đông cứng).
         ctx_init_photo = getattr(cfg, "ctx_init", "a photo of a")
         ctx_init_sketch = getattr(cfg, "ctx_init_sketch", "a sketch of a")
-        prompts_photo = [f"{ctx_init_photo} {name}.".replace("_", " ").strip() for name in classnames]
-        prompts_sketch = [f"{ctx_init_sketch} {name}.".replace("_", " ").strip() for name in classnames]
-        self.register_buffer("tokenized_photo", _clip.tokenize(prompts_photo).to(original_device))
-        self.register_buffer("tokenized_sketch", _clip.tokenize(prompts_sketch).to(original_device))
 
-        # Two separate shallow visual prompts (official CLIP-AT: sk_prompt, img_prompt).
-        prompt_dim_v = self.clip.visual.conv1.weight.shape[0]
+        # Two separate shallow visual prompts.
+        prompt_dim_v = self.clip_photo.visual.conv1.weight.shape[0]
         n_ctx = int(getattr(cfg, "n_ctx", 3))
         self.n_ctx = n_ctx
         self.visual_prompt_sketch = nn.Parameter(torch.empty(n_ctx, prompt_dim_v, dtype=self.dtype))
@@ -108,31 +102,29 @@ class CustomCLIP(nn.Module):
             nn.init.normal_(self.visual_prompt_sketch, std=0.02)
             nn.init.normal_(self.visual_prompt_photo, std=0.02)
 
-        # Learnable text tokens (CoOp-style, shallow, per branch).
+        # Learnable text tokens — each branch uses its own CLIP's token_embedding for init.
         with torch.no_grad():
-            def _ctx_from_init(text, n):
+            def _ctx_from_init(clip, text, n):
                 tok = _clip.tokenize(text).to(original_device)
-                emb = self.clip.token_embedding(tok).type(self.dtype)
+                emb = clip.token_embedding(tok).type(self.dtype)
                 return emb[0, 1:1 + n, :].clone()
-            ctx_photo_init = _ctx_from_init(ctx_init_photo, n_ctx)
-            ctx_sketch_init = _ctx_from_init(ctx_init_sketch, n_ctx)
+            ctx_photo_init = _ctx_from_init(self.clip_photo, ctx_init_photo, n_ctx)
+            ctx_sketch_init = _ctx_from_init(self.clip_sketch, ctx_init_sketch, n_ctx)
         self.text_ctx_photo = nn.Parameter(ctx_photo_init)
         self.text_ctx_sketch = nn.Parameter(ctx_sketch_init)
 
-        # Prefix (SOS) and suffix (class + EOS + PAD) buffers for each branch.
+        # Prefix (SOS) and suffix (class + EOS + PAD) buffers — built with respective token_embedding.
         placeholder = " ".join(["X"] * n_ctx)
-        def _build_prefix_suffix(templates):
+        def _build_prefix_suffix(clip, templates):
             tok = _clip.tokenize(templates).to(original_device)
             with torch.no_grad():
-                emb = self.clip.token_embedding(tok).type(self.dtype)
-            prefix = emb[:, :1, :]           # [SOS]
-            suffix = emb[:, 1 + n_ctx:, :]  # [class + EOS + PAD]
-            return prefix, suffix, tok
+                emb = clip.token_embedding(tok).type(self.dtype)
+            return emb[:, :1, :], emb[:, 1 + n_ctx:, :], tok
 
         ph_templates = [f"{placeholder} {n}.".replace("_", " ") for n in classnames]
         sk_templates = [f"{placeholder} {n}.".replace("_", " ") for n in classnames]
-        ph_prefix, ph_suffix, ph_tok = _build_prefix_suffix(ph_templates)
-        sk_prefix, sk_suffix, sk_tok = _build_prefix_suffix(sk_templates)
+        ph_prefix, ph_suffix, ph_tok = _build_prefix_suffix(self.clip_photo, ph_templates)
+        sk_prefix, sk_suffix, sk_tok = _build_prefix_suffix(self.clip_sketch, sk_templates)
         self.register_buffer("text_prefix_photo", ph_prefix)
         self.register_buffer("text_suffix_photo", ph_suffix)
         self.register_buffer("text_prefix_sketch", sk_prefix)
@@ -141,37 +133,35 @@ class CustomCLIP(nn.Module):
         self.register_buffer("text_eot_sketch", sk_tok)
 
     def encode_visual(self, x, modality):
-        """Encode image through the SHARED CLIP visual encoder + modality-specific prompt.
-
-        1 backbone chung `self.clip.visual`, tách bằng 2 visual prompt (v^s, v^p) —
-        đúng official aneeshan95/Sketch_LVM.
-        """
-        vp = self.visual_prompt_sketch if modality == "sketch" else self.visual_prompt_photo
+        clip = self.clip_photo if modality == "photo" else self.clip_sketch
+        vp = self.visual_prompt_photo if modality == "photo" else self.visual_prompt_sketch
         prompt = vp.expand(x.shape[0], -1, -1) if vp.numel() > 0 else None
-        return self.clip.encode_image(x.type(self.dtype), prompt=prompt)
+        return clip.encode_image(x.type(self.dtype), prompt=prompt)
 
     def encode_text_with_prompt(self, modality):
         """Encode text with learnable shallow context tokens (CoOp-style)."""
-        if modality == "sketch":
-            ctx, prefix, suffix, eot = (
-                self.text_ctx_sketch, self.text_prefix_sketch,
-                self.text_suffix_sketch, self.text_eot_sketch,
-            )
-        else:
+        if modality == "photo":
+            clip = self.clip_photo
             ctx, prefix, suffix, eot = (
                 self.text_ctx_photo, self.text_prefix_photo,
                 self.text_suffix_photo, self.text_eot_photo,
             )
+        else:
+            clip = self.clip_sketch
+            ctx, prefix, suffix, eot = (
+                self.text_ctx_sketch, self.text_prefix_sketch,
+                self.text_suffix_sketch, self.text_eot_sketch,
+            )
         n_cls = prefix.shape[0]
         ctx_exp = ctx.unsqueeze(0).expand(n_cls, -1, -1)
-        prompts = torch.cat([prefix, ctx_exp, suffix], dim=1).type(self.dtype)  # (n_cls, 77, dim)
+        prompts = torch.cat([prefix, ctx_exp, suffix], dim=1).type(self.dtype)
 
-        x = prompts + self.clip.positional_embedding.type(self.dtype)
-        x = x.permute(1, 0, 2)          # NLD → LND
-        x = self.clip.transformer(x)
-        x = x.permute(1, 0, 2)          # LND → NLD
-        x = self.clip.ln_final(x).type(self.dtype)
-        x = x[torch.arange(n_cls), eot.argmax(dim=-1)] @ self.clip.text_projection
+        x = prompts + clip.positional_embedding.type(self.dtype)
+        x = x.permute(1, 0, 2)
+        x = clip.transformer(x)
+        x = x.permute(1, 0, 2)
+        x = clip.ln_final(x).type(self.dtype)
+        x = x[torch.arange(n_cls), eot.argmax(dim=-1)] @ clip.text_projection
         return x
 
     def forward(self, x, classnames):
@@ -184,7 +174,6 @@ class CustomCLIP(nn.Module):
         photo_feat = self.encode_visual(photo_tensor, "photo")
         neg_feat = self.encode_visual(neg_tensor, "photo")
 
-        # Separate text features per branch with learnable prompts
         text_feat_photo = self.encode_text_with_prompt("photo")
         text_feat_sketch = self.encode_text_with_prompt("sketch")
 
@@ -194,9 +183,8 @@ class CustomCLIP(nn.Module):
         text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
         text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
 
-        logit_scale = self.logit_scale.exp()
-        logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
-        logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
+        logits_photo = self.logit_scale_photo.exp() * photo_feat @ text_feat_photo.t()
+        logits_sketch = self.logit_scale_sketch.exp() * sketch_feat @ text_feat_sketch.t()
 
         return (
             photo_feat, logits_photo,
@@ -247,7 +235,7 @@ class HiCroPL_SBIR(pl.LightningModule):
         """Official CLIP-AT optimizer pattern (Sain et al. CVPR'23).
 
         Two groups:
-          1. ALL `self.clip.parameters()` at `clip_LN_lr` — Adam only updates the ones with
+          1. ALL `self.clip_photo` + `self.clip_sketch` parameters at `clip_LN_lr` — Adam only updates the ones with
              `requires_grad=True`, which after `freeze_all_but_bn` includes LN + naked
              Parameters + MHA QKV projections (~21.7M visual + ~22M text).
           2. Learnable prompts (visual + text, both modalities) at `prompt_lr`.
@@ -260,11 +248,11 @@ class HiCroPL_SBIR(pl.LightningModule):
             if p.requires_grad
         ]
 
-        clip_params = list(self.model.clip.parameters())
+        clip_params = list(self.model.clip_photo.parameters()) + list(self.model.clip_sketch.parameters())
         clip_trainable = sum(p.numel() for p in clip_params if p.requires_grad)
 
         self.print(f"Trainable prompt params (visual + text, both modalities): {sum(p.numel() for p in prompt_params):,}")
-        self.print(f"Trainable clip params (LN + naked + MHA QKV, official CLIP-AT pattern): {clip_trainable:,}")
+        self.print(f"Trainable clip params (2 backbones, LN + naked + MHA QKV): {clip_trainable:,}")
 
         prompt_lr = getattr(self.cfg, 'prompt_lr', 1e-5)
         clip_ln_lr = getattr(self.cfg, 'clip_LN_lr', 1e-5)
