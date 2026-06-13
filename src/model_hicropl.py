@@ -62,7 +62,7 @@ class CustomCLIP(nn.Module):
         # EXPERIMENT "without LayerNorm": freeze TOÀN BỘ backbone (kể cả LN, QKV, naked Params).
         # Chỉ 2 visual prompts train được (~4.6K params).
         self.clip = copy.deepcopy(clip_model).to(original_device)
-        freeze_model(self.clip)
+        self.clip.apply(freeze_all_but_bn)  # Freeze all but LayerNorm (official CLIP-AT pattern).
 
         def _count_trainable(m):
             total = sum(p.numel() for p in m.parameters())
