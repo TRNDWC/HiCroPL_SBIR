@@ -70,20 +70,29 @@ class CustomCLIP(nn.Module):
         original_device = next(clip_model.parameters()).device
         self.dtype = clip_model.dtype
 
-        # 2 separate CLIP backbones — one per modality (photo / sketch).
-        # Each backbone's visual encoder handles images and text encoder handles text for that branch.
+        # 2 visual CLIP backbones — one per modality (photo / sketch).
         self.clip_photo = copy.deepcopy(clip_model).to(original_device)
         self.clip_sketch = copy.deepcopy(clip_model).to(original_device)
         self.clip_photo.apply(freeze_all_but_bn)
         self.clip_sketch.apply(freeze_all_but_bn)
+
+        # [Thay đổi 1] model_distill: shared text encoder + aug feature encoder.
+        # Dùng clip_model_frozen (CoOp/IVLP, vision_depth=0) — apply freeze_all_but_bn
+        # giống CoPrompt (KHÔNG freeze hoàn toàn, LN vẫn trainable).
+        if clip_model_frozen is None:
+            clip_model_frozen = clip_model
+        self.model_distill = copy.deepcopy(clip_model_frozen).to(original_device)
+        self.model_distill.apply(freeze_all_but_bn)
 
         def _count_trainable(m):
             total = sum(p.numel() for p in m.parameters())
             trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
             return total, trainable
 
-        for name, model in [("clip_photo", self.clip_photo), ("clip_sketch", self.clip_sketch)]:
-            tot, tr = _count_trainable(model)
+        for name, m in [("clip_photo", self.clip_photo),
+                         ("clip_sketch", self.clip_sketch),
+                         ("model_distill", self.model_distill)]:
+            tot, tr = _count_trainable(m)
             print(f"{name}: trainable {tr:,} / total {tot:,}")
 
         self.logit_scale_photo = self.clip_photo.logit_scale
@@ -102,29 +111,30 @@ class CustomCLIP(nn.Module):
             nn.init.normal_(self.visual_prompt_sketch, std=0.02)
             nn.init.normal_(self.visual_prompt_photo, std=0.02)
 
-        # Learnable text tokens — each branch uses its own CLIP's token_embedding for init.
+        # [Thay đổi 2] Learnable text tokens — khởi tạo từ model_distill.token_embedding
+        # (shared cho cả 2 nhánh, giống CoPrompt).
         with torch.no_grad():
-            def _ctx_from_init(clip, text, n):
+            def _ctx_from_init(text, n):
                 tok = _clip.tokenize(text).to(original_device)
-                emb = clip.token_embedding(tok).type(self.dtype)
+                emb = self.model_distill.token_embedding(tok).type(self.dtype)
                 return emb[0, 1:1 + n, :].clone()
-            ctx_photo_init = _ctx_from_init(self.clip_photo, ctx_init_photo, n_ctx)
-            ctx_sketch_init = _ctx_from_init(self.clip_sketch, ctx_init_sketch, n_ctx)
+            ctx_photo_init = _ctx_from_init(ctx_init_photo, n_ctx)
+            ctx_sketch_init = _ctx_from_init(ctx_init_sketch, n_ctx)
         self.text_ctx_photo = nn.Parameter(ctx_photo_init)
         self.text_ctx_sketch = nn.Parameter(ctx_sketch_init)
 
-        # Prefix (SOS) and suffix (class + EOS + PAD) buffers — built with respective token_embedding.
+        # [Thay đổi 2] Prefix/suffix buffers dùng model_distill.token_embedding (shared).
         placeholder = " ".join(["X"] * n_ctx)
-        def _build_prefix_suffix(clip, templates):
+        def _build_prefix_suffix(templates):
             tok = _clip.tokenize(templates).to(original_device)
             with torch.no_grad():
-                emb = clip.token_embedding(tok).type(self.dtype)
+                emb = self.model_distill.token_embedding(tok).type(self.dtype)
             return emb[:, :1, :], emb[:, 1 + n_ctx:, :], tok
 
         ph_templates = [f"{placeholder} {n}.".replace("_", " ") for n in classnames]
         sk_templates = [f"{placeholder} {n}.".replace("_", " ") for n in classnames]
-        ph_prefix, ph_suffix, ph_tok = _build_prefix_suffix(self.clip_photo, ph_templates)
-        sk_prefix, sk_suffix, sk_tok = _build_prefix_suffix(self.clip_sketch, sk_templates)
+        ph_prefix, ph_suffix, ph_tok = _build_prefix_suffix(ph_templates)
+        sk_prefix, sk_suffix, sk_tok = _build_prefix_suffix(sk_templates)
         self.register_buffer("text_prefix_photo", ph_prefix)
         self.register_buffer("text_suffix_photo", ph_suffix)
         self.register_buffer("text_prefix_sketch", sk_prefix)
@@ -139,15 +149,17 @@ class CustomCLIP(nn.Module):
         return clip.encode_image(x.type(self.dtype), prompt=prompt)
 
     def encode_text_with_prompt(self, modality):
-        """Encode text with learnable shallow context tokens (CoOp-style)."""
+        """Encode text with learnable shallow context tokens.
+
+        [Thay đổi 2] Dùng model_distill (shared text encoder) cho cả 2 nhánh,
+        chỉ ctx (learnable tokens) là khác nhau giữa photo và sketch.
+        """
         if modality == "photo":
-            clip = self.clip_photo
             ctx, prefix, suffix, eot = (
                 self.text_ctx_photo, self.text_prefix_photo,
                 self.text_suffix_photo, self.text_eot_photo,
             )
         else:
-            clip = self.clip_sketch
             ctx, prefix, suffix, eot = (
                 self.text_ctx_sketch, self.text_prefix_sketch,
                 self.text_suffix_sketch, self.text_eot_sketch,
@@ -156,12 +168,12 @@ class CustomCLIP(nn.Module):
         ctx_exp = ctx.unsqueeze(0).expand(n_cls, -1, -1)
         prompts = torch.cat([prefix, ctx_exp, suffix], dim=1).type(self.dtype)
 
-        x = prompts + clip.positional_embedding.type(self.dtype)
+        x = prompts + self.model_distill.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)
-        x = clip.transformer(x)
+        x = self.model_distill.transformer(x)
         x = x.permute(1, 0, 2)
-        x = clip.ln_final(x).type(self.dtype)
-        x = x[torch.arange(n_cls), eot.argmax(dim=-1)] @ clip.text_projection
+        x = self.model_distill.ln_final(x).type(self.dtype)
+        x = x[torch.arange(n_cls), eot.argmax(dim=-1)] @ self.model_distill.text_projection
         return x
 
     def forward(self, x, classnames):
@@ -248,11 +260,13 @@ class HiCroPL_SBIR(pl.LightningModule):
             if p.requires_grad
         ]
 
-        clip_params = list(self.model.clip_photo.parameters()) + list(self.model.clip_sketch.parameters())
+        clip_params = (list(self.model.clip_photo.parameters()) +
+                       list(self.model.clip_sketch.parameters()) +
+                       list(self.model.model_distill.parameters()))
         clip_trainable = sum(p.numel() for p in clip_params if p.requires_grad)
 
         self.print(f"Trainable prompt params (visual + text, both modalities): {sum(p.numel() for p in prompt_params):,}")
-        self.print(f"Trainable clip params (2 backbones, LN + naked + MHA QKV): {clip_trainable:,}")
+        self.print(f"Trainable clip params (clip_photo + clip_sketch + model_distill): {clip_trainable:,}")
 
         prompt_lr = getattr(self.cfg, 'prompt_lr', 1e-5)
         clip_ln_lr = getattr(self.cfg, 'clip_LN_lr', 1e-5)
