@@ -58,15 +58,15 @@ def nt_xent(features_view1: torch.Tensor, features_view2: torch.Tensor, temperat
 
 
 def loss_fn_hicropl(args, features):
-    """SBIR loss: CE + Triplet + NT-Xent (giống CoPrompt, bỏ Distillation).
+    """SBIR loss: CE + Triplet + Distill + NT-Xent (giống CoPrompt).
 
-    L_total = (CE_photo + CE_sketch) + Triplet(sketch, photo+, photo-) + NT-Xent(photo, sketch)
+    L_total = CE + Triplet(sketch, photo+, photo-) + Distill(orig, aug) + NT-Xent(photo, sketch)
     """
     (
         photo_feat, logits_photo,
         sketch_feat, logits_sketch,
         neg_feat, label,
-        *_
+        photo_aug_feat, sk_aug_feat,
     ) = features
 
     device = logits_photo.device
@@ -84,4 +84,11 @@ def loss_fn_hicropl(args, features):
     # NT-Xent cross-modal (photo ↔ sketch)
     loss_nt_xent = nt_xent(photo_feat, sketch_feat)
 
-    return loss_ce  + loss_nt_xent
+    # Distillation: align fine-tuned features với frozen CLIP trên augmented views
+    temperature = getattr(args, 'temperature', 0.07)
+    loss_distill = (
+        cross_loss(photo_feat, photo_aug_feat, temperature) +
+        cross_loss(sketch_feat, sk_aug_feat, temperature)
+    )
+
+    return loss_ce + loss_triplet  + loss_nt_xent
