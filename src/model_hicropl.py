@@ -13,20 +13,6 @@ def freeze_model(m):
         param.requires_grad_(False)
 
 
-def unfreeze_ln(m):
-    """Mở lại weight/bias của mọi LayerNorm trong module.
-
-    Dùng SAU `freeze_model(...)` để thực thi pattern "chỉ LN trainable":
-        freeze_model(encoder)           # đông cứng tất cả
-        encoder.apply(unfreeze_ln)      # chỉ mở LN
-    """
-    if isinstance(m, nn.LayerNorm):
-        if hasattr(m, 'weight') and m.weight is not None:
-            m.weight.requires_grad_(True)
-        if hasattr(m, 'bias') and m.bias is not None:
-            m.bias.requires_grad_(True)
-
-
 def freeze_all_but_bn(m):
     """Official CLIP-AT freeze hook (Sain et al. CVPR'23).
 
@@ -44,20 +30,39 @@ def freeze_all_but_bn(m):
             m.bias.requires_grad_(False)
 
 
+class TextEncoder(nn.Module):
+    """Text encoder delegating to clip_model_distill's transformer components.
+
+    Uses a list wrapper so PyTorch does NOT register model_distill's sub-modules
+    as submodules of TextEncoder — avoiding duplicate state_dict keys and
+    inflated checkpoint size.  All parameters remain registered only under
+    `model_distill.*`.
+    """
+
+    def __init__(self, clip_model):
+        super().__init__()
+        # List wrapper: PyTorch only registers nn.Module / nn.Parameter attributes,
+        # not plain list contents — so clip_model's params are not double-counted.
+        self._clip = [clip_model]
+        self.dtype = clip_model.dtype
+
+    def forward(self, prompts, tokenized_prompts):
+        clip = self._clip[0]
+        x = prompts + clip.positional_embedding.type(self.dtype)
+        x = x.permute(1, 0, 2)  # NLD -> LND
+        for block in clip.transformer.resblocks:
+            x = block(x)
+        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = clip.ln_final(x).type(self.dtype)
+        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ clip.text_projection
+        return x
+
+
 class CustomCLIP(nn.Module):
-    """CLIP-AT-aligned model (Sain et al. CVPR'23).
+    """CoPrompt-aligned model.
 
-    Faithful to the OFFICIAL repo (aneeshan95/Sketch_LVM, file `model_LN_prompt.py`):
-      - TWO separate CLIP backbones (`self.clip_photo`, `self.clip_sketch`), one per modality.
-      - Trainable visual params come from `clip.apply(freeze_all_but_bn)` which leaves
-        LN + MHA QKV projections + naked Parameters open (~21.7M visual params).
-      - Two visual prompts (sketch / photo), shallow, injected at the first ViT layer.
-
-    Freeze pattern (`clip.apply(freeze_all_but_bn)`):
-      - LN weight/bias: trainable (mọi block visual + text)
-      - MHA in_proj_weight / in_proj_bias: trainable (naked params, không bị freeze_all_but_bn chạm vào)
-      - class_embedding, positional_embedding, proj, token_embedding, text_projection: trainable
-      - Conv/Linear weight/bias: frozen
+    Two separate visual encoders (photo / sketch) from clip_model.visual,
+    shared TextEncoder from clip_model_distill.
     """
 
     def __init__(self, cfg, clip_model, clip_model_frozen=None, classnames=None):
@@ -70,39 +75,40 @@ class CustomCLIP(nn.Module):
         original_device = next(clip_model.parameters()).device
         self.dtype = clip_model.dtype
 
-        # 2 visual CLIP backbones — one per modality (photo / sketch).
-        self.clip_photo = copy.deepcopy(clip_model).to(original_device)
-        self.clip_sketch = copy.deepcopy(clip_model).to(original_device)
-        self.clip_photo.apply(freeze_all_but_bn)
-        self.clip_sketch.apply(freeze_all_but_bn)
+        # Two visual encoders (photo / sketch) — deepcopy of clip_model.visual only.
+        self.ph_encoder = copy.deepcopy(clip_model.visual).to(original_device)
+        self.sk_encoder = copy.deepcopy(clip_model.visual).to(original_device)
+        self.ph_encoder.apply(freeze_all_but_bn)
+        self.sk_encoder.apply(freeze_all_but_bn)
 
-        # [Thay đổi 1] model_distill: shared text encoder + aug feature encoder.
-        # Dùng clip_model_frozen (CoOp/IVLP, vision_depth=0) — apply freeze_all_but_bn
-        # giống CoPrompt (KHÔNG freeze hoàn toàn, LN vẫn trainable).
+        # Distill model for text encoding.
         if clip_model_frozen is None:
             clip_model_frozen = clip_model
         self.model_distill = copy.deepcopy(clip_model_frozen).to(original_device)
         self.model_distill.apply(freeze_all_but_bn)
+
+        # TextEncoder delegates to model_distill's components (no double-registration).
+        self.text_encoder = TextEncoder(self.model_distill)
 
         def _count_trainable(m):
             total = sum(p.numel() for p in m.parameters())
             trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
             return total, trainable
 
-        for name, m in [("clip_photo", self.clip_photo),
-                         ("clip_sketch", self.clip_sketch),
+        for name, m in [("ph_encoder", self.ph_encoder),
+                         ("sk_encoder", self.sk_encoder),
                          ("model_distill", self.model_distill)]:
             tot, tr = _count_trainable(m)
             print(f"{name}: trainable {tr:,} / total {tot:,}")
 
-        self.logit_scale_photo = self.clip_photo.logit_scale
-        self.logit_scale_sketch = self.clip_sketch.logit_scale
+        # Single shared logit scale (cloned from clip_model to avoid keeping full CLIP in memory).
+        self.logit_scale = nn.Parameter(clip_model.logit_scale.data.clone())
 
         ctx_init_photo = getattr(cfg, "ctx_init", "a photo of a")
         ctx_init_sketch = getattr(cfg, "ctx_init_sketch", "a sketch of a")
 
-        # Two separate shallow visual prompts.
-        prompt_dim_v = self.clip_photo.visual.conv1.weight.shape[0]
+        # Shallow visual prompts.
+        prompt_dim_v = self.ph_encoder.conv1.weight.shape[0]
         n_ctx = int(getattr(cfg, "n_ctx", 3))
         self.n_ctx = n_ctx
         self.visual_prompt_sketch = nn.Parameter(torch.empty(n_ctx, prompt_dim_v, dtype=self.dtype))
@@ -111,8 +117,7 @@ class CustomCLIP(nn.Module):
             nn.init.normal_(self.visual_prompt_sketch, std=0.02)
             nn.init.normal_(self.visual_prompt_photo, std=0.02)
 
-        # [Thay đổi 2] Learnable text tokens — khởi tạo từ model_distill.token_embedding
-        # (shared cho cả 2 nhánh, giống CoPrompt).
+        # Learnable text ctx — init from model_distill.token_embedding, separate for photo/sketch.
         with torch.no_grad():
             def _ctx_from_init(text, n):
                 tok = _clip.tokenize(text).to(original_device)
@@ -123,7 +128,10 @@ class CustomCLIP(nn.Module):
         self.text_ctx_photo = nn.Parameter(ctx_photo_init)
         self.text_ctx_sketch = nn.Parameter(ctx_sketch_init)
 
-        # [Thay đổi 2] Prefix/suffix buffers dùng model_distill.token_embedding (shared).
+        # Dropout for text ctx (applied during training, separate for each modality).
+        self.ctx_dropout = nn.Dropout(p=0.1)
+
+        # Prefix/suffix buffers from model_distill.token_embedding.
         placeholder = " ".join(["X"] * n_ctx)
         def _build_prefix_suffix(templates):
             tok = _clip.tokenize(templates).to(original_device)
@@ -143,16 +151,16 @@ class CustomCLIP(nn.Module):
         self.register_buffer("text_eot_sketch", sk_tok)
 
     def encode_visual(self, x, modality):
-        clip = self.clip_photo if modality == "photo" else self.clip_sketch
+        encoder = self.ph_encoder if modality == "photo" else self.sk_encoder
         vp = self.visual_prompt_photo if modality == "photo" else self.visual_prompt_sketch
-        prompt = vp.expand(x.shape[0], -1, -1) if vp.numel() > 0 else None
-        return clip.encode_image(x.type(self.dtype), prompt=prompt)
+        prompt = vp.expand(x.shape[0], -1, -1).type(self.dtype) if vp.numel() > 0 else None
+        return encoder(x.type(self.dtype), prompt)
 
     def encode_text_with_prompt(self, modality):
         """Encode text with learnable shallow context tokens.
 
-        [Thay đổi 2] Dùng model_distill (shared text encoder) cho cả 2 nhánh,
-        chỉ ctx (learnable tokens) là khác nhau giữa photo và sketch.
+        Separate ctx per modality; dropout applied during training.
+        Uses TextEncoder wrapping model_distill's transformer.
         """
         if modality == "photo":
             ctx, prefix, suffix, eot = (
@@ -164,17 +172,15 @@ class CustomCLIP(nn.Module):
                 self.text_ctx_sketch, self.text_prefix_sketch,
                 self.text_suffix_sketch, self.text_eot_sketch,
             )
+
+        if self.training:
+            ctx = self.ctx_dropout(ctx)
+
         n_cls = prefix.shape[0]
         ctx_exp = ctx.unsqueeze(0).expand(n_cls, -1, -1)
         prompts = torch.cat([prefix, ctx_exp, suffix], dim=1).type(self.dtype)
 
-        x = prompts + self.model_distill.positional_embedding.type(self.dtype)
-        x = x.permute(1, 0, 2)
-        x = self.model_distill.transformer(x)
-        x = x.permute(1, 0, 2)
-        x = self.model_distill.ln_final(x).type(self.dtype)
-        x = x[torch.arange(n_cls), eot.argmax(dim=-1)] @ self.model_distill.text_projection
-        return x
+        return self.text_encoder(prompts, eot)
 
     def forward(self, x, classnames):
         sk_tensor = x[0]
@@ -195,8 +201,9 @@ class CustomCLIP(nn.Module):
         text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
         text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
 
-        logits_photo = self.logit_scale_photo.exp() * photo_feat @ text_feat_photo.t()
-        logits_sketch = self.logit_scale_sketch.exp() * sketch_feat @ text_feat_sketch.t()
+        logit_scale = self.logit_scale.exp()
+        logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
+        logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
 
         return (
             photo_feat, logits_photo,
@@ -244,14 +251,7 @@ class HiCroPL_SBIR(pl.LightningModule):
             pass
 
     def configure_optimizers(self):
-        """Official CLIP-AT optimizer pattern (Sain et al. CVPR'23).
-
-        Two groups:
-          1. ALL `self.clip_photo` + `self.clip_sketch` parameters at `clip_LN_lr` — Adam only updates the ones with
-             `requires_grad=True`, which after `freeze_all_but_bn` includes LN + naked
-             Parameters + MHA QKV projections (~21.7M visual + ~22M text).
-          2. Learnable prompts (visual + text, both modalities) at `prompt_lr`.
-        """
+        """Adam optimizer with two param groups: CLIP encoders + prompts."""
         prompt_params = [
             p for p in [
                 self.model.visual_prompt_sketch, self.model.visual_prompt_photo,
@@ -260,13 +260,14 @@ class HiCroPL_SBIR(pl.LightningModule):
             if p.requires_grad
         ]
 
-        clip_params = (list(self.model.clip_photo.parameters()) +
-                       list(self.model.clip_sketch.parameters()) +
-                       list(self.model.model_distill.parameters()))
+        clip_params = (list(self.model.ph_encoder.parameters()) +
+                       list(self.model.sk_encoder.parameters()) +
+                       list(self.model.model_distill.parameters()) +
+                       [self.model.logit_scale])
         clip_trainable = sum(p.numel() for p in clip_params if p.requires_grad)
 
         self.print(f"Trainable prompt params (visual + text, both modalities): {sum(p.numel() for p in prompt_params):,}")
-        self.print(f"Trainable clip params (clip_photo + clip_sketch + model_distill): {clip_trainable:,}")
+        self.print(f"Trainable clip params (ph_encoder + sk_encoder + model_distill): {clip_trainable:,}")
 
         prompt_lr = getattr(self.cfg, 'prompt_lr', 1e-5)
         clip_ln_lr = getattr(self.cfg, 'clip_LN_lr', 1e-5)
@@ -327,22 +328,22 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         dataset = getattr(self.args, 'dataset', 'sketchy')
         if dataset in ("sketchy_2", "sketchy_ext"):
-            map_k = 200      # mAP@200 lenient (khớp CDUF / doodle2search)
+            map_k = 200
             p_k = 200
         elif dataset == "quickdraw":
-            map_k = 0        # mAP@all
+            map_k = 0
             p_k = 200
         else:
-            map_k = 0        # mAP@all
+            map_k = 0
             p_k = 100
 
         n_g = gallery_features.shape[0]
         ranks = torch.arange(1, n_g + 1, device=self.device, dtype=torch.float32)
         kk = min(map_k, n_g) if map_k != 0 else n_g
 
-        ap_lenient = torch.zeros(len(query_features), device=self.device)  # mAP@k ÷ relevant-in-top-k (CDUF/doodle2search)
-        ap_all = torch.zeros(len(query_features), device=self.device)      # mAP@all ÷ R (CLIP-AT / ZSE-SBIR map_all)
-        ap_strict = torch.zeros(len(query_features), device=self.device)   # mAP@k ÷ min(R,k) (SAKE / ZSE-SBIR strict)
+        ap_lenient = torch.zeros(len(query_features), device=self.device)
+        ap_all = torch.zeros(len(query_features), device=self.device)
+        ap_strict = torch.zeros(len(query_features), device=self.device)
         precision = torch.zeros(len(query_features), device=self.device)
 
         for idx in range(len(query_features)):
@@ -351,18 +352,15 @@ class HiCroPL_SBIR(pl.LightningModule):
             target = (all_photo_category == category)
             R = target.sum().clamp(min=1).float()
 
-            # Xếp gallery theo similarity giảm dần, lấy relevance theo thứ hạng.
             order = torch.argsort(sim, descending=True)
             rel = target[order].float()
-            prec_at = torch.cumsum(rel, dim=0) / ranks           # precision@mỗi rank
+            prec_at = torch.cumsum(rel, dim=0) / ranks
 
-            # Tử số chung cho top-k = tổng precision@hit của các relevant trong top-k.
             hit_k = (prec_at[:kk] * rel[:kk]).sum()
-            ap_lenient[idx] = hit_k / rel[:kk].sum().clamp(min=1)                                  # ÷ rel-in-top-k
-            ap_strict[idx] = hit_k / torch.minimum(R, torch.tensor(float(kk), device=self.device))  # ÷ min(R,k)
-            ap_all[idx] = (prec_at * rel).sum() / R                                                # ÷ R, full ranking
+            ap_lenient[idx] = hit_k / rel[:kk].sum().clamp(min=1)
+            ap_strict[idx] = hit_k / torch.minimum(R, torch.tensor(float(kk), device=self.device))
+            ap_all[idx] = (prec_at * rel).sum() / R
 
-            # P@p_k = (relevant trong top-p_k) / p_k
             precision[idx] = rel[:min(p_k, n_g)].sum() / p_k
 
         m_lenient = torch.mean(ap_lenient)
@@ -370,7 +368,6 @@ class HiCroPL_SBIR(pl.LightningModule):
         m_strict = torch.mean(ap_strict)
         mean_precision = torch.mean(precision)
 
-        # Monitor: ext -> mAP@200 lenient (val_map_200); còn lại -> mAP@all (lenient@all == mAP@all).
         mAP = m_lenient
         self.log("mAP", mAP, on_step=False, on_epoch=True)
         self.log("val_mAP", mAP, on_step=False, on_epoch=True, prog_bar=False)
