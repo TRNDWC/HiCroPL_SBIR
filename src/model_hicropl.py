@@ -55,44 +55,135 @@ class CustomCLIP(nn.Module):
 
         self.logit_scale = clip_model.logit_scale
 
-        # Pre-compute text features một lần với template cố định, lưu vào buffer.
-        # Dùng clip_model_frozen (hoặc clip_model) fully frozen.
-        text_src = clip_model_frozen if clip_model_frozen is not None else clip_model
-        ctx_photo  = getattr(cfg, "ctx_init",        "a photo of a")
-        ctx_sketch = getattr(cfg, "ctx_init_sketch", "a sketch of a")
+        # ── Learnable text context (CoOp-style, riêng biệt theo domain) ──────────
+        text_src   = clip_model_frozen if clip_model_frozen is not None else clip_model
+        self._text_src = [text_src]   # list wrapper — PyTorch không register params
+
+        prefix_photo  = getattr(cfg, "ctx_init",        "a photo of a")
+        prefix_sketch = getattr(cfg, "ctx_init_sketch", "a sketch of a")
+        n_ctx  = int(getattr(cfg, 'n_ctx', 3))
+        ctx_dim = text_src.ln_final.weight.shape[0]   # 512 cho ViT-B/32
+
+        # Khởi tạo ctx từ embedding của các token đầu trong prefix
+        with torch.no_grad():
+            ph_prefix_tok = _clip.tokenize([prefix_photo]).to(original_device)
+            sk_prefix_tok = _clip.tokenize([prefix_sketch]).to(original_device)
+            ph_prefix_emb = text_src.token_embedding(ph_prefix_tok).type(self.dtype)
+            sk_prefix_emb = text_src.token_embedding(sk_prefix_tok).type(self.dtype)
+            ctx_photo_init  = ph_prefix_emb[0, 1:1 + n_ctx, :].clone()   # (n_ctx, ctx_dim)
+            ctx_sketch_init = sk_prefix_emb[0, 1:1 + n_ctx, :].clone()
+
+        self.ctx_photo  = nn.Parameter(ctx_photo_init)    # learnable, (n_ctx, ctx_dim)
+        self.ctx_sketch = nn.Parameter(ctx_sketch_init)   # learnable, (n_ctx, ctx_dim)
+        self.dropout_ctx = nn.Dropout(p=0.1)
+
+        # Tìm prefix_len: số token [SOS + words] trước EOS trong prefix
+        eot_id = int(_clip.tokenize([""])[0, 1].item())   # EOS token id = 49407
+        ph_prefix_len = int((ph_prefix_tok[0] == eot_id).nonzero()[0].item())
+        sk_prefix_len = int((sk_prefix_tok[0] == eot_id).nonzero()[0].item())
+
+        # Build prefix & suffix embedding cho mỗi class
+        # Template: "<prefix> <X×n_ctx> <classname>."
+        placeholder = " ".join(["X"] * n_ctx)
+        ph_tmpl = [f"{prefix_photo} {placeholder} {n}.".replace("_", " ") for n in classnames]
+        sk_tmpl = [f"{prefix_sketch} {placeholder} {n}.".replace("_", " ") for n in classnames]
 
         with torch.no_grad():
-            ph_templates = [f"{ctx_photo} {n}.".replace("_", " ")  for n in classnames]
-            sk_templates = [f"{ctx_sketch} {n}.".replace("_", " ") for n in classnames]
+            ph_tok = _clip.tokenize(ph_tmpl).to(original_device)
+            sk_tok = _clip.tokenize(sk_tmpl).to(original_device)
+            ph_emb = text_src.token_embedding(ph_tok).type(self.dtype)   # (n_cls, 77, ctx_dim)
+            sk_emb = text_src.token_embedding(sk_tok).type(self.dtype)
 
-            ph_tok = _clip.tokenize(ph_templates).to(original_device)
-            sk_tok = _clip.tokenize(sk_templates).to(original_device)
+        self.register_buffer("text_prefix_photo",  ph_emb[:, :ph_prefix_len, :])
+        self.register_buffer("text_suffix_photo",  ph_emb[:, ph_prefix_len + n_ctx:, :])
+        self.register_buffer("text_prefix_sketch", sk_emb[:, :sk_prefix_len, :])
+        self.register_buffer("text_suffix_sketch", sk_emb[:, sk_prefix_len + n_ctx:, :])
+        self.register_buffer("text_tok_photo",  ph_tok)   # (n_cls, 77) — cho EOT lookup
+        self.register_buffer("text_tok_sketch", sk_tok)
 
-            ph_feats = text_src.encode_text(ph_tok).type(self.dtype)
-            sk_feats = text_src.encode_text(sk_tok).type(self.dtype)
+        print(f"Learnable text ctx: n_ctx={n_ctx}, ctx_dim={ctx_dim}, "
+              f"ph_prefix_len={ph_prefix_len}, sk_prefix_len={sk_prefix_len}")
 
-            ph_feats = ph_feats / ph_feats.norm(dim=-1, keepdim=True)
-            sk_feats = sk_feats / sk_feats.norm(dim=-1, keepdim=True)
+        # Learnable prompts cho HiCroPL backbone
+        from src.clip.model import VisionTransformer_HiCroPL
+        self._use_hicropl = isinstance(self.ph_encoder, VisionTransformer_HiCroPL)
+        if self._use_hicropl:
+            vision_ctx   = int(getattr(cfg, 'vision_ctx',   -1))
+            if vision_ctx == -1:
+                vision_ctx = int(getattr(cfg, 'n_ctx', 3))
+            vision_depth = int(getattr(cfg, 'vision_depth', -1))
+            if vision_depth == -1:
+                vision_depth = int(getattr(cfg, 'n_prompts', 3))
 
-        self.register_buffer("text_feat_photo",  ph_feats)   # (n_cls, 512)
-        self.register_buffer("text_feat_sketch", sk_feats)   # (n_cls, 512)
+            prompt_dim = self.ph_encoder.conv1.weight.shape[0]  # 768 cho ViT-B/32
 
-        print(f"Text features precomputed: photo {ph_feats.shape}, sketch {sk_feats.shape}")
+            self.visual_prompt_photo  = nn.Parameter(torch.empty(vision_ctx, prompt_dim, dtype=self.dtype))
+            self.visual_prompt_sketch = nn.Parameter(torch.empty(vision_ctx, prompt_dim, dtype=self.dtype))
+            nn.init.normal_(self.visual_prompt_photo,  std=0.02)
+            nn.init.normal_(self.visual_prompt_sketch, std=0.02)
 
-        # Frozen distillation model — dùng list wrapper để PyTorch không register params
-        self._distill = [clip_model_frozen if clip_model_frozen is not None else clip_model]
+            n_deep = max(0, vision_depth - 1)
+            self.cross_prompts_photo  = nn.ParameterList(
+                [nn.Parameter(torch.empty(vision_ctx, prompt_dim, dtype=self.dtype)) for _ in range(n_deep)]
+            )
+            self.cross_prompts_sketch = nn.ParameterList(
+                [nn.Parameter(torch.empty(vision_ctx, prompt_dim, dtype=self.dtype)) for _ in range(n_deep)]
+            )
+            for p in list(self.cross_prompts_photo) + list(self.cross_prompts_sketch):
+                nn.init.normal_(p, std=0.02)
+
+            print(f"HiCroPL prompts: vision_depth={vision_depth}, vision_ctx={vision_ctx}, "
+                  f"shallow=2×{(vision_ctx, prompt_dim)}, deep=2×{n_deep}×{(vision_ctx, prompt_dim)}")
+
+    def encode_text(self, modality):
+        """Tính text features động với learnable ctx mỗi forward pass."""
+        if modality == "photo":
+            ctx, prefix, suffix, tok = (
+                self.ctx_photo, self.text_prefix_photo,
+                self.text_suffix_photo, self.text_tok_photo,
+            )
+        else:
+            ctx, prefix, suffix, tok = (
+                self.ctx_sketch, self.text_prefix_sketch,
+                self.text_suffix_sketch, self.text_tok_sketch,
+            )
+
+        if self.training:
+            ctx = self.dropout_ctx(ctx)
+
+        n_cls = prefix.shape[0]
+        ctx_exp = ctx.unsqueeze(0).expand(n_cls, -1, -1)          # (n_cls, n_ctx, ctx_dim)
+        prompts = torch.cat([prefix, ctx_exp, suffix], dim=1)      # (n_cls, 77, ctx_dim)
+
+        src = self._text_src[0]
+        x = prompts + src.positional_embedding.type(self.dtype)
+        x = x.permute(1, 0, 2)                                    # NLD → LND
+        x = src.transformer(x)
+        x = x.permute(1, 0, 2)                                    # LND → NLD
+        x = src.ln_final(x).type(self.dtype)
+        x = x[torch.arange(n_cls), tok.argmax(dim=-1)] @ src.text_projection
+        return x / x.norm(dim=-1, keepdim=True)                    # (n_cls, 512)
 
     def encode_visual(self, x, modality):
-        encoder = self.ph_encoder if modality == "photo" else self.sk_encoder
-        return encoder(x.type(self.dtype))   # không có prompt
+        if modality == "photo":
+            encoder = self.ph_encoder
+            if self._use_hicropl:
+                return encoder(x.type(self.dtype),
+                               self.visual_prompt_photo,
+                               list(self.cross_prompts_photo))
+        else:
+            encoder = self.sk_encoder
+            if self._use_hicropl:
+                return encoder(x.type(self.dtype),
+                               self.visual_prompt_sketch,
+                               list(self.cross_prompts_sketch))
+        return encoder(x.type(self.dtype))
 
     def forward(self, x, classnames):
-        sk_tensor      = x[0]
-        photo_tensor   = x[1]
-        neg_tensor     = x[2]
-        sk_aug_tensor  = x[3]
-        img_aug_tensor = x[4]
-        label          = x[5] if len(x) >= 6 else x[3]
+        sk_tensor    = x[0]
+        photo_tensor = x[1]
+        neg_tensor   = x[2]
+        label        = x[5] if len(x) >= 6 else x[3]
 
         sketch_feat = self.encode_visual(sk_tensor,    "sketch")
         photo_feat  = self.encode_visual(photo_tensor, "photo")
@@ -103,19 +194,15 @@ class CustomCLIP(nn.Module):
         neg_feat    = neg_feat    / neg_feat.norm(dim=-1, keepdim=True)
 
         logit_scale   = self.logit_scale.exp()
-        logits_photo  = logit_scale * photo_feat  @ self.text_feat_photo.t()
-        logits_sketch = logit_scale * sketch_feat @ self.text_feat_sketch.t()
-
-        with torch.no_grad():
-            distill = self._distill[0]
-            photo_aug_feat = distill.encode_image(img_aug_tensor.type(self.dtype))
-            sk_aug_feat    = distill.encode_image(sk_aug_tensor.type(self.dtype))
+        text_feat_photo  = self.encode_text("photo")
+        text_feat_sketch = self.encode_text("sketch")
+        logits_photo  = logit_scale * photo_feat  @ text_feat_photo.t()
+        logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
 
         return (
             photo_feat, logits_photo,
             sketch_feat, logits_sketch,
             neg_feat, label,
-            photo_aug_feat, sk_aug_feat,
         )
 
 
@@ -138,14 +225,22 @@ class HiCroPL_SBIR(pl.LightningModule):
         pass
 
     def configure_optimizers(self):
-        """Adam — chỉ train LN + MHA in_proj + naked params của 2 visual encoder."""
+        """Adam — train LN + MHA in_proj + naked params của 2 visual encoder + HiCroPL prompts."""
         clip_params = (
             list(self.model.ph_encoder.parameters()) +
             list(self.model.sk_encoder.parameters()) +
             [self.model.logit_scale]
         )
+        # Learnable text context (luôn thêm)
+        clip_params += [self.model.ctx_photo, self.model.ctx_sketch]
+
+        if getattr(self.model, '_use_hicropl', False):
+            clip_params += [self.model.visual_prompt_photo, self.model.visual_prompt_sketch]
+            clip_params += list(self.model.cross_prompts_photo)
+            clip_params += list(self.model.cross_prompts_sketch)
+
         clip_trainable = sum(p.numel() for p in clip_params if p.requires_grad)
-        self.print(f"Trainable params (ph_encoder + sk_encoder + logit_scale): {clip_trainable:,}")
+        self.print(f"Trainable params (ph_encoder + sk_encoder + logit_scale + prompts): {clip_trainable:,}")
 
         lr           = getattr(self.cfg, 'clip_LN_lr',   1e-5)
         weight_decay = getattr(self.cfg, 'weight_decay', 0.0)

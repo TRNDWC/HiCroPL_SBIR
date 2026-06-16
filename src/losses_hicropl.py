@@ -3,33 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def cross_loss(feature_1, feature_2, temperature):
-    """Symmetric NT-Xent / InfoNCE over two views.
-
-    Treats (feature_1[i], feature_2[i]) as the only positive pair; every other sample in
-    the 2*B stack is a negative.
-    """
-    device = feature_1.device
-    labels = torch.cat([torch.arange(len(feature_1)) for _ in range(2)], dim=0)
-    labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float().to(device)
-
-    feature_1 = F.normalize(feature_1, dim=1)
-    feature_2 = F.normalize(feature_2, dim=1)
-    features = torch.cat((feature_1, feature_2), dim=0)            # (2B, D)
-
-    similarity_matrix = torch.matmul(features, features.T)         # (2B, 2B)
-
-    mask = torch.eye(labels.shape[0], dtype=torch.bool).to(device)
-    labels = labels[~mask].view(labels.shape[0], -1)
-    similarity_matrix = similarity_matrix[~mask].view(similarity_matrix.shape[0], -1)
-
-    positives = similarity_matrix[labels.bool()].view(labels.shape[0], -1)   # (2B, 1)
-    negatives = similarity_matrix[~labels.bool()].view(similarity_matrix.shape[0], -1)
-
-    logits = torch.cat([positives, negatives], dim=1) / temperature
-    targets = torch.zeros(logits.shape[0], dtype=torch.long, device=device)
-    return F.cross_entropy(logits, targets)
-
 
 def nt_xent(features_view1: torch.Tensor, features_view2: torch.Tensor, temperature: float = 0.07):
     """NT-Xent (SimCLR) between two feature views.
@@ -58,15 +31,14 @@ def nt_xent(features_view1: torch.Tensor, features_view2: torch.Tensor, temperat
 
 
 def loss_fn_hicropl(args, features):
-    """SBIR loss: CE + Triplet + Distill + NT-Xent (giống CoPrompt).
+    """SBIR loss: CE + Triplet + NT-Xent.
 
-    L_total = CE + Triplet(sketch, photo+, photo-) + Distill(orig, aug) + NT-Xent(photo, sketch)
+    L_total = CE + Triplet(sketch, photo+, photo-) + NT-Xent(photo, sketch)
     """
     (
         photo_feat, logits_photo,
         sketch_feat, logits_sketch,
         neg_feat, label,
-        photo_aug_feat, sk_aug_feat,
     ) = features
 
     device = logits_photo.device
@@ -84,11 +56,4 @@ def loss_fn_hicropl(args, features):
     # NT-Xent cross-modal (photo ↔ sketch)
     loss_nt_xent = nt_xent(photo_feat, sketch_feat)
 
-    # Distillation: align fine-tuned features với frozen CLIP trên augmented views
-    temperature = getattr(args, 'temperature', 0.07)
-    loss_distill = (
-        cross_loss(photo_feat, photo_aug_feat, temperature) +
-        cross_loss(sketch_feat, sk_aug_feat, temperature)
-    )
-
-    return loss_ce + loss_triplet  + loss_nt_xent
+    return loss_ce + loss_nt_xent

@@ -12,22 +12,27 @@ def load_clip_to_cpu(opts, zero_shot_model=False):
     backbone_name = opts.backbone
     
     if not zero_shot_model:
-        trainer = opts.clip_trainer if opts.clip_trainer in {"CoOp", "CoCoOp"} else "CoOp"
+        valid_trainers = {"CoOp", "CoCoOp", "HiCroPL", "MaPLe", "IVLP", "VPT"}
+        trainer = opts.clip_trainer if opts.clip_trainer in valid_trainers else "CoOp"
+
+        vision_depth = opts.vision_depth if opts.vision_depth != -1 else getattr(opts, 'n_prompts', 0)
+        vision_ctx   = opts.vision_ctx   if opts.vision_ctx   != -1 else getattr(opts, 'n_ctx', 0)
+
         design_details = {
-            "trainer": trainer,
-            "vision_depth": 0,
+            "trainer":        trainer,
+            "vision_depth":   vision_depth,
             "language_depth": 0,
-            "vision_ctx": 0,
-            "language_ctx": 0,
+            "vision_ctx":     vision_ctx,
+            "language_ctx":   0,
         }
     else:
         # Return base CLIP model (IVLP with depth 0) for generating frozen VL features
         design_details = {
-            "trainer": 'IVLP',
-            "vision_depth": 0,
+            "trainer":        'IVLP',
+            "vision_depth":   0,
             "language_depth": 0,
-            "vision_ctx": 0,
-            "language_ctx": 0,
+            "vision_ctx":     0,
+            "language_ctx":   0,
         }
     
     # clip.load already handles build_model internally if design_details is provided.

@@ -18,11 +18,8 @@ class HiCroPL_SBIR_FG(HiCroPL_SBIR):
         self.train_loss_epoch = []
 
     def training_step(self, batch, batch_idx):
-        # batch format from SketchyDatasetFG (train): img, sk, img_aug, sk_aug, neg, label
-        img_tensor = batch[0]
-        sk_tensor = batch[1]
-        neg_tensor = batch[4]
-        reordered = (batch[1], batch[0], batch[4], batch[3], batch[2], batch[5])
+        # batch format from SketchyDatasetFG (train): img, sk, neg, label
+        reordered = (batch[1], batch[0], batch[2], batch[3])
 
         features = self.model(reordered, self.classnames)
         loss = loss_fn_hicropl(self.args, features)
