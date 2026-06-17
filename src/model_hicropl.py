@@ -132,8 +132,20 @@ class CustomCLIP(nn.Module):
             for p in list(self.cross_prompts_photo) + list(self.cross_prompts_sketch):
                 nn.init.normal_(p, std=0.02)
 
+            # Asymmetric prompt layers: photo → first vision_depth layers (0..vision_depth-1)
+            #                           sketch → last vision_depth layers (n-vision_depth..n-1)
+            n_vit = len(list(self.sk_encoder.transformer.resblocks))
+            sk_start = n_vit - vision_depth
+            self.sk_encoder.prompt_start_layer = sk_start
+            for blk in self.sk_encoder.transformer.resblocks:
+                blk.prompt_start_layer = sk_start
+                # When sk_start==0, layer 0 is handled by shallow prepend (like photo),
+                # so add_prompt must stay False for layer 0 to avoid wrong replace.
+                blk.add_prompt = (blk.i >= sk_start) and (sk_start > 0 or blk.i > 0)
+
             print(f"HiCroPL prompts: vision_depth={vision_depth}, vision_ctx={vision_ctx}, "
                   f"shallow=2×{(vision_ctx, prompt_dim)}, deep=2×{n_deep}×{(vision_ctx, prompt_dim)}")
+            print(f"Asymmetric layers: photo 0–{vision_depth-1}, sketch {sk_start}–{n_vit-1}")
 
     def encode_text(self, modality):
         """Tính text features động với learnable ctx mỗi forward pass."""

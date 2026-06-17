@@ -277,6 +277,7 @@ class ResidualAttentionBlock_HiCroPL(nn.Module):
         self.text_layer = text_layer
         self.attn_mask = attn_mask
         self.cross_prompt_nctx = design_details['vision_ctx']
+        self.prompt_start_layer = design_details.get('prompt_start_layer', 0)
         self.i = i
         if self.i != 0:
             self.add_prompt = add_prompt
@@ -290,35 +291,30 @@ class ResidualAttentionBlock_HiCroPL(nn.Module):
     def forward(self, inputs):
         x = inputs[0]
         cross_prompts_deeper = inputs[1]
+        img_prompts = inputs[2]
 
-        # Will need to append the learnable tokens for this layer here
-        # Check if flag was set for this layer or not
-        if self.add_prompt:  # Depending on the hyper-parameter K, self.add_prompt is set to True when i < K ,
-            # Also see if this is textual transformer layer or not
+        if self.add_prompt:
+            prompt_idx = self.i - self.prompt_start_layer - 1
             if not self.text_layer:  # visual
-                # Remove the outputs produced by learnable tokens of previous layer
-                prefix = x[0:x.shape[0] - self.cross_prompt_nctx, :, :]
-                # Create/configure learnable tokens of this layer
-                visual_context = cross_prompts_deeper[self.i-1]
-                visual_context = visual_context.expand(x.shape[1], -1, -1).permute(1, 0, 2).to(x.dtype)
-                # Add the learnable tokens of this layer with the input, by replacing the previous
-                # layer learnable tokens
-                x = torch.cat([prefix, visual_context], dim=0)
+                if self.i == self.prompt_start_layer and self.prompt_start_layer > 0:
+                    # First prompted layer, not layer 0: concatenate initial prompt tokens
+                    visual_context = img_prompts.expand(x.shape[1], -1, -1).permute(1, 0, 2).to(x.dtype)
+                    x = torch.cat([x, visual_context], dim=0)
+                else:
+                    # Replace previous layer's prompt tokens with new ones
+                    prefix = x[0:x.shape[0] - self.cross_prompt_nctx, :, :]
+                    visual_context = cross_prompts_deeper[prompt_idx]
+                    visual_context = visual_context.expand(x.shape[1], -1, -1).permute(1, 0, 2).to(x.dtype)
+                    x = torch.cat([prefix, visual_context], dim=0)
             else:  # text
-                # Appending the learnable tokens in different way
-                # x -> [77, NCLS, DIM]
-                # First remove the learnable tokens from previous layer
                 prefix = x[:1, :, :]
                 suffix = x[1 + self.cross_prompt_nctx:, :, :]
-                # Create/configure learnable tokens of this layer
-                textual_context = cross_prompts_deeper[self.i-1]
+                textual_context = cross_prompts_deeper[prompt_idx]
                 textual_context = textual_context.expand(x.shape[1], -1, -1).permute(1, 0, 2).to(x.dtype)
-                # Add the learnable tokens of this layer with the input, replaced by previous
-                # layer learnable tokens
                 x = torch.cat([prefix, textual_context, suffix], dim=0)
         x = x + self.attention(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
-        return [x, cross_prompts_deeper]
+        return [x, cross_prompts_deeper, img_prompts]
 
 
 class ResidualAttentionBlock_MaPLe(nn.Module):
@@ -416,13 +412,13 @@ class Transformer(nn.Module):
                 *[ResidualAttentionBlock_MaPLe(width, heads, attn_mask, design_details, text_layer, i)
                   for i in range(layers)])
         elif current_trainer == 'HiCroPL' or current_trainer == 'MPT':
-            self.resblocks = nn.Sequential(*[ResidualAttentionBlock_HiCroPL(width, heads, attn_mask, True,
-                                                                         # The fourth parameter indicates whether a prompt needs to be added (true or false)
-                                                                         text_layer, i,
-                                                                         design_details) if prompts_needed > i
-                                             else ResidualAttentionBlock_HiCroPL(width, heads, attn_mask, False,
-                                                                              text_layer, i, design_details)
-                                             for i in range(layers)])
+            _ps = design_details.get('prompt_start_layer', 0)
+            _add_fn = (lambda i: i < prompts_needed) if _ps == 0 else (lambda i: i >= _ps)
+            self.resblocks = nn.Sequential(*[
+                ResidualAttentionBlock_HiCroPL(width, heads, attn_mask, _add_fn(i),
+                                               text_layer, i, design_details)
+                for i in range(layers)
+            ])
         else:
             # Corresponds to default CoOp or CoCoOp
             assert current_trainer == 'CoOp' or current_trainer == 'CoCoOp'
@@ -513,6 +509,7 @@ class VisionTransformer_HiCroPL(nn.Module):
         # hyper-parameter if need to add prompt embeddings inside to the input
         # of transformer block or not:
         self.prompt_till_layer_visual = design_details["vision_depth"]
+        self.prompt_start_layer = design_details.get('prompt_start_layer', 0)
         self.transformer = Transformer(width, layers, heads, prompts_needed=self.prompt_till_layer_visual,
                                        design_details=design_details)
 
@@ -528,18 +525,16 @@ class VisionTransformer_HiCroPL(nn.Module):
                                                             device=x.device),
              x], dim=1)  # shape = [*, grid ** 2 + 1, width]
         x = x + self.positional_embedding.to(x.dtype)
-        # After positional embeddings, we will attach prompts with the model, remember only those
-        # are trainable parameters here in whole image encoder.
-        if self.VPT_shallow:
+        # Shallow prompt: only prepend when prompts start at layer 0.
+        # When prompt_start_layer > 0, img_prompts is injected inside the transformer at that layer.
+        if self.prompt_start_layer == 0:
             visual_ctx = img_prompts.expand(x.shape[0], -1, -1).to(x.dtype)
             x = torch.cat([x, visual_ctx], dim=1)
-        else:
-            assert self.prompt_till_layer_visual == 0
 
         # Normal code as before
         x = self.ln_pre(x)
         x = x.permute(1, 0, 2)  # NLD -> LND
-        outputs = self.transformer([x, cross_prompts_visual_deeper])
+        outputs = self.transformer([x, cross_prompts_visual_deeper, img_prompts])
         x = outputs[0]
         x = x.permute(1, 0, 2)  # LND -> NLD
 
