@@ -56,4 +56,4 @@ def loss_fn_hicropl(args, features):
     # NT-Xent cross-modal (photo ↔ sketch)
     loss_nt_xent = nt_xent(photo_feat, sketch_feat)
 
-    return loss_ce + loss_nt_xent
+    return loss_ce + loss_triplet
