@@ -39,30 +39,11 @@ parser.add_argument('--num_trainable_ln', type=int, default=-1,
 # (patch-shuffle handled in FG training code; no CLI options required)
 
 # ----------------------
-# ViT & HiCroPL Prompt Parameters
+# ViT & Baseline Prompt Parameters
 # ----------------------
 parser.add_argument('--prompt_dim', type=int, default=768)
 parser.add_argument('--n_prompts', type=int, default=3)
 
-# HiCroPL Params
-parser.add_argument('--n_ctx', type=int, default=4, help='Number of context tokens for prompts')
-parser.add_argument('--prompt_depth', type=int, default=9, help='Depth of deep prompts')
-parser.add_argument('--cross_layer', type=int, default=4, help='Layer at which bidirectional flow switches direction')
-parser.add_argument('--ctx_init', type=str, default='a photo of a', help='Initial text context for photo prompt learner')
-parser.add_argument('--ctx_init_sketch', type=str, default='a sketch of a', help='Initial text context for sketch prompt learner')
-parser.add_argument('--temperature', type=float, default=0.07, help='Temperature for InfoNCE Loss')
-parser.add_argument('--lambda_cross_modal', type=float, default=1.0, help='Weight for sketch-photo InfoNCE alignment')
-parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for prompted visual-text classification loss')
-parser.add_argument('--lambda_consistency', type=float, default=1.0, help='Weight for visual distill consistency loss')
-parser.add_argument('--lambda_text_consistency', type=float, default=1.0, help='Weight for GPT text distill consistency loss')
-parser.add_argument('--gpt_text_file', type=str, default='gpt_file/sketchy_ext.json', help='GPT text prompt JSON for modality-specific distill text branches')
-
-# CLIP design_details (CoPrompt-style builder config)
-parser.add_argument('--clip_trainer', type=str, default='HiCroPL', help='Trainer key for CLIP block routing')
-parser.add_argument('--vision_depth', type=int, default=-1, help='Prompted visual depth; -1 means use prompt_depth')
-parser.add_argument('--language_depth', type=int, default=-1, help='Prompted text depth; -1 means use prompt_depth')
-parser.add_argument('--vision_ctx', type=int, default=-1, help='Visual prompt token count; -1 means use n_ctx')
-parser.add_argument('--language_ctx', type=int, default=-1, help='Text prompt token count; -1 means use n_ctx')
 
 # ----------------------
 # Evaluation Mode

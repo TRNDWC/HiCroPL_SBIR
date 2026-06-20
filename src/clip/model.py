@@ -464,7 +464,7 @@ class VisionTransformer(nn.Module):
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, prompts=None):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
@@ -476,7 +476,10 @@ class VisionTransformer(nn.Module):
 
         # After positional embeddings, we will attach prompts with the model, remember only those
         # are trainable parameters here in whole image encoder.
-        if self.VPT_shallow:
+        if prompts is not None:
+            visual_ctx = prompts.to(x.dtype)
+            x = torch.cat([x, visual_ctx], dim=1)
+        elif self.VPT_shallow:
             visual_ctx = self.VPT.expand(x.shape[0], -1, -1).half()
             x = torch.cat([x, visual_ctx], dim=1)
         else:
@@ -730,7 +733,9 @@ class CLIP(nn.Module):
     def dtype(self):
         return self.visual.conv1.weight.dtype
 
-    def encode_image(self, image):
+    def encode_image(self, image, prompts=None):
+        if prompts is not None:
+            return self.visual(image.type(self.dtype), prompts)
         return self.visual(image.type(self.dtype))
 
     def encode_text(self, text):

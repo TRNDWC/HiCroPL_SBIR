@@ -28,6 +28,11 @@ if __name__ == '__main__':
     val_photo_loader = DataLoader(dataset=val_photo, batch_size=opts.test_batch_size, num_workers=opts.workers, shuffle=False)
 
     logger = TensorBoardLogger('tb_logs', name=opts.exp_name)
+    
+    # Save hyperparams to TensorBoard as text
+    opts_dict = vars(opts)
+    opts_str = "  \n".join([f"**{k}**: {v}" for k, v in opts_dict.items()])
+    logger.experiment.add_text("Hyperparameters", opts_str, global_step=0)
 
     checkpoint_callback = ModelCheckpoint(
         monitor='mAP',
