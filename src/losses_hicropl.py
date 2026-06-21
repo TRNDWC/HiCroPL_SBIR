@@ -75,10 +75,13 @@ def loss_fn_hicropl(args, features):
         loss_cross_modal = lambda_cross_modal * cross_loss(sketch_feat, photo_feat, temperature)
 
     # --- L2: Visual consistency (sketch/photo vs augmented) ---
-    loss_consistency = lambda_consistency * (
-        cross_loss(sketch_feat, sketch_aug_feat, temperature) +
-        cross_loss(photo_feat, photo_aug_feat, temperature)
-    )
+    if sketch_aug_feat is not None and photo_aug_feat is not None:
+        loss_consistency = lambda_consistency * (
+            cross_loss(sketch_feat, sketch_aug_feat, temperature) +
+            cross_loss(photo_feat, photo_aug_feat, temperature)
+        )
+    else:
+        loss_consistency = 0.0
 
     # --- L4: Cross-Entropy Loss (text - photo) + (text - sketch) ---
     loss_ce_photo = F.cross_entropy(logits_photo, label)

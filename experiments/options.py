@@ -39,6 +39,12 @@ parser.add_argument('--num_trainable_ln', type=int, default=-1,
 # (patch-shuffle handled in FG training code; no CLI options required)
 
 # ----------------------
+# Ablation Study Flags
+# ----------------------
+parser.add_argument('--disable_cross_exchange', action='store_true', help='Disable Visual-Visual cross-modal token exchange')
+parser.add_argument('--disable_augmentation', action='store_true', help='Disable data augmentation and consistency loss')
+
+# ----------------------
 # ViT & HiCroPL Prompt Parameters
 # ----------------------
 parser.add_argument('--prompt_dim', type=int, default=768)

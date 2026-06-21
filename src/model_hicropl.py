@@ -196,7 +196,13 @@ class CustomCLIP(nn.Module):
         Forward pass for training with optimized redundancy.
         Calls visual learner ONCE and routes prompts by branch.
         """
-        sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
+        if len(x) == 5:
+            sk_tensor, photo_tensor, neg_tensor, label, filename = x
+            sk_aug_tensor = photo_aug_tensor = None
+        elif len(x) == 7:
+            sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label, filename = x
+        else:
+            sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
         
         # 1. Call visual-visual learner ONCE (shared by both branches)
         vis1_shallow, vis2_shallow, vis1_deeper, vis2_deeper = self.visual_visual_learner()
@@ -235,11 +241,15 @@ class CustomCLIP(nn.Module):
         }
         
         # 2. Distill Visual Features (Open LN branches) - RUN ONCE
-        photo_aug_feat_fixed = self.clip_distill_photo.visual(photo_aug_tensor.type(self.dtype))
-        photo_aug_feat_fixed = photo_aug_feat_fixed / photo_aug_feat_fixed.norm(dim=-1, keepdim=True)
-        
-        sketch_aug_feat_fixed = self.clip_distill_sketch.visual(sk_aug_tensor.type(self.dtype))
-        sketch_aug_feat_fixed = sketch_aug_feat_fixed / sketch_aug_feat_fixed.norm(dim=-1, keepdim=True)
+        if photo_aug_tensor is not None and sk_aug_tensor is not None:
+            photo_aug_feat_fixed = self.clip_distill_photo.visual(photo_aug_tensor.type(self.dtype))
+            photo_aug_feat_fixed = photo_aug_feat_fixed / photo_aug_feat_fixed.norm(dim=-1, keepdim=True)
+            
+            sketch_aug_feat_fixed = self.clip_distill_sketch.visual(sk_aug_tensor.type(self.dtype))
+            sketch_aug_feat_fixed = sketch_aug_feat_fixed / sketch_aug_feat_fixed.norm(dim=-1, keepdim=True)
+        else:
+            photo_aug_feat_fixed = None
+            sketch_aug_feat_fixed = None
 
         # Distill Visual Features for Original (for residual mix)
         photo_feat_fixed = self.clip_distill_photo.visual(photo_tensor.type(self.dtype))
@@ -282,8 +292,12 @@ class CustomCLIP(nn.Module):
         logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
         
         # Logits for Augmented Images
-        logits_photo_aug = logit_scale * photo_aug_feat_fixed @ text_feat_photo.t()
-        logits_sketch_aug = logit_scale * sketch_aug_feat_fixed @ text_feat_sketch.t()
+        if photo_aug_feat_fixed is not None and sketch_aug_feat_fixed is not None:
+            logits_photo_aug = logit_scale * photo_aug_feat_fixed @ text_feat_photo.t()
+            logits_sketch_aug = logit_scale * sketch_aug_feat_fixed @ text_feat_sketch.t()
+        else:
+            logits_photo_aug = None
+            logits_sketch_aug = None
         
         return (
             photo_feat, logits_photo,

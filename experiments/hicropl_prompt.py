@@ -109,6 +109,16 @@ if __name__ == '__main__':
     # 4. Setup Checkpointing and Logger
     logger = TensorBoardLogger('tb_logs', name=opts.exp_name)
 
+    # Log hyperparameters to TensorBoard's HParams and Text tabs
+    opts_dict = vars(opts)
+    logger.log_hyperparams(opts_dict)
+
+    # Generate a Markdown table for TensorBoard's Text tab
+    md_table = "### Training Hyperparameters\n\n| Parameter | Value |\n|---|---|\n"
+    for key, value in sorted(opts_dict.items()):
+        md_table += f"| **{key}** | `{value}` |\n"
+    logger.experiment.add_text("hyperparameters", md_table, global_step=0)
+
     if opts.eval_mode == 'fine_grained':
         checkpoint_monitor = 'top1'
         checkpoint_filename = '{epoch:02d}-{top1:.4f}'
@@ -121,7 +131,7 @@ if __name__ == '__main__':
         dirpath='saved_models/%s' % opts.exp_name,
         filename=checkpoint_filename,
         mode='max',
-        save_last=True)
+        save_last=False)
 
     ckpt_path = os.path.join('saved_models/%s'%opts.exp_name, 'last.ckpt')
     if not os.path.exists(ckpt_path):

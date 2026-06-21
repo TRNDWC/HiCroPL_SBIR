@@ -133,16 +133,21 @@ class Sketchy(torch.utils.data.Dataset):
         img_tensor = self.transform(img_data)
         neg_tensor = self.transform(neg_data)
         
-        # Testing no augmentation for sketches and photo 
-        img_aug_tensor = self.augmentation(img_data)
-        sk_aug_tensor = self.augmentation(sk_data)
-        
-        if self.return_orig:
-            return sk_tensor, img_tensor, neg_tensor, self.all_categories.index(category), filename, \
-                sk_data, img_data, neg_data
+        if getattr(self.opts, 'disable_augmentation', False):
+            if self.return_orig:
+                return sk_tensor, img_tensor, neg_tensor, self.all_categories.index(category), filename, \
+                    sk_data, img_data, neg_data
+            else:
+                return sk_tensor, img_tensor, neg_tensor, self.all_categories.index(category), filename
         else:
-            return sk_tensor, img_tensor, neg_tensor, sk_aug_tensor, img_aug_tensor, \
-                   self.all_categories.index(category), filename
+            sk_aug_tensor = self.augmentation(sk_data)
+            img_aug_tensor = self.augmentation(img_data)
+            
+            if self.return_orig:
+                return sk_tensor, img_tensor, neg_tensor, self.all_categories.index(category), filename, \
+                    sk_data, img_data, neg_data, sk_aug_tensor, img_aug_tensor
+            else:
+                return sk_tensor, img_tensor, neg_tensor, sk_aug_tensor, img_aug_tensor, self.all_categories.index(category), filename
 
     @staticmethod
     def data_transform(opts):

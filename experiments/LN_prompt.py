@@ -29,6 +29,16 @@ if __name__ == '__main__':
 
     logger = TensorBoardLogger('tb_logs', name=opts.exp_name)
 
+    # Log hyperparameters to TensorBoard's HParams and Text tabs
+    opts_dict = vars(opts)
+    logger.log_hyperparams(opts_dict)
+
+    # Generate a Markdown table for TensorBoard's Text tab
+    md_table = "### Training Hyperparameters\n\n| Parameter | Value |\n|---|---|\n"
+    for key, value in sorted(opts_dict.items()):
+        md_table += f"| **{key}** | `{value}` |\n"
+    logger.experiment.add_text("hyperparameters", md_table, global_step=0)
+
     checkpoint_callback = ModelCheckpoint(
         monitor='mAP',
         dirpath='saved_models/%s'%opts.exp_name,
