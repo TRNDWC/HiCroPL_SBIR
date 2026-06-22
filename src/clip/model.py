@@ -279,6 +279,7 @@ class ResidualAttentionBlock_HiCroPL(nn.Module):
         self.cross_prompt_nctx = design_details['vision_ctx']
         self.prompt_start_layer = design_details.get('prompt_start_layer', 0)
         self.i = i
+        self.strip_prompts = False   # set post-hoc: xóa n_ctx token cuối trước attention
         if self.i != 0:
             self.add_prompt = add_prompt
         else:
@@ -292,6 +293,10 @@ class ResidualAttentionBlock_HiCroPL(nn.Module):
         x = inputs[0]
         cross_prompts_deeper = inputs[1]
         img_prompts = inputs[2]
+
+        # Strip prompt tokens trước attention — chuyển tiếp sang vùng không có prompt
+        if self.strip_prompts:
+            x = x[0:x.shape[0] - self.cross_prompt_nctx, :, :]
 
         if self.add_prompt:
             prompt_idx = self.i - self.prompt_start_layer - 1
@@ -473,7 +478,7 @@ class VisionTransformer(nn.Module):
         # After positional embeddings, we will attach prompts with the model, remember only those
         # are trainable parameters here in whole image encoder.
         if self.VPT_shallow:
-            visual_ctx = self.VPT.expand(x.shape[0], -1, -1).half()
+            visual_ctx = self.VPT.expand(x.shape[0], -1, -1).to(x.dtype)
             x = torch.cat([x, visual_ctx], dim=1)
         else:
             assert self.prompt_till_layer_visual == 0

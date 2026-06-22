@@ -22,12 +22,9 @@ def freeze_all_but_bn(m):
 
 
 class CustomCLIP(nn.Module):
-    """Baseline không có learnable prompt.
-
-    Visual encoder (photo/sketch) tách biệt, freeze_all_but_bn —
-    chỉ LayerNorm + MHA in_proj + naked params được train.
-    Text features được tính một lần từ frozen CLIP với template cố định
-    và lưu vào buffer — không có learnable token nào.
+    """Visual encoder (photo/sketch) tách biệt, freeze_all_but_bn —
+    chỉ LayerNorm + MHA in_proj + naked params được train, không có learnable visual token.
+    Text branch: learnable ctx riêng biệt cho photo/sketch (CoOp-style shallow).
     """
 
     def __init__(self, cfg, clip_model, clip_model_frozen=None, classnames=None):
@@ -40,9 +37,22 @@ class CustomCLIP(nn.Module):
         original_device = next(clip_model.parameters()).device
         self.dtype = clip_model.dtype
 
-        clip_model.apply(freeze_all_but_bn)
-        self.ph_encoder = copy.deepcopy(clip_model.visual).to(original_device)
-        self.sk_encoder = copy.deepcopy(clip_model.visual).to(original_device)
+        vis_src = clip_model_frozen if clip_model_frozen is not None else clip_model
+        self.ph_encoder = copy.deepcopy(vis_src.visual).to(original_device)
+        self.sk_encoder = copy.deepcopy(vis_src.visual).to(original_device)
+        self.ph_encoder.apply(freeze_all_but_bn)
+        self.sk_encoder.apply(freeze_all_but_bn)
+
+        vision_ctx = int(getattr(cfg, 'vision_ctx', -1))
+        if vision_ctx == -1:
+            vision_ctx = int(getattr(cfg, 'n_ctx', 3))
+        prompt_dim = self.ph_encoder.conv1.weight.shape[0]  # 768 cho ViT-B/32
+
+        for enc in [self.ph_encoder, self.sk_encoder]:
+            vpt = nn.Parameter(torch.empty(vision_ctx, prompt_dim, dtype=self.dtype))
+            nn.init.normal_(vpt, std=0.02)
+            enc.VPT_shallow = True
+            enc.VPT = vpt   # nn.Module.__setattr__ registers this as a parameter of enc
 
         def _count_trainable(m):
             total = sum(p.numel() for p in m.parameters())
@@ -108,65 +118,6 @@ class CustomCLIP(nn.Module):
         print(f"Learnable text ctx: n_ctx={n_ctx}, ctx_dim={ctx_dim}, "
               f"ph_prefix_len={ph_prefix_len}, sk_prefix_len={sk_prefix_len}")
 
-        # Learnable prompts cho HiCroPL backbone
-        from src.clip.model import VisionTransformer_HiCroPL
-        self._use_hicropl = isinstance(self.ph_encoder, VisionTransformer_HiCroPL)
-        if self._use_hicropl:
-            vision_ctx   = int(getattr(cfg, 'vision_ctx',   -1))
-            if vision_ctx == -1:
-                vision_ctx = int(getattr(cfg, 'n_ctx', 3))
-            vision_depth = int(getattr(cfg, 'vision_depth', -1))
-            if vision_depth == -1:
-                vision_depth = int(getattr(cfg, 'n_prompts', 3))
-
-            prompt_dim = self.ph_encoder.conv1.weight.shape[0]  # 768 cho ViT-B/32
-
-            self.visual_prompt_photo  = nn.Parameter(torch.empty(vision_ctx, prompt_dim, dtype=self.dtype))
-            self.visual_prompt_sketch = nn.Parameter(torch.empty(vision_ctx, prompt_dim, dtype=self.dtype))
-            nn.init.normal_(self.visual_prompt_photo,  std=0.02)
-            nn.init.normal_(self.visual_prompt_sketch, std=0.02)
-
-            # Full-depth: mỗi encoder luôn có prompt ở tất cả n_vit layers.
-            # vision_depth xác định bao nhiêu layer đầu của photo (và bấy nhiêu layer
-            # cuối của sketch) là TRAINABLE; phần còn lại bị đóng băng (requires_grad=False).
-            n_vit  = len(list(self.ph_encoder.transformer.resblocks))
-            n_deep = n_vit - 1   # 11 cho ViT-B/32
-
-            self.cross_prompts_photo  = nn.ParameterList(
-                [nn.Parameter(torch.empty(vision_ctx, prompt_dim, dtype=self.dtype)) for _ in range(n_deep)]
-            )
-            self.cross_prompts_sketch = nn.ParameterList(
-                [nn.Parameter(torch.empty(vision_ctx, prompt_dim, dtype=self.dtype)) for _ in range(n_deep)]
-            )
-            for p in list(self.cross_prompts_photo) + list(self.cross_prompts_sketch):
-                nn.init.normal_(p, std=0.02)
-
-            # Bật add_prompt cho tất cả layer 1..n_vit-1 trên cả hai encoder
-            for enc in (self.ph_encoder, self.sk_encoder):
-                enc.prompt_start_layer = 0
-                for blk in enc.transformer.resblocks:
-                    blk.prompt_start_layer = 0
-                    if blk.i != 0:
-                        blk.add_prompt = True
-
-            # Đóng băng prompt của photo tại layers vision_depth..n_vit-1
-            # cross_prompts_photo[i] dùng tại layer i+1
-            # → freeze indices vision_depth-1 .. n_deep-1
-            for i in range(vision_depth - 1, n_deep):
-                self.cross_prompts_photo[i].requires_grad_(False)
-
-            # Đóng băng prompt của sketch tại layers 0..vision_depth-1
-            # → freeze visual_prompt_sketch (layer 0) + indices 0..vision_depth-2
-            self.visual_prompt_sketch.requires_grad_(False)
-            for i in range(vision_depth - 1):
-                self.cross_prompts_sketch[i].requires_grad_(False)
-
-            sk_start = n_vit - vision_depth
-            n_ph_trainable = vision_depth          # shallow + cross[0..vision_depth-2]
-            n_sk_trainable = n_vit - vision_depth  # cross[vision_depth-1..n_deep-1]
-            print(f"HiCroPL full-depth prompts: n_vit={n_vit}, vision_ctx={vision_ctx}")
-            print(f"  Photo  : layers 0–{n_vit-1} có prompt | trainable layers 0–{vision_depth-1} | frozen layers {vision_depth}–{n_vit-1}")
-            print(f"  Sketch : layers 0–{n_vit-1} có prompt | frozen layers 0–{vision_depth-1}   | trainable layers {sk_start}–{n_vit-1}")
 
     def encode_text(self, modality):
         """Tính text features động với learnable ctx mỗi forward pass."""
@@ -197,18 +148,7 @@ class CustomCLIP(nn.Module):
         return x / x.norm(dim=-1, keepdim=True)                    # (n_cls, 512)
 
     def encode_visual(self, x, modality):
-        if modality == "photo":
-            encoder = self.ph_encoder
-            if self._use_hicropl:
-                return encoder(x.type(self.dtype),
-                               self.visual_prompt_photo,
-                               list(self.cross_prompts_photo))
-        else:
-            encoder = self.sk_encoder
-            if self._use_hicropl:
-                return encoder(x.type(self.dtype),
-                               self.visual_prompt_sketch,
-                               list(self.cross_prompts_sketch))
+        encoder = self.ph_encoder if modality == "photo" else self.sk_encoder
         return encoder(x.type(self.dtype))
 
     def forward(self, x, classnames):
@@ -257,7 +197,7 @@ class HiCroPL_SBIR(pl.LightningModule):
         pass
 
     def configure_optimizers(self):
-        """Adam — train LN + MHA in_proj + naked params của 2 visual encoder + HiCroPL prompts."""
+        """Adam — train LN + MHA in_proj + naked params của 2 visual encoder + text ctx."""
         clip_params = (
             list(self.model.ph_encoder.parameters()) +
             list(self.model.sk_encoder.parameters()) +
@@ -267,11 +207,6 @@ class HiCroPL_SBIR(pl.LightningModule):
         clip_params += [self.model.ctx_photo, self.model.ctx_sketch]
         clip_params += list(self.model.text_transformer.parameters())
         clip_params += list(self.model.text_ln_final.parameters())
-
-        if getattr(self.model, '_use_hicropl', False):
-            clip_params += [self.model.visual_prompt_photo, self.model.visual_prompt_sketch]
-            clip_params += list(self.model.cross_prompts_photo)
-            clip_params += list(self.model.cross_prompts_sketch)
 
         clip_trainable = sum(p.numel() for p in clip_params if p.requires_grad)
         self.print(f"Trainable params (ph_encoder + sk_encoder + logit_scale + prompts): {clip_trainable:,}")
