@@ -99,10 +99,10 @@ class CustomCLIP(nn.Module):
     prompts swap into the trailing n_ctx slots inside ResidualAttentionBlock_XDom.
 
     Cross-domain knowledge exchange (re-purposing HiCroPL's T<->I as Photo<->Sketch):
-      - Layers i in [1, cross_layer): photo guides sketch. LKP(photo) compresses each
+      - Layers i in [0, cross_layer): photo guides sketch. LKP(photo) compresses each
         photo[i] -> 1 proxy token; CrossPromptAttention(photo->sketch) updates sketch[i].
       - Layers i in [cross_layer, prompt_depth): sketch guides photo. Symmetric.
-      - Layer 0 stays per-domain (anchor token of each domain).
+      - Results written via .data.copy_() (gradient cut through exchange, matching add_augmentation).
 
     Text branch (per-modality CoOp + L_ce) is kept SHALLOW exactly as before.
     """
@@ -117,39 +117,38 @@ class CustomCLIP(nn.Module):
         original_device = next(clip_model.parameters()).device
         self.dtype = clip_model.dtype
 
-        # Single shared CLIP backbone (official CLIP-AT uses `self.clip` for both modalities).
-        self.clip = copy.deepcopy(clip_model).to(original_device)
-        self.clip.apply(freeze_all_but_bn)
+        # Hai visual encoder riêng biệt (photo / sketch), freeze_all_but_bn.
+        self.ph_encoder = copy.deepcopy(clip_model.visual).to(original_device)
+        self.sk_encoder = copy.deepcopy(clip_model.visual).to(original_device)
+        self.ph_encoder.apply(freeze_all_but_bn)
+        self.sk_encoder.apply(freeze_all_but_bn)
 
         def _count_trainable(m):
             total = sum(p.numel() for p in m.parameters())
             trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
             return total, trainable
 
-        c_tot, c_tr = _count_trainable(self.clip)
-        print(f"clip (visual + text, freeze_all_but_bn): trainable {c_tr:,} / total {c_tot:,}")
+        for name, enc in [("ph_encoder", self.ph_encoder), ("sk_encoder", self.sk_encoder)]:
+            tot, tr = _count_trainable(enc)
+            print(f"{name}: trainable {tr:,} / total {tot:,}")
 
-        self.logit_scale = self.clip.logit_scale
+        self.logit_scale = clip_model.logit_scale
 
-        # ZS-residual ensemble (CoPrompt/HiCroPL style): combine the deep-prompted feature with
-        # a prompt-free pass through the SAME (LN+QKV-trainable) backbone, then renormalize.
-        # A robust generalist stream (prompt-free) regularizes the prompt-adapted specialist.
-        self.use_residual = bool(int(getattr(cfg, "zs_residual", 1)))
+        # --- Text encoder: frozen (chỉ LN trainable) + shallow ctx per modality ---
+        text_src = clip_model_frozen if clip_model_frozen is not None else clip_model
+        self.text_transformer = text_src.transformer
+        self.text_ln_final    = text_src.ln_final
+        self.text_transformer.apply(freeze_all_but_bn)
+        self.register_buffer("text_pos_embed", text_src.positional_embedding.data.clone())
+        self.register_buffer("text_proj",      text_src.text_projection.data.clone())
 
-        # Per-modality hard templates. The first n_ctx context tokens after [SOS] will be
-        # REPLACED at forward time by learnable per-modality prompts (CoOp style); the literal
-        # context words here only set positional structure. The class-name suffix differs
-        # only in whether tokens 1..1+n_ctx originally read 'a photo of a' or 'a sketch of a'.
-        ctx_init_photo = getattr(cfg, "ctx_init", "a photo of a")
-        ctx_init_sketch = getattr(cfg, "ctx_init_sketch", "a sketch of a")
-        prompts_photo = [f"{ctx_init_photo} {name}.".replace("_", " ").strip() for name in classnames]
-        prompts_sketch = [f"{ctx_init_sketch} {name}.".replace("_", " ").strip() for name in classnames]
-        self.register_buffer("tokenized_photo", _clip.tokenize(prompts_photo).to(original_device))
-        self.register_buffer("tokenized_sketch", _clip.tokenize(prompts_sketch).to(original_device))
+        prefix_photo  = getattr(cfg, "ctx_init",        "a photo of a")
+        prefix_sketch = getattr(cfg, "ctx_init_sketch", "a sketch of a")
 
         # --- Cross-domain deep visual prompts (1 ParameterList per domain, one tensor per layer).
-        prompt_dim_v = self.clip.visual.conv1.weight.shape[0]
+        prompt_dim_v = self.ph_encoder.conv1.weight.shape[0]
         n_ctx = int(getattr(cfg, "n_ctx", 3))
+        ctx_dim = text_src.ln_final.weight.shape[0]   # 512 cho ViT-B/32
         prompt_depth = int(getattr(cfg, "prompt_depth", 1))
         cross_layer = int(getattr(cfg, "cross_layer", prompt_depth // 2))
         n_heads = int(getattr(cfg, "mapper_heads", 8))
@@ -174,7 +173,7 @@ class CustomCLIP(nn.Module):
                 nn.init.normal_(p, std=0.02)
 
         # --- Knowledge Mappers (cross-attention + FFN), one per direction.
-        # photo -> sketch: applies to layers i in [1, cross_layer). Active iff cross_layer > 1.
+        # photo -> sketch: applies to layers i in [0, cross_layer). Active iff cross_layer > 0.
         # sketch -> photo: applies to layers i in [cross_layer, prompt_depth). Active iff prompt_depth > cross_layer.
         self.photo2sketch_net = CrossPromptAttention(
             hidden_size=prompt_dim_v, encoder_hidden_size=prompt_dim_v, num_attention_heads=n_heads,
@@ -184,9 +183,9 @@ class CustomCLIP(nn.Module):
         )
 
         # --- LKP modules: per-layer AttentionPooling + a learnable proxy token.
-        # Photo proxies are the sources for layers [1, cross_layer): n_photo_proxy = max(cross_layer - 1, 0).
+        # Photo proxies are the sources for layers [0, cross_layer): n_photo_proxy = cross_layer.
         # Sketch proxies are the sources for layers [cross_layer, prompt_depth): n_sketch_proxy = prompt_depth - cross_layer.
-        n_photo_proxy = max(cross_layer - 1, 0)
+        n_photo_proxy = cross_layer
         n_sketch_proxy = max(prompt_depth - cross_layer, 0)
         self.attn_pool_photo_nets = _get_clones(
             AttentionPooling(prompt_dim_v, n_heads), n_photo_proxy,
@@ -203,21 +202,42 @@ class CustomCLIP(nn.Module):
             for _ in range(n_sketch_proxy)
         ])
 
-        # --- Per-modality shallow text prompts (CoOp), unchanged from baseline.
-        prompt_dim_t = self.clip.ln_final.weight.shape[0]
-        self.text_prompt_sketch = nn.Parameter(torch.empty(n_ctx, prompt_dim_t, dtype=self.dtype))
-        self.text_prompt_photo = nn.Parameter(torch.empty(n_ctx, prompt_dim_t, dtype=self.dtype))
-        if n_ctx > 0:
-            nn.init.normal_(self.text_prompt_sketch, std=0.02)
-            nn.init.normal_(self.text_prompt_photo, std=0.02)
+        # --- Per-modality shallow text prompts (CoOp, prefix-init style như remove_bi_direction).
+        with torch.no_grad():
+            ph_prefix_tok = _clip.tokenize([prefix_photo]).to(original_device)
+            sk_prefix_tok = _clip.tokenize([prefix_sketch]).to(original_device)
+            ph_prefix_emb = text_src.token_embedding(ph_prefix_tok).type(self.dtype)
+            sk_prefix_emb = text_src.token_embedding(sk_prefix_tok).type(self.dtype)
+            ctx_photo_init  = ph_prefix_emb[0, 1:1 + n_ctx, :].clone()
+            ctx_sketch_init = sk_prefix_emb[0, 1:1 + n_ctx, :].clone()
+
+        self.ctx_photo  = nn.Parameter(ctx_photo_init)
+        self.ctx_sketch = nn.Parameter(ctx_sketch_init)
+        self.dropout_ctx = nn.Dropout(p=0.1)
+
+        eot_id = int(_clip.tokenize([""])[0, 1].item())
+        ph_prefix_len = int((ph_prefix_tok[0] == eot_id).nonzero()[0].item())
+        sk_prefix_len = int((sk_prefix_tok[0] == eot_id).nonzero()[0].item())
+
+        placeholder = " ".join(["X"] * n_ctx)
+        ph_tmpl = [f"{prefix_photo} {placeholder} {n}.".replace("_", " ") for n in classnames]
+        sk_tmpl = [f"{prefix_sketch} {placeholder} {n}.".replace("_", " ") for n in classnames]
 
         with torch.no_grad():
-            embed_photo = self.clip.token_embedding(self.tokenized_photo).type(self.dtype)
-            embed_sketch = self.clip.token_embedding(self.tokenized_sketch).type(self.dtype)
-        self.register_buffer("token_prefix_photo", embed_photo[:, :1, :])
-        self.register_buffer("token_suffix_photo", embed_photo[:, 1 + n_ctx:, :])
-        self.register_buffer("token_prefix_sketch", embed_sketch[:, :1, :])
-        self.register_buffer("token_suffix_sketch", embed_sketch[:, 1 + n_ctx:, :])
+            ph_tok = _clip.tokenize(ph_tmpl).to(original_device)
+            sk_tok = _clip.tokenize(sk_tmpl).to(original_device)
+            ph_emb = text_src.token_embedding(ph_tok).type(self.dtype)
+            sk_emb = text_src.token_embedding(sk_tok).type(self.dtype)
+
+        self.register_buffer("text_prefix_photo",  ph_emb[:, :ph_prefix_len, :])
+        self.register_buffer("text_suffix_photo",  ph_emb[:, ph_prefix_len + n_ctx:, :])
+        self.register_buffer("text_prefix_sketch", sk_emb[:, :sk_prefix_len, :])
+        self.register_buffer("text_suffix_sketch", sk_emb[:, sk_prefix_len + n_ctx:, :])
+        self.register_buffer("text_tok_photo",  ph_tok)
+        self.register_buffer("text_tok_sketch", sk_tok)
+
+        print(f"Text ctx: n_ctx={n_ctx}, ctx_dim={ctx_dim}, "
+              f"ph_prefix_len={ph_prefix_len}, sk_prefix_len={sk_prefix_len}")
 
     def compute_cross_prompts(self):
         """Run the photo<->sketch knowledge exchange and return per-layer prompts.
@@ -230,23 +250,23 @@ class CustomCLIP(nn.Module):
         photo_layers = [p for p in self.cross_prompts_photo]
         sketch_layers = [p for p in self.cross_prompts_sketch]
 
-        # ---- photo -> sketch on layers [1, cross_layer)
-        if self.cross_layer > 1:
+        # ---- photo -> sketch on layers [0, cross_layer)
+        if self.cross_layer > 0:
             proxies = []
-            for j, i in enumerate(range(1, self.cross_layer)):
+            for j, i in enumerate(range(0, self.cross_layer)):
                 proxies.append(self.attn_pool_photo_nets[j](
                     token_query=self.photo_proxy_tokens[j],
                     sequence_key=photo_layers[i],
                     sequence_value=photo_layers[i],
                 ))
-            kv = torch.cat(proxies, dim=0)                                 # [cross_layer-1, vis_dim]
-            sk_stack = torch.stack(sketch_layers[1:self.cross_layer], dim=0)
+            kv = torch.cat(proxies, dim=0)
+            sk_stack = torch.stack(sketch_layers[0:self.cross_layer], dim=0)
             n_layers, n_ctx_, vis_dim_ = sk_stack.shape
-            q = sk_stack.reshape(n_layers * n_ctx_, vis_dim_)              # [(cross_layer-1)*n_ctx, vis_dim]
+            q = sk_stack.reshape(n_layers * n_ctx_, vis_dim_)
             updated = self.photo2sketch_net(q, kv, kv)
             updated = updated.reshape(n_layers, n_ctx_, vis_dim_)
-            for j, i in enumerate(range(1, self.cross_layer)):
-                sketch_layers[i] = updated[j]
+            for j, i in enumerate(range(0, self.cross_layer)):
+                self.cross_prompts_sketch[i].data.copy_(updated[j])
 
         # ---- sketch -> photo on layers [cross_layer, prompt_depth)
         if self.prompt_depth > self.cross_layer:
@@ -264,72 +284,53 @@ class CustomCLIP(nn.Module):
             updated = self.sketch2photo_net(q, kv, kv)
             updated = updated.reshape(n_layers, n_ctx_, vis_dim_)
             for j, i in enumerate(range(self.cross_layer, self.prompt_depth)):
-                photo_layers[i] = updated[j]
+                self.cross_prompts_photo[i].data.copy_(updated[j])
 
         return photo_layers, sketch_layers
 
     def encode_visual(self, x, modality, photo_layers=None, sketch_layers=None):
-        """Encode an image with deep, per-domain prompts.
-
-        Convenience for callers that do not pre-compute the cross-domain prompts (e.g. eval).
-        Training should call `compute_cross_prompts()` once and reuse the result across the
-        three forward passes to avoid redundant cross-attention.
-        """
+        """Encode an image với cross-domain deep prompts, dùng encoder riêng biệt theo modality."""
         if photo_layers is None or sketch_layers is None:
             photo_layers, sketch_layers = self.compute_cross_prompts()
 
-        layers = sketch_layers if modality == "sketch" else photo_layers
+        encoder = self.sk_encoder if modality == "sketch" else self.ph_encoder
+        layers  = sketch_layers   if modality == "sketch" else photo_layers
         x = x.type(self.dtype)
+
         if self.n_ctx == 0 or self.prompt_depth == 0:
-            prompted = self.clip.encode_image(x)
+            return encoder(x)
+
+        shallow = layers[0].unsqueeze(0).expand(x.shape[0], -1, -1)   # [B, n_ctx, vis_dim]
+        deeper  = layers[1:] if self.prompt_depth > 1 else None
+        return encoder(x, shallow, deeper)
+
+    def encode_text(self, modality):
+        """Shallow CoOp-style text encoding. Frozen transformer (chỉ LN + ctx trainable)."""
+        if modality == "photo":
+            ctx, prefix, suffix, tok = (
+                self.ctx_photo, self.text_prefix_photo,
+                self.text_suffix_photo, self.text_tok_photo,
+            )
         else:
-            shallow = layers[0].unsqueeze(0).expand(x.shape[0], -1, -1)    # [B, n_ctx, vis_dim]
-            deeper = layers[1:] if self.prompt_depth > 1 else None
-            prompted = self.clip.encode_image(x, prompt=shallow, deeper_prompts=deeper)
+            ctx, prefix, suffix, tok = (
+                self.ctx_sketch, self.text_prefix_sketch,
+                self.text_suffix_sketch, self.text_tok_sketch,
+            )
 
-        if not self.use_residual:
-            return prompted
-
-        # Prompt-free generalist stream through the same backbone, ensembled with the prompted one.
-        plain = self.clip.encode_image(x)
-        prompted = prompted / prompted.norm(dim=-1, keepdim=True)
-        plain = plain / plain.norm(dim=-1, keepdim=True)
-        mixed = prompted + plain
-        return mixed / mixed.norm(dim=-1, keepdim=True)
-
-    def encode_text_prompted(self, modality):
-        """CoOp-style prompted text encoding (per modality).
-
-        Splice [SOS, learnable_ctx_modality, class_suffix_modality] for every class, then run
-        the (LN-trainable) text transformer and pick the [EOT] position.
-        """
-        if modality == "sketch":
-            ctx = self.text_prompt_sketch
-            prefix = self.token_prefix_sketch
-            suffix = self.token_suffix_sketch
-            tokenized = self.tokenized_sketch
-        else:
-            ctx = self.text_prompt_photo
-            prefix = self.token_prefix_photo
-            suffix = self.token_suffix_photo
-            tokenized = self.tokenized_photo
+        if self.training:
+            ctx = self.dropout_ctx(ctx)
 
         n_cls = prefix.shape[0]
-        if ctx.numel() == 0:
-            return self.clip.encode_text(tokenized)
+        ctx_exp = ctx.unsqueeze(0).expand(n_cls, -1, -1)
+        prompts = torch.cat([prefix, ctx_exp, suffix], dim=1)       # (n_cls, 77, ctx_dim)
 
-        ctx_expanded = ctx.unsqueeze(0).expand(n_cls, -1, -1)                  # (n_cls, n_ctx, d_t)
-        x = torch.cat([prefix, ctx_expanded, suffix], dim=1)                   # (n_cls, 77, d_t)
-
-        x = x + self.clip.positional_embedding.type(self.dtype)
-        x = x.permute(1, 0, 2)            # NLD -> LND
-        x = self.clip.transformer(x)
-        x = x.permute(1, 0, 2)            # LND -> NLD
-        x = self.clip.ln_final(x).type(self.dtype)
-
-        eot_idx = tokenized.argmax(dim=-1)
-        x = x[torch.arange(x.shape[0]), eot_idx] @ self.clip.text_projection
-        return x
+        x = prompts + self.text_pos_embed.type(self.dtype)
+        x = x.permute(1, 0, 2)                                      # NLD -> LND
+        x = self.text_transformer(x)
+        x = x.permute(1, 0, 2)                                      # LND -> NLD
+        x = self.text_ln_final(x).type(self.dtype)
+        x = x[torch.arange(n_cls), tok.argmax(dim=-1)] @ self.text_proj
+        return x / x.norm(dim=-1, keepdim=True)
 
     def forward(self, x, classnames):
         sk_tensor = x[0]
@@ -342,25 +343,23 @@ class CustomCLIP(nn.Module):
         photo_feat = self.encode_visual(photo_tensor, "photo", photo_layers, sketch_layers)
         neg_feat = self.encode_visual(neg_tensor, "photo", photo_layers, sketch_layers)
 
-        text_feat_photo = self.encode_text_prompted("photo")
-        text_feat_sketch = self.encode_text_prompted("sketch")
+        # encode_text đã trả về unit-norm vector
+        text_feat_photo  = self.encode_text("photo")
+        text_feat_sketch = self.encode_text("sketch")
 
-        # L2-normalise for cosine similarity / cosine-distance triplet
+        # L2-normalise visual features
         sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
-        photo_feat = photo_feat / photo_feat.norm(dim=-1, keepdim=True)
-        neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
-        text_feat_photo = text_feat_photo / text_feat_photo.norm(dim=-1, keepdim=True)
-        text_feat_sketch = text_feat_sketch / text_feat_sketch.norm(dim=-1, keepdim=True)
+        photo_feat  = photo_feat  / photo_feat.norm(dim=-1, keepdim=True)
+        neg_feat    = neg_feat    / neg_feat.norm(dim=-1, keepdim=True)
 
-        logit_scale = self.logit_scale.exp()
-        logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
+        logit_scale   = self.logit_scale.exp()
+        logits_photo  = logit_scale * photo_feat  @ text_feat_photo.t()
         logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
 
         return (
             photo_feat, logits_photo,
             sketch_feat, logits_sketch,
             neg_feat, label,
-            text_feat_photo, text_feat_sketch,
         )
 
 
@@ -388,13 +387,13 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.print(
             f"XDom prompt: depth={m.prompt_depth}, cross_layer={m.cross_layer}, n_ctx={m.n_ctx}; "
             f"photo prompts: {len(m.cross_prompts_photo)} layers, sketch prompts: {len(m.cross_prompts_sketch)} layers; "
-            f"text shallow tokens: sketch={m.text_prompt_sketch.shape[0]}, photo={m.text_prompt_photo.shape[0]}"
+            f"text shallow tokens: sketch={m.ctx_sketch.shape[0]}, photo={m.ctx_photo.shape[0]}"
         )
         try:
             self.log('prompt_depth', m.prompt_depth, prog_bar=False, logger=True)
             self.log('cross_layer', m.cross_layer, prog_bar=False, logger=True)
-            self.log('tokens_text_sketch', m.text_prompt_sketch.shape[0], prog_bar=False, logger=True)
-            self.log('tokens_text_photo', m.text_prompt_photo.shape[0], prog_bar=False, logger=True)
+            self.log('tokens_text_sketch', m.ctx_sketch.shape[0], prog_bar=False, logger=True)
+            self.log('tokens_text_photo', m.ctx_photo.shape[0], prog_bar=False, logger=True)
         except Exception:
             pass
 
@@ -409,20 +408,36 @@ class HiCroPL_SBIR(pl.LightningModule):
         prompt_params = []
         prompt_params.extend(list(m.cross_prompts_photo))
         prompt_params.extend(list(m.cross_prompts_sketch))
-        if m.text_prompt_sketch.requires_grad:
-            prompt_params.append(m.text_prompt_sketch)
-        if m.text_prompt_photo.requires_grad:
-            prompt_params.append(m.text_prompt_photo)
+        if m.ctx_photo.requires_grad:
+            prompt_params.append(m.ctx_photo)
+        if m.ctx_sketch.requires_grad:
+            prompt_params.append(m.ctx_sketch)
 
         mapper_lkp_params = []
-        mapper_lkp_params.extend(p for p in m.photo2sketch_net.parameters() if p.requires_grad)
-        mapper_lkp_params.extend(p for p in m.sketch2photo_net.parameters() if p.requires_grad)
-        mapper_lkp_params.extend(p for p in m.attn_pool_photo_nets.parameters() if p.requires_grad)
-        mapper_lkp_params.extend(p for p in m.attn_pool_sketch_nets.parameters() if p.requires_grad)
+        seen_mapper = set()
+        for mod in (m.photo2sketch_net, m.sketch2photo_net,
+                    m.attn_pool_photo_nets, m.attn_pool_sketch_nets):
+            for sub in mod.modules():
+                if isinstance(sub, nn.LayerNorm):
+                    for p in sub.parameters(recurse=False):
+                        if p.requires_grad and id(p) not in seen_mapper:
+                            seen_mapper.add(id(p))
+                            prompt_params.append(p)
+            for p in mod.parameters():
+                if p.requires_grad and id(p) not in seen_mapper:
+                    seen_mapper.add(id(p))
+                    mapper_lkp_params.append(p)
         mapper_lkp_params.extend(list(m.photo_proxy_tokens))
         mapper_lkp_params.extend(list(m.sketch_proxy_tokens))
 
-        clip_params = list(m.clip.parameters())
+        clip_params = (
+            list(m.ph_encoder.parameters()) +
+            list(m.sk_encoder.parameters()) +
+            list(m.text_transformer.parameters()) +
+            list(m.text_ln_final.parameters())
+        )
+        if m.logit_scale.requires_grad:
+            clip_params.append(m.logit_scale)
         clip_trainable = sum(p.numel() for p in clip_params if p.requires_grad)
 
         self.print(f"Trainable prompt params (deep visual + shallow text): {sum(p.numel() for p in prompt_params):,}")

@@ -45,8 +45,6 @@ def loss_fn_hicropl(args, features):
         photo_feat, logits_photo,
         sketch_feat, logits_sketch,
         neg_feat, label,
-        text_feat_photo, text_feat_sketch,
-        *_
     ) = features
 
     device = logits_photo.device
