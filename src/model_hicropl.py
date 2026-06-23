@@ -123,6 +123,11 @@ class CustomCLIP(nn.Module):
         self.ph_encoder.apply(freeze_all_but_bn)
         self.sk_encoder.apply(freeze_all_but_bn)
 
+        # Frozen visual encoder cho residual mixing (ZS baseline, không có prompt).
+        distill_src = clip_model_frozen if clip_model_frozen is not None else clip_model
+        self.visual_distill = copy.deepcopy(distill_src.visual).to(original_device)
+        self.visual_distill.apply(freeze_all_but_bn)
+
         def _count_trainable(m):
             total = sum(p.numel() for p in m.parameters())
             trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
@@ -352,6 +357,16 @@ class CustomCLIP(nn.Module):
         photo_feat  = photo_feat  / photo_feat.norm(dim=-1, keepdim=True)
         neg_feat    = neg_feat    / neg_feat.norm(dim=-1, keepdim=True)
 
+        # Residual mixing: feat = norm(norm(prompted) + frozen_zs)
+        photo_feat_fixed  = self.visual_distill(photo_tensor.type(self.dtype))
+        photo_feat_fixed  = photo_feat_fixed  / photo_feat_fixed.norm(dim=-1, keepdim=True)
+        sketch_feat_fixed = self.visual_distill(sk_tensor.type(self.dtype))
+        sketch_feat_fixed = sketch_feat_fixed / sketch_feat_fixed.norm(dim=-1, keepdim=True)
+        photo_feat  = (photo_feat  + photo_feat_fixed)
+        photo_feat  = photo_feat  / photo_feat.norm(dim=-1, keepdim=True)
+        sketch_feat = (sketch_feat + sketch_feat_fixed)
+        sketch_feat = sketch_feat / sketch_feat.norm(dim=-1, keepdim=True)
+
         logit_scale   = self.logit_scale.exp()
         logits_photo  = logit_scale * photo_feat  @ text_feat_photo.t()
         logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
@@ -433,6 +448,7 @@ class HiCroPL_SBIR(pl.LightningModule):
         clip_params = (
             list(m.ph_encoder.parameters()) +
             list(m.sk_encoder.parameters()) +
+            list(m.visual_distill.parameters()) +
             list(m.text_transformer.parameters()) +
             list(m.text_ln_final.parameters())
         )
