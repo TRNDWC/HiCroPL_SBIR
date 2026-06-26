@@ -55,7 +55,6 @@ class Sketchy(torch.utils.data.Dataset):
 
         self.opts = opts
         self.transform = transform
-        self.augmentation = augmented_transform()  # Strong augmentation for consistency
         self.return_orig = return_orig
 
         dataset_key = self.opts.dataset if hasattr(self.opts, 'dataset') else 'sketchy'
@@ -132,16 +131,12 @@ class Sketchy(torch.utils.data.Dataset):
         sk_tensor  = self.transform(sk_data)
         img_tensor = self.transform(img_data)
         neg_tensor = self.transform(neg_data)
-        
-        # Testing no augmentation for sketches and photo 
-        img_aug_tensor = self.augmentation(img_data)
-        sk_aug_tensor = self.augmentation(sk_data)
-        
+
         if self.return_orig:
             return sk_tensor, img_tensor, neg_tensor, self.all_categories.index(category), filename, \
                 sk_data, img_data, neg_data
         else:
-            return sk_tensor, img_tensor, neg_tensor, sk_aug_tensor, img_aug_tensor, \
+            return sk_tensor, img_tensor, neg_tensor, sk_tensor, img_tensor, \
                    self.all_categories.index(category), filename
 
     @staticmethod
