@@ -296,24 +296,12 @@ class CustomCLIP(nn.Module):
         sketch_aug_feat_fixed = self.clip_distill_sketch.visual(sk_aug_tensor.type(self.dtype))
         sketch_aug_feat_fixed = sketch_aug_feat_fixed / sketch_aug_feat_fixed.norm(dim=-1, keepdim=True)
 
-        # Distill Visual Features for Original (for residual mix)
-        photo_feat_fixed = self.clip_distill_photo.visual(photo_tensor.type(self.dtype))
-        photo_feat_fixed = photo_feat_fixed / photo_feat_fixed.norm(dim=-1, keepdim=True)
-        
-        sketch_feat_fixed = self.clip_distill_sketch.visual(sk_tensor.type(self.dtype))
-        sketch_feat_fixed = sketch_feat_fixed / sketch_feat_fixed.norm(dim=-1, keepdim=True)
-
-        # 3. Residual Mix & Final Normalization
-        # Image
+        # 3. Final Normalization (no residual mix)
         photo_feat_prompted = out_p["image_features"]
-        photo_feat_prompted_norm = photo_feat_prompted / photo_feat_prompted.norm(dim=-1, keepdim=True)
-        photo_feat_prenorm = photo_feat_prompted_norm + photo_feat_fixed
-        photo_feat = photo_feat_prenorm / photo_feat_prenorm.norm(dim=-1, keepdim=True)
+        photo_feat = photo_feat_prompted / photo_feat_prompted.norm(dim=-1, keepdim=True)
 
         sketch_feat_prompted = out_s["image_features"]
-        sketch_feat_prompted_norm = sketch_feat_prompted / sketch_feat_prompted.norm(dim=-1, keepdim=True)
-        sketch_feat_prenorm = sketch_feat_prompted_norm + sketch_feat_fixed
-        sketch_feat = sketch_feat_prenorm / sketch_feat_prenorm.norm(dim=-1, keepdim=True)
+        sketch_feat = sketch_feat_prompted / sketch_feat_prompted.norm(dim=-1, keepdim=True)
         
         neg_feat_prompted = out_neg["image_features"]
         neg_feat = neg_feat_prompted / neg_feat_prompted.norm(dim=-1, keepdim=True)
@@ -348,7 +336,7 @@ class CustomCLIP(nn.Module):
             logits_photo_aug, logits_sketch_aug,
             text_feat_photo, text_feat_sketch,
             text_distill_photo, text_distill_sketch,
-            photo_feat_fixed, sketch_feat_fixed,
+            photo_feat, sketch_feat,
         )
 
 
@@ -467,26 +455,18 @@ class HiCroPL_SBIR(pl.LightningModule):
         return loss
 
     def extract_eval_features(self, tensor, modality):
-        """Extract visual features: Prompted + Distill Fixed (Residual Mix)"""
+        """Extract visual features: Prompted only (no residual mix)"""
         vis1_shallow, vis2_shallow, vis1_deeper, vis2_deeper = self.model.visual_visual_learner()
 
         if modality == 'photo':
             visual_encoder = self.model.visual_encoder_photo
-            distill_encoder = self.model.clip_distill_photo.visual
             vis_shallow, vis_deeper = vis2_shallow, vis2_deeper
         else:
             visual_encoder = self.model.visual_encoder_sketch
-            distill_encoder = self.model.clip_distill_sketch.visual
             vis_shallow, vis_deeper = vis1_shallow, vis1_deeper
 
         prompted_feat = visual_encoder(tensor.type(self.model.dtype), vis_shallow, vis_deeper)
-        prompted_feat_norm = prompted_feat / prompted_feat.norm(dim=-1, keepdim=True)
-        
-        fixed_feat = distill_encoder(tensor.type(self.model.dtype))
-        fixed_feat_norm = fixed_feat / fixed_feat.norm(dim=-1, keepdim=True)
-        
-        combined_prenorm = prompted_feat_norm + fixed_feat_norm
-        return combined_prenorm / combined_prenorm.norm(dim=-1, keepdim=True)
+        return prompted_feat / prompted_feat.norm(dim=-1, keepdim=True)
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         return self._validation_step_category(batch, batch_idx, dataloader_idx)
