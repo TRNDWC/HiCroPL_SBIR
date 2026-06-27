@@ -10,7 +10,7 @@ from torchmetrics.functional.retrieval import retrieval_average_precision, retri
 
 from src.hicropl import (
     VisualEncoder,
-    VisualVisualPromptLearner,
+    IndependentVisualPromptLearner,
 )
 from src.clip import clip as _clip
 
@@ -154,8 +154,8 @@ class CustomCLIP(nn.Module):
         self.logit_scale_sketch = self.clip_sketch.logit_scale
 
         # -- Prompt Learners --
-        print("Initializing Visual-Visual Prompt Learner (sketch <-> photo)...")
-        self.visual_visual_learner = VisualVisualPromptLearner(cfg, self.clip_sketch, self.clip_photo)
+        print("Initializing Independent Prompt Learner (wo_both: no cross-domain, no augmentation)...")
+        self.visual_visual_learner = IndependentVisualPromptLearner(cfg, self.clip_sketch, self.clip_photo)
 
         # -- Text encoder: frozen (chỉ LN trainable) + shallow ctx per modality --
         text_src = self.clip_distill_photo

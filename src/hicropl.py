@@ -420,6 +420,50 @@ class VisualVisualPromptLearner(nn.Module):
             cross_prompts_photo_deeper,    # analog: cross_prompts_text_deeper
             cross_prompts_sketch_deeper    # analog: cross_prompts_visual_deeper
         )
+
+
+class IndependentVisualPromptLearner(nn.Module):
+    """wo_both baseline: two independent deep prompt learners, no cross-domain exchange."""
+
+    def __init__(self, cfg, clip_model_photo, clip_model_sketch):
+        super().__init__()
+
+        self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
+        n_ctx = getattr(cfg, 'n_ctx', 4)
+
+        assert self.prompt_depth >= 1
+
+        dtype = clip_model_photo.dtype
+        p_dim = clip_model_photo.visual.conv1.weight.shape[0]
+        s_dim = clip_model_sketch.visual.conv1.weight.shape[0]
+        assert p_dim == s_dim
+
+        self.dtype = dtype
+        self.n_ctx = n_ctx
+
+        photo_vectors = torch.empty(n_ctx, p_dim, dtype=dtype)
+        nn.init.normal_(photo_vectors, std=0.02)
+        self.cross_prompts_photo = nn.ParameterList(
+            [nn.Parameter(photo_vectors.clone()) for _ in range(self.prompt_depth)]
+        )
+
+        sketch_vectors = torch.empty(n_ctx, s_dim, dtype=dtype)
+        nn.init.normal_(sketch_vectors, std=0.02)
+        self.cross_prompts_sketch = nn.ParameterList(
+            [nn.Parameter(sketch_vectors.clone()) for _ in range(self.prompt_depth)]
+        )
+
+    def forward(self):
+        photo_deeper  = [self.cross_prompts_photo[i]  for i in range(1, self.prompt_depth)]
+        sketch_deeper = [self.cross_prompts_sketch[i] for i in range(1, self.prompt_depth)]
+        return (
+            self.cross_prompts_photo[0],
+            self.cross_prompts_sketch[0],
+            photo_deeper,
+            sketch_deeper,
+        )
+
+
 class SimpleTextPromptLearner(nn.Module):
     """Minimal text-only prompt learner: prepares tokenized prompts and text prompt tensors.
 
