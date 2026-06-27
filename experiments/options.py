@@ -65,9 +65,16 @@ parser.add_argument('--vision_ctx', type=int, default=-1, help='Visual prompt to
 parser.add_argument('--language_ctx', type=int, default=-1, help='Text prompt token count; -1 means use n_ctx')
 
 # ----------------------
+# Ablation Flags
+# ----------------------
+parser.add_argument('--wo_cross_domain', action='store_true', default=False,
+                    help='Ablation: replace VisualVisualPromptLearner with two independent '
+                         'CoOp-style prompt learners (no cross-domain bidirectional flow)')
+
+# ----------------------
 # Evaluation Mode
 # ----------------------
-parser.add_argument('--eval_mode', type=str, default='category', 
+parser.add_argument('--eval_mode', type=str, default='category',
                     choices=['category', 'fine_grained'],
                     help='Evaluation mode: category-level retrieval or fine-grained instance-level retrieval')
 
