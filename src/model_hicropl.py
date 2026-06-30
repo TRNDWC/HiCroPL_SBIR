@@ -50,6 +50,11 @@ class CustomCLIP(nn.Module):
         self.ph_encoder = copy.deepcopy(clip_model_frozen.visual).to(original_device)
         self.sk_encoder = copy.deepcopy(clip_model_frozen.visual).to(original_device)
 
+        # 2b. Frozen reference encoder for consistency loss target (CoPrompt-style distillation)
+        #     All params frozen — provides stable anchor for aug features (no LN update here)
+        self.teacher_encoder = copy.deepcopy(clip_model_frozen.visual).to(original_device)
+        freeze_model(self.teacher_encoder)
+
         # 3. Logit scale from student
         self.logit_scale = clip_model.logit_scale
 
@@ -145,9 +150,11 @@ class CustomCLIP(nn.Module):
         sketch_feat = sketch_raw / sketch_raw.norm(dim=-1, keepdim=True)
         neg_feat    = neg_raw    / neg_raw.norm(dim=-1, keepdim=True)
 
-        # Augmented features for L2 consistency
-        photo_aug_raw  = self.ph_encoder(photo_aug_tensor.type(self.dtype))
-        sketch_aug_raw = self.sk_encoder(sk_aug_tensor.type(self.dtype))
+        # Augmented features for L2 consistency — frozen teacher as stable anchor
+        # (CoPrompt-style: student original vs teacher aug, not student vs student)
+        with torch.no_grad():
+            photo_aug_raw  = self.teacher_encoder(photo_aug_tensor.type(self.dtype))
+            sketch_aug_raw = self.teacher_encoder(sk_aug_tensor.type(self.dtype))
         photo_aug_feat  = photo_aug_raw  / photo_aug_raw.norm(dim=-1, keepdim=True)
         sketch_aug_feat = sketch_aug_raw / sketch_aug_raw.norm(dim=-1, keepdim=True)
 
