@@ -134,7 +134,7 @@ class CustomCLIP(nn.Module):
         return x / x.norm(dim=-1, keepdim=True)
 
     def forward(self, x, classnames):
-        sk_tensor, photo_tensor, neg_tensor, _sk_aug, _photo_aug, label = x[:6]
+        sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
 
         # Visual encoding (no visual prompts)
         photo_raw  = self.ph_encoder(photo_tensor.type(self.dtype))
@@ -145,6 +145,12 @@ class CustomCLIP(nn.Module):
         sketch_feat = sketch_raw / sketch_raw.norm(dim=-1, keepdim=True)
         neg_feat    = neg_raw    / neg_raw.norm(dim=-1, keepdim=True)
 
+        # Augmented features for L2 consistency
+        photo_aug_raw  = self.ph_encoder(photo_aug_tensor.type(self.dtype))
+        sketch_aug_raw = self.sk_encoder(sk_aug_tensor.type(self.dtype))
+        photo_aug_feat  = photo_aug_raw  / photo_aug_raw.norm(dim=-1, keepdim=True)
+        sketch_aug_feat = sketch_aug_raw / sketch_aug_raw.norm(dim=-1, keepdim=True)
+
         # Text encoding
         text_feat_photo  = self.encode_text("photo")
         text_feat_sketch = self.encode_text("sketch")
@@ -154,13 +160,12 @@ class CustomCLIP(nn.Module):
         logits_photo  = logit_scale * photo_feat  @ text_feat_photo.t()
         logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
 
-        # Pad tuple to keep loss_fn_hicropl destructuring happy (unused slots → None)
         return (
             photo_feat, logits_photo,
             sketch_feat, logits_sketch,
             neg_feat, label,
-            None, None,   # photo_aug_feat, sketch_aug_feat  (L2 disabled)
-            None, None,   # logits_photo_aug, logits_sketch_aug
+            photo_aug_feat, sketch_aug_feat,
+            None, None,   # logits_photo_aug, logits_sketch_aug (không dùng)
             text_feat_photo, text_feat_sketch,
             None, None,   # text_distill_photo, text_distill_sketch (L3 removed)
         )
