@@ -256,7 +256,8 @@ class VisualVisualPromptLearner(nn.Module):
     def __init__(self, cfg, clip_model_photo, clip_model_sketch):
         super().__init__()
 
-        self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
+        vis_depth = getattr(cfg, 'vision_depth', -1)
+        self.prompt_depth = getattr(cfg, 'prompt_depth', 9) if vis_depth == -1 else vis_depth
         self.cross_layer = getattr(cfg, 'cross_layer', 4)
         self.disable_cross_exchange = getattr(cfg, 'disable_cross_exchange', False)
         n_ctx = getattr(cfg, 'n_ctx', 4)
@@ -432,7 +433,8 @@ class SimpleTextPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
         n_cls = len(classnames)
-        self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
+        lang_depth = getattr(cfg, 'language_depth', -1)
+        self.prompt_depth = getattr(cfg, 'prompt_depth', 9) if lang_depth == -1 else lang_depth
         n_ctx = getattr(cfg, 'n_ctx', 4)
         ctx_init = getattr(cfg, 'ctx_init', "a photo of a")
         dtype = clip_model.dtype

@@ -88,8 +88,34 @@ def loss_fn_hicropl(args, features):
     loss_ce_sketch = F.cross_entropy(logits_sketch, label)
     loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
-    # Total loss: L1 (cross-modal) + L2 (visual consistency) + L4 (CE)
-    # Text distillation consistency remains disabled in this configuration.
-    total_loss = loss_cross_modal + loss_consistency + loss_ce
+    if getattr(args, 'enhance_text', False):
+        # --- L3: Text Consistency (LLM-guided dual sketch/photo descriptions) ---
+        loss_cons_text_sketch = 1.0 - F.cosine_similarity(text_feat_sketch + text_distill_sketch, text_feat_sketch, dim=-1)
+        loss_cons_text_photo = 1.0 - F.cosine_similarity(text_feat_photo + text_distill_photo, text_feat_photo, dim=-1)
+        loss_cons_text = lambda_text_consistency * (loss_cons_text_sketch.mean() + loss_cons_text_photo.mean())
+    
+        # --- L_cons_visual_cross: Cross-anchor Visual to Text ---
+        lambda_visual_cross = getattr(args, 'lambda_visual_cross', 0.1)
+        text_distill_sketch_batch = text_distill_sketch[label]
+        text_distill_photo_batch = text_distill_photo[label]
 
-    return total_loss
+        loss_cons_visual_cross_sketch = 1.0 - F.cosine_similarity(sketch_feat + text_distill_sketch_batch, sketch_feat, dim=-1)
+        loss_cons_visual_cross_photo = 1.0 - F.cosine_similarity(photo_feat + text_distill_photo_batch, photo_feat, dim=-1)
+        loss_cons_visual_cross = lambda_visual_cross * (loss_cons_visual_cross_sketch.mean() + loss_cons_visual_cross_photo.mean())
+    else:
+        loss_cons_text = 0.0
+        loss_cons_visual_cross = 0.0
+
+    # Total loss: L1 (cross-modal) + L2 (visual consistency) + L4 (CE) + L_cons_text + L_cons_visual_cross
+    # Text distillation consistency remains disabled in this configuration.
+    total_loss = loss_cross_modal + loss_consistency + loss_ce + loss_cons_text + loss_cons_visual_cross
+
+    loss_dict = {
+        'loss_cross_modal': loss_cross_modal,
+        'loss_consistency': loss_consistency,
+        'loss_ce': loss_ce,
+        'loss_cons_text': loss_cons_text,
+        'loss_cons_visual_cross': loss_cons_visual_cross
+    }
+
+    return total_loss, loss_dict

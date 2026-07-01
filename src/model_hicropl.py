@@ -14,7 +14,7 @@ from src.hicropl import (
     VisualVisualPromptLearner,
     SimpleTextPromptLearner,
 )
-
+from src.losses_hicropl import loss_fn_hicropl
 
 def freeze_model(m):
     """Freeze all parameters of the given module."""
@@ -421,13 +421,18 @@ class HiCroPL_SBIR(pl.LightningModule):
         return torch.optim.Adam(param_groups, weight_decay=weight_decay)
 
     def training_step(self, batch, batch_idx):
-        from src.losses_hicropl import loss_fn_hicropl
         features = self.model(batch, self.classnames)
-        loss = loss_fn_hicropl(self.args, features)
+        loss, loss_dict = loss_fn_hicropl(self.args, features)
         
-        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
+        # Log total loss
+        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False, logger=False)
         
+        # Log individual loss components to TensorBoard and Terminal (prog_bar)
+        for k, v in loss_dict.items():
+            if isinstance(v, torch.Tensor) or v > 0:
+                self.log(k, v, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+                
         return loss
 
     def extract_eval_features(self, tensor, modality):

@@ -43,6 +43,7 @@ parser.add_argument('--num_trainable_ln', type=int, default=-1,
 # ----------------------
 parser.add_argument('--disable_cross_exchange', action='store_true', help='Disable Visual-Visual cross-modal token exchange')
 parser.add_argument('--disable_augmentation', action='store_true', help='Disable data augmentation and consistency loss')
+parser.add_argument('--enhance_text', action='store_true', help='Enable L3 and L_cons_visual_cross for text enhancement')
 
 # ----------------------
 # ViT & HiCroPL Prompt Parameters
@@ -61,6 +62,7 @@ parser.add_argument('--lambda_cross_modal', type=float, default=1.0, help='Weigh
 parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for prompted visual-text classification loss')
 parser.add_argument('--lambda_consistency', type=float, default=1.0, help='Weight for visual distill consistency loss')
 parser.add_argument('--lambda_text_consistency', type=float, default=1.0, help='Weight for GPT text distill consistency loss')
+parser.add_argument('--lambda_visual_cross', type=float, default=0.1, help='Weight for cross-anchor visual to text loss')
 parser.add_argument('--gpt_text_file', type=str, default='gpt_file/sketchy_ext.json', help='GPT text prompt JSON for modality-specific distill text branches')
 
 # CLIP design_details (CoPrompt-style builder config)

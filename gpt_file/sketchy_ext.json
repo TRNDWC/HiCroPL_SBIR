@@ -2,1041 +2,1041 @@
   {
     "class": "airplane",
     "input": "a sketch of a airplane",
-    "output": "fuselage as long tube outline, wings as straight wing lines, tail as small tail fin contour, engines as rounded pod shapes."
+    "output": "fuselage as long tube form, wings as straight wing parts, tail as small tail fin shape, engines as rounded pod shapes."
   },
   {
     "class": "airplane",
     "input": "a photo of a airplane",
-    "output": "fuselage with smooth metal surface, wings with flat wing sheen, tail with painted tail texture, engines with dark engine intake."
+    "output": "fuselage as long tube form, wings as straight wing parts, tail as small tail fin shape, engines as rounded pod shapes."
   },
   {
     "class": "alarm_clock",
     "input": "a sketch of a alarm_clock",
-    "output": "body as round body contour, face as inner circle line, hands as thin hand lines, bells as small bell arcs."
+    "output": "body as round body shape, face as inner circle part, hands as thin hand parts, bells as small bell curves."
   },
   {
     "class": "alarm_clock",
     "input": "a photo of a alarm_clock",
-    "output": "body with metal body sheen, face with glassy face surface, hands with thin hand detail, bells with metal bell texture."
+    "output": "body as round body shape, face as inner circle part, hands as thin hand parts, bells as small bell curves."
   },
   {
     "class": "ant",
     "input": "a sketch of a ant",
-    "output": "head as small oval contour, thorax as compact block outline, abdomen as bulbous oval outline, legs as thin stick legs, wings as paired arc wings."
+    "output": "head as small oval shape, thorax as compact block form, abdomen as bulbous oval form, legs as thin stick legs, wings as paired arc wings."
   },
   {
     "class": "ant",
     "input": "a photo of a ant",
-    "output": "head with smooth head surface, thorax with hard segmented shell, abdomen with banded abdomen texture, legs with spindly leg texture, wings with translucent wing texture."
+    "output": "head as small oval shape, thorax as compact block form, abdomen as bulbous oval form, legs as thin stick legs, wings as paired arc wings."
   },
   {
     "class": "ape",
     "input": "a sketch of a ape",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "ape",
     "input": "a photo of a ape",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "apple",
     "input": "a sketch of a apple",
-    "output": "body as round contour, stem as short stem line, skin as smooth outer outline, top as small top dimple."
+    "output": "body as round shape, stem as short stem part, skin as smooth outer form, top as small top dimple."
   },
   {
     "class": "apple",
     "input": "a photo of a apple",
-    "output": "body with smooth skin sheen, stem with dry stem texture, skin with subtle speckled surface, top with slight top indentation."
+    "output": "body as round shape, stem as short stem part, skin as smooth outer form, top as small top dimple."
   },
   {
     "class": "armor",
     "input": "a sketch of a armor",
-    "output": "plates as overlapping plate outlines, straps as thin strap lines, joints as small joint circles, edges as sharp edge lines."
+    "output": "plates as overlapping plate forms, straps as thin strap parts, joints as small joint circles, edges as sharp edge parts."
   },
   {
     "class": "armor",
     "input": "a photo of a armor",
-    "output": "plates with metal plate sheen, straps with leather strap texture, joints with hard joint detail, edges with bright edge highlights."
+    "output": "plates as overlapping plate forms, straps as thin strap parts, joints as small joint circles, edges as sharp edge parts."
   },
   {
     "class": "axe",
     "input": "a sketch of a axe",
-    "output": "blade as wide wedge contour, handle as long straight line, edge as sharp edge line, head as blocky head outline."
+    "output": "blade as wide wedge shape, handle as long straight part, edge as sharp edge part, head as blocky head form."
   },
   {
     "class": "axe",
     "input": "a photo of a axe",
-    "output": "blade with metal blade sheen, handle with wood handle texture, edge with bright edge highlight, head with solid head texture."
+    "output": "blade as wide wedge shape, handle as long straight part, edge as sharp edge part, head as blocky head form."
   },
   {
     "class": "banana",
     "input": "a sketch of a banana",
-    "output": "body as long arc contour, ends as small end caps, peel as smooth outer outline, curve as strong curve line."
+    "output": "body as long arc shape, ends as small end caps, peel as smooth outer form, curve as strong curve part."
   },
   {
     "class": "banana",
     "input": "a photo of a banana",
-    "output": "body with smooth peel sheen, ends with dark end texture, peel with soft peel surface, curve with curved body shading."
+    "output": "body as long arc shape, ends as small end caps, peel as smooth outer form, curve as strong curve part."
   },
   {
     "class": "bear",
     "input": "a sketch of a bear",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "bear",
     "input": "a photo of a bear",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "bee",
     "input": "a sketch of a bee",
-    "output": "head as small oval contour, thorax as compact block outline, abdomen as bulbous oval outline, legs as thin stick legs, wings as paired arc wings."
+    "output": "head as small oval shape, thorax as compact block form, abdomen as bulbous oval form, legs as thin stick legs, wings as paired arc wings."
   },
   {
     "class": "bee",
     "input": "a photo of a bee",
-    "output": "head with smooth head surface, thorax with hard segmented shell, abdomen with banded abdomen texture, legs with spindly leg texture, wings with translucent wing texture."
+    "output": "head as small oval shape, thorax as compact block form, abdomen as bulbous oval form, legs as thin stick legs, wings as paired arc wings."
   },
   {
     "class": "beetle",
     "input": "a sketch of a beetle",
-    "output": "head as small oval contour, thorax as compact block outline, abdomen as bulbous oval outline, legs as thin stick legs, wings as paired arc wings."
+    "output": "head as small oval shape, thorax as compact block form, abdomen as bulbous oval form, legs as thin stick legs, wings as paired arc wings."
   },
   {
     "class": "beetle",
     "input": "a photo of a beetle",
-    "output": "head with smooth head surface, thorax with hard segmented shell, abdomen with banded abdomen texture, legs with spindly leg texture, wings with translucent wing texture."
+    "output": "head as small oval shape, thorax as compact block form, abdomen as bulbous oval form, legs as thin stick legs, wings as paired arc wings."
   },
   {
     "class": "bell",
     "input": "a sketch of a bell",
-    "output": "dome as rounded dome contour, rim as thick rim line, clapper as small inner dot, handle as short handle line."
+    "output": "dome as rounded dome shape, rim as thick rim part, clapper as small inner dot, handle as short handle part."
   },
   {
     "class": "bell",
     "input": "a photo of a bell",
-    "output": "dome with metal dome sheen, rim with bright rim highlight, clapper with dark clapper detail, handle with hard handle texture."
+    "output": "dome as rounded dome shape, rim as thick rim part, clapper as small inner dot, handle as short handle part."
   },
   {
     "class": "bench",
     "input": "a sketch of a bench",
-    "output": "seat as long flat outline, legs as straight stick legs, supports as short brace lines."
+    "output": "seat as long flat form, legs as straight stick legs, supports as short brace parts."
   },
   {
     "class": "bench",
     "input": "a photo of a bench",
-    "output": "seat with flat seat surface, legs with solid leg texture, supports with hard support texture."
+    "output": "seat as long flat form, legs as straight stick legs, supports as short brace parts."
   },
   {
     "class": "bicycle",
     "input": "a sketch of a bicycle",
-    "output": "frame as angled line frame, wheels as circular loops, handlebar as short bar line, seat as small saddle contour."
+    "output": "frame as angled part frame, wheels as circular circles, handlebar as short bar part, seat as small saddle shape."
   },
   {
     "class": "bicycle",
     "input": "a photo of a bicycle",
-    "output": "frame with metal frame sheen, wheels with rubber tire texture, handlebar with metal handlebar surface, seat with matte seat surface."
+    "output": "frame as angled part frame, wheels as circular circles, handlebar as short bar part, seat as small saddle shape."
   },
   {
     "class": "blimp",
     "input": "a sketch of a blimp",
-    "output": "envelope as long oval outline, gondola as small box contour, fins as triangular fin lines, rigging as thin line strings."
+    "output": "envelope as long oval form, gondola as small box shape, fins as triangular fin parts, rigging as thin part strings."
   },
   {
     "class": "blimp",
     "input": "a photo of a blimp",
-    "output": "envelope with smooth fabric surface, gondola with matte gondola texture, fins with fabric fin texture, rigging with taut cable lines."
+    "output": "envelope as long oval form, gondola as small box shape, fins as triangular fin parts, rigging as thin part strings."
   },
   {
     "class": "bread",
     "input": "a sketch of a bread",
-    "output": "loaf body as rounded block outline, crust as thick outer line, top as arched top contour, base as flat base line."
+    "output": "loaf body as rounded block form, crust as thick outer part, top as arched top shape, base as flat base part."
   },
   {
     "class": "bread",
     "input": "a photo of a bread",
-    "output": "loaf body with baked crust texture, crust with soft inner surface, top with rounded top shading, base with matte base texture."
+    "output": "loaf body as rounded block form, crust as thick outer part, top as arched top shape, base as flat base part."
   },
   {
     "class": "butterfly",
     "input": "a sketch of a butterfly",
-    "output": "head as small oval contour, thorax as compact block outline, abdomen as bulbous oval outline, legs as thin stick legs, wings as paired arc wings."
+    "output": "head as small oval shape, thorax as compact block form, abdomen as bulbous oval form, legs as thin stick legs, wings as paired arc wings."
   },
   {
     "class": "butterfly",
     "input": "a photo of a butterfly",
-    "output": "head with smooth head surface, thorax with hard segmented shell, abdomen with banded abdomen texture, legs with spindly leg texture, wings with translucent wing texture."
+    "output": "head as small oval shape, thorax as compact block form, abdomen as bulbous oval form, legs as thin stick legs, wings as paired arc wings."
   },
   {
     "class": "camel",
     "input": "a sketch of a camel",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "camel",
     "input": "a photo of a camel",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "candle",
     "input": "a sketch of a candle",
-    "output": "wax body as tall cylinder outline, wick as short wick line, flame as teardrop flame contour, base as flat base line."
+    "output": "wax body as tall cylinder form, wick as short wick part, flame as teardrop flame shape, base as flat base part."
   },
   {
     "class": "candle",
     "input": "a photo of a candle",
-    "output": "wax body with smooth wax surface, wick with dark wick texture, flame with bright flame glow, base with matte base texture."
+    "output": "wax body as tall cylinder form, wick as short wick part, flame as teardrop flame shape, base as flat base part."
   },
   {
     "class": "cannon",
     "input": "a sketch of a cannon",
-    "output": "barrel as long tube outline, carriage as blocky base contour, wheels as circular wheel loops, muzzle as round muzzle ring."
+    "output": "barrel as long tube form, carriage as blocky base shape, wheels as circular wheel circles, muzzle as round muzzle ring."
   },
   {
     "class": "cannon",
     "input": "a photo of a cannon",
-    "output": "barrel with metal barrel sheen, carriage with wooden carriage texture, wheels with rough wheel texture, muzzle with dark muzzle opening."
+    "output": "barrel as long tube form, carriage as blocky base shape, wheels as circular wheel circles, muzzle as round muzzle ring."
   },
   {
     "class": "car_(sedan)",
     "input": "a sketch of a car_(sedan)",
-    "output": "body as boxy outline, wheels as circular loops, windows as rectangular cutouts, bumper as thin bar line."
+    "output": "body as boxy form, wheels as circular circles, windows as rectangular cutouts, bumper as thin bar part."
   },
   {
     "class": "car_(sedan)",
     "input": "a photo of a car_(sedan)",
-    "output": "body with smooth painted surface, wheels with dark rubber texture, windows with reflective glass, bumper with metallic bumper sheen."
+    "output": "body as boxy form, wheels as circular circles, windows as rectangular cutouts, bumper as thin bar part."
   },
   {
     "class": "castle",
     "input": "a sketch of a castle",
-    "output": "towers as tall block contours, walls as thick wall lines, roof as triangular roof lines, windows as small window squares."
+    "output": "towers as tall block shapes, walls as thick wall parts, roof as triangular roof parts, windows as small window squares."
   },
   {
     "class": "castle",
     "input": "a photo of a castle",
-    "output": "towers with stone tower texture, walls with rough wall surface, roof with tiled roof texture, windows with dark window openings."
+    "output": "towers as tall block shapes, walls as thick wall parts, roof as triangular roof parts, windows as small window squares."
   },
   {
     "class": "cat",
     "input": "a sketch of a cat",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "cat",
     "input": "a photo of a cat",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "chair",
     "input": "a sketch of a chair",
-    "output": "seat as flat seat outline, backrest as upright panel line, legs as straight stick legs, arms as short arm lines."
+    "output": "seat as flat seat form, backrest as upright panel part, legs as straight stick legs, arms as short arm parts."
   },
   {
     "class": "chair",
     "input": "a photo of a chair",
-    "output": "seat with matte seat surface, backrest with smooth backrest texture, legs with solid leg texture, arms with rounded arm surface."
+    "output": "seat as flat seat form, backrest as upright panel part, legs as straight stick legs, arms as short arm parts."
   },
   {
     "class": "chicken",
     "input": "a sketch of a chicken",
-    "output": "head as small oval contour, beak as pointed wedge line, wings as long arc-shaped strokes, legs as straight stick lines, tail as short fan contour."
+    "output": "head as small oval shape, beak as pointed wedge part, wings as long arc-shaped parts, legs as straight stick parts, tail as short fan shape."
   },
   {
     "class": "chicken",
     "input": "a photo of a chicken",
-    "output": "head with smooth head surface, beak with hard glossy beak, wings with layered feather texture, legs with scaly leg texture, tail with layered tail feathers."
+    "output": "head as small oval shape, beak as pointed wedge part, wings as long arc-shaped parts, legs as straight stick parts, tail as short fan shape."
   },
   {
     "class": "church",
     "input": "a sketch of a church",
-    "output": "spire as tall spire contour, walls as thick wall lines, roof as sloped roof lines, windows as arched window shapes."
+    "output": "spire as tall spire shape, walls as thick wall parts, roof as sloped roof parts, windows as arched window shapes."
   },
   {
     "class": "church",
     "input": "a photo of a church",
-    "output": "spire with stone wall texture, walls with rough wall surface, roof with tiled roof texture, windows with dark window openings."
+    "output": "spire as tall spire shape, walls as thick wall parts, roof as sloped roof parts, windows as arched window shapes."
   },
   {
     "class": "couch",
     "input": "a sketch of a couch",
-    "output": "seat as wide cushion outline, backrest as tall panel contour, arms as rounded arm shapes, base as flat base line."
+    "output": "seat as wide cushion form, backrest as tall panel shape, arms as rounded arm shapes, base as flat base part."
   },
   {
     "class": "couch",
     "input": "a photo of a couch",
-    "output": "seat with soft cushion texture, backrest with fabric backrest surface, arms with padded arm texture, base with matte base texture."
+    "output": "seat as wide cushion form, backrest as tall panel shape, arms as rounded arm shapes, base as flat base part."
   },
   {
     "class": "crab",
     "input": "a sketch of a crab",
-    "output": "carapace as domed shield outline, claws as pincer-shaped strokes, legs as thin stick legs, tail as segmented tail outline."
+    "output": "carapace as domed shield form, claws as pincer-shaped parts, legs as thin stick legs, tail as segmented tail form."
   },
   {
     "class": "crab",
     "input": "a photo of a crab",
-    "output": "carapace with hard shell sheen, claws with textured claw surface, legs with spindly leg texture, tail with segmented tail texture."
+    "output": "carapace as domed shield form, claws as pincer-shaped parts, legs as thin stick legs, tail as segmented tail form."
   },
   {
     "class": "crocodilian",
     "input": "a sketch of a crocodilian",
-    "output": "head as angular contour, torso as long block outline, legs as short limb strokes, tail as tapered line."
+    "output": "head as angular shape, torso as long block form, legs as short limb parts, tail as tapered part."
   },
   {
     "class": "crocodilian",
     "input": "a photo of a crocodilian",
-    "output": "head with scaled head texture, torso with textured hide, legs with scaled limb surface, tail with scaly tail texture."
+    "output": "head as angular shape, torso as long block form, legs as short limb parts, tail as tapered part."
   },
   {
     "class": "cup",
     "input": "a sketch of a cup",
-    "output": "body as cylindrical outline, rim as oval rim line, handle as loop handle contour, base as flat base line."
+    "output": "body as cylindrical form, rim as oval rim part, handle as loop handle shape, base as flat base part."
   },
   {
     "class": "cup",
     "input": "a photo of a cup",
-    "output": "body with smooth ceramic surface, rim with clean rim highlight, handle with rounded handle texture, base with matte base texture."
+    "output": "body as cylindrical form, rim as oval rim part, handle as loop handle shape, base as flat base part."
   },
   {
     "class": "deer",
     "input": "a sketch of a deer",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "deer",
     "input": "a photo of a deer",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "dog",
     "input": "a sketch of a dog",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "dog",
     "input": "a photo of a dog",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "duck",
     "input": "a sketch of a duck",
-    "output": "head as small oval contour, beak as pointed wedge line, wings as long arc-shaped strokes, legs as straight stick lines, tail as short fan contour."
+    "output": "head as small oval shape, beak as pointed wedge part, wings as long arc-shaped parts, legs as straight stick parts, tail as short fan shape."
   },
   {
     "class": "duck",
     "input": "a photo of a duck",
-    "output": "head with smooth head surface, beak with hard glossy beak, wings with layered feather texture, legs with scaly leg texture, tail with layered tail feathers."
+    "output": "head as small oval shape, beak as pointed wedge part, wings as long arc-shaped parts, legs as straight stick parts, tail as short fan shape."
   },
   {
     "class": "elephant",
     "input": "a sketch of a elephant",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "elephant",
     "input": "a photo of a elephant",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "eyeglasses",
     "input": "a sketch of a eyeglasses",
-    "output": "frames as round frame contours, lenses as clear oval outlines, bridge as short bridge line, temples as thin temple lines."
+    "output": "frames as round frame shapes, lenses as clear oval forms, bridge as short bridge part, temples as thin temple parts."
   },
   {
     "class": "eyeglasses",
     "input": "a photo of a eyeglasses",
-    "output": "frames with metal frame sheen, lenses with clear glass surface, bridge with hard bridge texture, temples with slim temple texture."
+    "output": "frames as round frame shapes, lenses as clear oval forms, bridge as short bridge part, temples as thin temple parts."
   },
   {
     "class": "fan",
     "input": "a sketch of a fan",
-    "output": "blades as wide blade arcs, hub as small center circle, guard as ring guard line, base as flat base line."
+    "output": "blades as wide blade curves, hub as small center circle, guard as ring guard part, base as flat base part."
   },
   {
     "class": "fan",
     "input": "a photo of a fan",
-    "output": "blades with smooth blade surface, hub with solid hub texture, guard with thin guard mesh, base with matte base texture."
+    "output": "blades as wide blade curves, hub as small center circle, guard as ring guard part, base as flat base part."
   },
   {
     "class": "fish",
     "input": "a sketch of a fish",
-    "output": "head as tapered oval contour, body as elongated spindle outline, dorsal fin as triangular fin strokes, tail fin as forked tail outline, side fins as small side fin lines."
+    "output": "head as tapered oval shape, body as elongated spindle form, dorsal fin as triangular fin parts, tail fin as forked tail form, side fins as small side fin parts."
   },
   {
     "class": "fish",
     "input": "a photo of a fish",
-    "output": "head with slick scaled surface, body with smooth body sheen, dorsal fin with translucent fin texture, tail fin with thin membranous tail, side fins with small fin texture."
+    "output": "head as tapered oval shape, body as elongated spindle form, dorsal fin as triangular fin parts, tail fin as forked tail form, side fins as small side fin parts."
   },
   {
     "class": "flower",
     "input": "a sketch of a flower",
-    "output": "petals as rounded petal arcs, center as small circle center, stem as straight stem line, leaves as leaf oval contours."
+    "output": "petals as rounded petal curves, center as small circle center, stem as straight stem part, leaves as leaf oval shapes."
   },
   {
     "class": "flower",
     "input": "a photo of a flower",
-    "output": "petals with soft petal texture, center with dense center texture, stem with fibrous stem surface, leaves with veined leaf texture."
+    "output": "petals as rounded petal curves, center as small circle center, stem as straight stem part, leaves as leaf oval shapes."
   },
   {
     "class": "frog",
     "input": "a sketch of a frog",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "frog",
     "input": "a photo of a frog",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "geyser",
     "input": "a sketch of a geyser",
-    "output": "spray as vertical spray lines, plume as cloudy plume strokes, base as low mound outline, pool as flat pool line."
+    "output": "spray as vertical spray parts, plume as cloudy plume parts, base as low mound form, pool as flat pool part."
   },
   {
     "class": "geyser",
     "input": "a photo of a geyser",
-    "output": "spray with misty spray texture, plume with soft plume detail, base with rocky base texture, pool with shimmering pool surface."
+    "output": "spray as vertical spray parts, plume as cloudy plume parts, base as low mound form, pool as flat pool part."
   },
   {
     "class": "guitar",
     "input": "a sketch of a guitar",
-    "output": "body as rounded body outline, neck as long neck line, strings as parallel string lines, bridge as small bar contour."
+    "output": "body as rounded body form, neck as long neck part, strings as parallel string parts, bridge as small bar shape."
   },
   {
     "class": "guitar",
     "input": "a photo of a guitar",
-    "output": "body with polished wood surface, neck with smooth neck texture, strings with metal string sheen, bridge with hard bridge texture."
+    "output": "body as rounded body form, neck as long neck part, strings as parallel string parts, bridge as small bar shape."
   },
   {
     "class": "hamburger",
     "input": "a sketch of a hamburger",
-    "output": "top bun as domed top outline, patty as flat oval contour, fillings as stacked thin lines, bottom bun as flat base line."
+    "output": "top bun as domed top form, patty as flat oval shape, fillings as stacked thin parts, bottom bun as flat base part."
   },
   {
     "class": "hamburger",
     "input": "a photo of a hamburger",
-    "output": "top bun with baked bun texture, patty with seared patty surface, fillings with layered filling textures, bottom bun with matte bottom bun."
+    "output": "top bun as domed top form, patty as flat oval shape, fillings as stacked thin parts, bottom bun as flat base part."
   },
   {
     "class": "hammer",
     "input": "a sketch of a hammer",
-    "output": "head as blocky head outline, claw as curved claw line, handle as long straight line, grip as short grip line."
+    "output": "head as blocky head form, claw as curved claw part, handle as long straight part, grip as short grip part."
   },
   {
     "class": "hammer",
     "input": "a photo of a hammer",
-    "output": "head with metal head sheen, claw with hard claw texture, handle with wood handle texture, grip with rubber grip detail."
+    "output": "head as blocky head form, claw as curved claw part, handle as long straight part, grip as short grip part."
   },
   {
     "class": "harp",
     "input": "a sketch of a harp",
-    "output": "frame as arched frame line, neck as curved neck contour, strings as parallel string lines, base as wide base outline."
+    "output": "frame as arched frame part, neck as curved neck shape, strings as parallel string parts, base as wide base form."
   },
   {
     "class": "harp",
     "input": "a photo of a harp",
-    "output": "frame with polished wood surface, neck with smooth neck texture, strings with metal string sheen, base with solid base texture."
+    "output": "frame as arched frame part, neck as curved neck shape, strings as parallel string parts, base as wide base form."
   },
   {
     "class": "hat",
     "input": "a sketch of a hat",
-    "output": "crown as domed crown contour, brim as wide brim line, band as thin band line."
+    "output": "crown as domed crown shape, brim as wide brim part, band as thin band part."
   },
   {
     "class": "hat",
     "input": "a photo of a hat",
-    "output": "crown with soft crown fabric, brim with stiff brim texture, band with smooth band surface."
+    "output": "crown as domed crown shape, brim as wide brim part, band as thin band part."
   },
   {
     "class": "hedgehog",
     "input": "a sketch of a hedgehog",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "hedgehog",
     "input": "a photo of a hedgehog",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "hermit_crab",
     "input": "a sketch of a hermit_crab",
-    "output": "carapace as domed shield outline, claws as pincer-shaped strokes, legs as thin stick legs, tail as segmented tail outline."
+    "output": "carapace as domed shield form, claws as pincer-shaped parts, legs as thin stick legs, tail as segmented tail form."
   },
   {
     "class": "hermit_crab",
     "input": "a photo of a hermit_crab",
-    "output": "carapace with hard shell sheen, claws with textured claw surface, legs with spindly leg texture, tail with segmented tail texture."
+    "output": "carapace as domed shield form, claws as pincer-shaped parts, legs as thin stick legs, tail as segmented tail form."
   },
   {
     "class": "horse",
     "input": "a sketch of a horse",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "horse",
     "input": "a photo of a horse",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "hot-air_balloon",
     "input": "a sketch of a hot-air_balloon",
-    "output": "envelope as large oval contour, basket as small box outline, ropes as thin line strings, burner as small block shape."
+    "output": "envelope as large oval shape, basket as small box form, ropes as thin part strings, burner as small block shape."
   },
   {
     "class": "hot-air_balloon",
     "input": "a photo of a hot-air_balloon",
-    "output": "envelope with woven fabric texture, basket with woven basket surface, ropes with taut rope texture, burner with metal burner detail."
+    "output": "envelope as large oval shape, basket as small box form, ropes as thin part strings, burner as small block shape."
   },
   {
     "class": "hotdog",
     "input": "a sketch of a hotdog",
-    "output": "bun as long split outline, sausage as oval tube contour, toppings as thin zigzag lines."
+    "output": "bun as long split form, sausage as oval tube shape, toppings as thin zigzag parts."
   },
   {
     "class": "hotdog",
     "input": "a photo of a hotdog",
-    "output": "bun with soft bun texture, sausage with glossy sausage surface, toppings with textured topping streaks."
+    "output": "bun as long split form, sausage as oval tube shape, toppings as thin zigzag parts."
   },
   {
     "class": "hourglass",
     "input": "a sketch of a hourglass",
-    "output": "upper bulb as rounded bulb outlines, lower bulb as rounded bulb outlines, neck as narrow waist line, sand as small dot pile."
+    "output": "upper bulb as rounded bulb forms, lower bulb as rounded bulb forms, neck as narrow waist part, sand as small dot pile."
   },
   {
     "class": "hourglass",
     "input": "a photo of a hourglass",
-    "output": "upper bulb with clear glass surface, lower bulb with clear glass surface, neck with thin waist detail, sand with grainy sand texture."
+    "output": "upper bulb as rounded bulb forms, lower bulb as rounded bulb forms, neck as narrow waist part, sand as small dot pile."
   },
   {
     "class": "jack-o-lantern",
     "input": "a sketch of a jack-o-lantern",
-    "output": "shell as round shell contour, stem as short stem line, cutouts as triangular cutout shapes, cavity as inner hollow line."
+    "output": "shell as round shell shape, stem as short stem part, cutouts as triangular cutout shapes, cavity as inner hollow part."
   },
   {
     "class": "jack-o-lantern",
     "input": "a photo of a jack-o-lantern",
-    "output": "shell with ribbed shell texture, stem with dry stem texture, cutouts with sharp cutout edges, cavity with dark inner cavity."
+    "output": "shell as round shell shape, stem as short stem part, cutouts as triangular cutout shapes, cavity as inner hollow part."
   },
   {
     "class": "jellyfish",
     "input": "a sketch of a jellyfish",
-    "output": "bell as domed cap contour, tentacles as long trailing lines, oral arms as frilled inner strokes."
+    "output": "bell as domed cap shape, tentacles as long trailing parts, oral arms as frilled inner parts."
   },
   {
     "class": "jellyfish",
     "input": "a photo of a jellyfish",
-    "output": "bell with translucent bell surface, tentacles with stringy tentacle texture, oral arms with soft frilled arms."
+    "output": "bell as domed cap shape, tentacles as long trailing parts, oral arms as frilled inner parts."
   },
   {
     "class": "kangaroo",
     "input": "a sketch of a kangaroo",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "kangaroo",
     "input": "a photo of a kangaroo",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "knife",
     "input": "a sketch of a knife",
-    "output": "blade as long narrow contour, handle as short grip line, edge as straight edge line, tip as pointed tip line."
+    "output": "blade as long narrow shape, handle as short grip part, edge as straight edge part, tip as pointed tip part."
   },
   {
     "class": "knife",
     "input": "a photo of a knife",
-    "output": "blade with metal blade sheen, handle with textured handle surface, edge with bright edge highlight, tip with sharp tip detail."
+    "output": "blade as long narrow shape, handle as short grip part, edge as straight edge part, tip as pointed tip part."
   },
   {
     "class": "lion",
     "input": "a sketch of a lion",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "lion",
     "input": "a photo of a lion",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "lizard",
     "input": "a sketch of a lizard",
-    "output": "head as angular contour, torso as long block outline, legs as short limb strokes, tail as tapered line."
+    "output": "head as angular shape, torso as long block form, legs as short limb parts, tail as tapered part."
   },
   {
     "class": "lizard",
     "input": "a photo of a lizard",
-    "output": "head with scaled head texture, torso with textured hide, legs with scaled limb surface, tail with scaly tail texture."
+    "output": "head as angular shape, torso as long block form, legs as short limb parts, tail as tapered part."
   },
   {
     "class": "lobster",
     "input": "a sketch of a lobster",
-    "output": "carapace as domed shield outline, claws as pincer-shaped strokes, legs as thin stick legs, tail as segmented tail outline."
+    "output": "carapace as domed shield form, claws as pincer-shaped parts, legs as thin stick legs, tail as segmented tail form."
   },
   {
     "class": "lobster",
     "input": "a photo of a lobster",
-    "output": "carapace with hard shell sheen, claws with textured claw surface, legs with spindly leg texture, tail with segmented tail texture."
+    "output": "carapace as domed shield form, claws as pincer-shaped parts, legs as thin stick legs, tail as segmented tail form."
   },
   {
     "class": "motorcycle",
     "input": "a sketch of a motorcycle",
-    "output": "frame as compact frame outline, wheels as circular loops, engine as blocky center shape, handlebar as short bar line."
+    "output": "frame as compact frame form, wheels as circular circles, engine as blocky center shape, handlebar as short bar part."
   },
   {
     "class": "motorcycle",
     "input": "a photo of a motorcycle",
-    "output": "frame with metal frame sheen, wheels with rubber tire texture, engine with dark engine casing, handlebar with metal handlebar surface."
+    "output": "frame as compact frame form, wheels as circular circles, engine as blocky center shape, handlebar as short bar part."
   },
   {
     "class": "mushroom",
     "input": "a sketch of a mushroom",
-    "output": "cap as domed cap contour, stem as thick stem line, gills as short radial strokes, base as flat base line."
+    "output": "cap as domed cap shape, stem as thick stem part, gills as short radial parts, base as flat base part."
   },
   {
     "class": "mushroom",
     "input": "a photo of a mushroom",
-    "output": "cap with smooth cap surface, stem with fibrous stem texture, gills with fine gill texture, base with matte base texture."
+    "output": "cap as domed cap shape, stem as thick stem part, gills as short radial parts, base as flat base part."
   },
   {
     "class": "owl",
     "input": "a sketch of a owl",
-    "output": "head as small oval contour, beak as pointed wedge line, wings as long arc-shaped strokes, legs as straight stick lines, tail as short fan contour."
+    "output": "head as small oval shape, beak as pointed wedge part, wings as long arc-shaped parts, legs as straight stick parts, tail as short fan shape."
   },
   {
     "class": "owl",
     "input": "a photo of a owl",
-    "output": "head with smooth head surface, beak with hard glossy beak, wings with layered feather texture, legs with scaly leg texture, tail with layered tail feathers."
+    "output": "head as small oval shape, beak as pointed wedge part, wings as long arc-shaped parts, legs as straight stick parts, tail as short fan shape."
   },
   {
     "class": "parrot",
     "input": "a sketch of a parrot",
-    "output": "head as small oval contour, beak as pointed wedge line, wings as long arc-shaped strokes, legs as straight stick lines, tail as short fan contour."
+    "output": "head as small oval shape, beak as pointed wedge part, wings as long arc-shaped parts, legs as straight stick parts, tail as short fan shape."
   },
   {
     "class": "parrot",
     "input": "a photo of a parrot",
-    "output": "head with smooth head surface, beak with hard glossy beak, wings with layered feather texture, legs with scaly leg texture, tail with layered tail feathers."
+    "output": "head as small oval shape, beak as pointed wedge part, wings as long arc-shaped parts, legs as straight stick parts, tail as short fan shape."
   },
   {
     "class": "penguin",
     "input": "a sketch of a penguin",
-    "output": "head as small oval contour, beak as pointed wedge line, wings as long arc-shaped strokes, legs as straight stick lines, tail as short fan contour."
+    "output": "head as small oval shape, beak as pointed wedge part, wings as long arc-shaped parts, legs as straight stick parts, tail as short fan shape."
   },
   {
     "class": "penguin",
     "input": "a photo of a penguin",
-    "output": "head with smooth head surface, beak with hard glossy beak, wings with layered feather texture, legs with scaly leg texture, tail with layered tail feathers."
+    "output": "head as small oval shape, beak as pointed wedge part, wings as long arc-shaped parts, legs as straight stick parts, tail as short fan shape."
   },
   {
     "class": "piano",
     "input": "a sketch of a piano",
-    "output": "body as boxy body outline, keys as thin key lines, lid as slanted lid line, legs as short leg lines."
+    "output": "body as boxy body form, keys as thin key parts, lid as slanted lid part, legs as short leg parts."
   },
   {
     "class": "piano",
     "input": "a photo of a piano",
-    "output": "body with polished body surface, keys with smooth key texture, lid with glossy lid sheen, legs with solid leg texture."
+    "output": "body as boxy body form, keys as thin key parts, lid as slanted lid part, legs as short leg parts."
   },
   {
     "class": "pickup_truck",
     "input": "a sketch of a pickup_truck",
-    "output": "body as boxy outline, wheels as circular loops, windows as rectangular cutouts, bumper as thin bar line."
+    "output": "body as boxy form, wheels as circular circles, windows as rectangular cutouts, bumper as thin bar part."
   },
   {
     "class": "pickup_truck",
     "input": "a photo of a pickup_truck",
-    "output": "body with smooth painted surface, wheels with dark rubber texture, windows with reflective glass, bumper with metallic bumper sheen."
+    "output": "body as boxy form, wheels as circular circles, windows as rectangular cutouts, bumper as thin bar part."
   },
   {
     "class": "pig",
     "input": "a sketch of a pig",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "pig",
     "input": "a photo of a pig",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "pineapple",
     "input": "a sketch of a pineapple",
-    "output": "body as oval body outline, crown as spiky crown strokes, skin as diamond skin grid, base as flat base line."
+    "output": "body as oval body form, crown as spiky crown parts, skin as diamond skin grid, base as flat base part."
   },
   {
     "class": "pineapple",
     "input": "a photo of a pineapple",
-    "output": "body with rough patterned skin, crown with fibrous crown texture, skin with scaly surface detail, base with dry base texture."
+    "output": "body as oval body form, crown as spiky crown parts, skin as diamond skin grid, base as flat base part."
   },
   {
     "class": "pistol",
     "input": "a sketch of a pistol",
-    "output": "barrel as long tube line, body as boxy block outline, grip as angled grip line, trigger as small hook line."
+    "output": "barrel as long tube part, body as boxy block form, grip as angled grip part, trigger as small hook part."
   },
   {
     "class": "pistol",
     "input": "a photo of a pistol",
-    "output": "barrel with metal barrel sheen, body with matte body texture, grip with textured grip surface, trigger with small trigger detail."
+    "output": "barrel as long tube part, body as boxy block form, grip as angled grip part, trigger as small hook part."
   },
   {
     "class": "pizza",
     "input": "a sketch of a pizza",
-    "output": "crust as thick rim outline, slice as triangular wedge contour, toppings as scattered dot marks, surface as flat plane line."
+    "output": "crust as thick rim form, slice as triangular wedge shape, toppings as scattered dot patterns, surface as flat plane part."
   },
   {
     "class": "pizza",
     "input": "a photo of a pizza",
-    "output": "crust with baked crust texture, slice with matte slice surface, toppings with mixed topping textures, surface with melted surface sheen."
+    "output": "crust as thick rim form, slice as triangular wedge shape, toppings as scattered dot patterns, surface as flat plane part."
   },
   {
     "class": "pretzel",
     "input": "a sketch of a pretzel",
-    "output": "loops as interlaced loop contours, twist as tight crossing lines, edges as rounded edge lines."
+    "output": "circles as interlaced loop shapes, twist as tight crossing parts, edges as rounded edge parts."
   },
   {
     "class": "pretzel",
     "input": "a photo of a pretzel",
-    "output": "loops with baked crust texture, twist with glossy twisted surface, edges with salted edge detail."
+    "output": "circles as interlaced loop shapes, twist as tight crossing parts, edges as rounded edge parts."
   },
   {
     "class": "rabbit",
     "input": "a sketch of a rabbit",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "rabbit",
     "input": "a photo of a rabbit",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "racket",
     "input": "a sketch of a racket",
-    "output": "head as oval head outline, strings as crossed string lines, frame as thin frame line, handle as short handle line."
+    "output": "head as oval head form, strings as crossed string parts, frame as thin frame part, handle as short handle part."
   },
   {
     "class": "racket",
     "input": "a photo of a racket",
-    "output": "head with matte head surface, strings with woven string texture, frame with stiff frame texture, handle with wrapped handle grip."
+    "output": "head as oval head form, strings as crossed string parts, frame as thin frame part, handle as short handle part."
   },
   {
     "class": "ray",
     "input": "a sketch of a ray",
-    "output": "head as tapered oval contour, body as elongated spindle outline, dorsal fin as triangular fin strokes, tail fin as forked tail outline, side fins as small side fin lines."
+    "output": "head as tapered oval shape, body as elongated spindle form, dorsal fin as triangular fin parts, tail fin as forked tail form, side fins as small side fin parts."
   },
   {
     "class": "ray",
     "input": "a photo of a ray",
-    "output": "head with slick scaled surface, body with smooth body sheen, dorsal fin with translucent fin texture, tail fin with thin membranous tail, side fins with small fin texture."
+    "output": "head as tapered oval shape, body as elongated spindle form, dorsal fin as triangular fin parts, tail fin as forked tail form, side fins as small side fin parts."
   },
   {
     "class": "rifle",
     "input": "a sketch of a rifle",
-    "output": "barrel as long tube line, body as boxy block outline, grip as angled grip line, trigger as small hook line."
+    "output": "barrel as long tube part, body as boxy block form, grip as angled grip part, trigger as small hook part."
   },
   {
     "class": "rifle",
     "input": "a photo of a rifle",
-    "output": "barrel with metal barrel sheen, body with matte body texture, grip with textured grip surface, trigger with small trigger detail."
+    "output": "barrel as long tube part, body as boxy block form, grip as angled grip part, trigger as small hook part."
   },
   {
     "class": "rocket",
     "input": "a sketch of a rocket",
-    "output": "body as tall tube outline, nose as pointed cone line, fins as triangular fin lines, nozzle as small ring contour."
+    "output": "body as tall tube form, nose as pointed cone part, fins as triangular fin parts, nozzle as small ring shape."
   },
   {
     "class": "rocket",
     "input": "a photo of a rocket",
-    "output": "body with smooth metal surface, nose with painted nose sheen, fins with sharp fin texture, nozzle with dark nozzle opening."
+    "output": "body as tall tube form, nose as pointed cone part, fins as triangular fin parts, nozzle as small ring shape."
   },
   {
     "class": "sailboat",
     "input": "a sketch of a sailboat",
-    "output": "hull as curved hull outline, mast as straight mast line, sails as triangular sail lines, rudder as small blade contour."
+    "output": "hull as curved hull form, mast as straight mast part, sails as triangular sail parts, rudder as small blade shape."
   },
   {
     "class": "sailboat",
     "input": "a photo of a sailboat",
-    "output": "hull with smooth hull surface, mast with rigid mast texture, sails with taut sail fabric, rudder with dark rudder texture."
+    "output": "hull as curved hull form, mast as straight mast part, sails as triangular sail parts, rudder as small blade shape."
   },
   {
     "class": "saxophone",
     "input": "a sketch of a saxophone",
-    "output": "bell as flared bell outline, tubes as curved tube line, keys as small key dots, mouthpiece as short tip line."
+    "output": "bell as flared bell form, tubes as curved tube part, keys as small key spots, mouthpiece as short tip part."
   },
   {
     "class": "saxophone",
     "input": "a photo of a saxophone",
-    "output": "bell with polished metal sheen, tubes with smooth tube surface, keys with raised key texture, mouthpiece with hard mouthpiece detail."
+    "output": "bell as flared bell form, tubes as curved tube part, keys as small key spots, mouthpiece as short tip part."
   },
   {
     "class": "scorpion",
     "input": "a sketch of a scorpion",
-    "output": "cephalothorax as compact oval contour, abdomen as rounded bulb outline, legs as thin stick legs, pincers as curved claw lines."
+    "output": "cephalothorax as compact oval shape, abdomen as rounded bulb form, legs as thin stick legs, pincers as curved claw parts."
   },
   {
     "class": "scorpion",
     "input": "a photo of a scorpion",
-    "output": "cephalothorax with hard shell surface, abdomen with matte abdomen texture, legs with spindly leg texture, pincers with hard claw texture."
+    "output": "cephalothorax as compact oval shape, abdomen as rounded bulb form, legs as thin stick legs, pincers as curved claw parts."
   },
   {
     "class": "sea_turtle",
     "input": "a sketch of a sea_turtle",
-    "output": "head as small oval contour, shell as domed shell outline, flippers as paddle-shaped strokes, tail as short taper line."
+    "output": "head as small oval shape, shell as domed shell form, flippers as paddle-shaped parts, tail as short taper part."
   },
   {
     "class": "sea_turtle",
     "input": "a photo of a sea_turtle",
-    "output": "head with scaled head texture, shell with patterned shell surface, flippers with rubbery flipper texture, tail with short tail texture."
+    "output": "head as small oval shape, shell as domed shell form, flippers as paddle-shaped parts, tail as short taper part."
   },
   {
     "class": "seal",
     "input": "a sketch of a seal",
-    "output": "head as rounded contour, body as torpedo-shaped outline, flippers as paddle-shaped strokes, tail as short tapered line."
+    "output": "head as rounded shape, body as torpedo-shaped form, flippers as paddle-shaped parts, tail as short tapered part."
   },
   {
     "class": "seal",
     "input": "a photo of a seal",
-    "output": "head with smooth wet surface, body with sleek body sheen, flippers with rubbery flipper texture, tail with smooth tail texture."
+    "output": "head as rounded shape, body as torpedo-shaped form, flippers as paddle-shaped parts, tail as short tapered part."
   },
   {
     "class": "shark",
     "input": "a sketch of a shark",
-    "output": "head as tapered oval contour, body as elongated spindle outline, dorsal fin as triangular fin strokes, tail fin as forked tail outline, side fins as small side fin lines."
+    "output": "head as tapered oval shape, body as elongated spindle form, dorsal fin as triangular fin parts, tail fin as forked tail form, side fins as small side fin parts."
   },
   {
     "class": "shark",
     "input": "a photo of a shark",
-    "output": "head with slick scaled surface, body with smooth body sheen, dorsal fin with translucent fin texture, tail fin with thin membranous tail, side fins with small fin texture."
+    "output": "head as tapered oval shape, body as elongated spindle form, dorsal fin as triangular fin parts, tail fin as forked tail form, side fins as small side fin parts."
   },
   {
     "class": "sheep",
     "input": "a sketch of a sheep",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "sheep",
     "input": "a photo of a sheep",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "shoe",
     "input": "a sketch of a shoe",
-    "output": "upper as curved upper outline, sole as flat sole line, toe as rounded toe contour, heel as short heel block."
+    "output": "upper as curved upper form, sole as flat sole part, toe as rounded toe shape, heel as short heel block."
   },
   {
     "class": "shoe",
     "input": "a photo of a shoe",
-    "output": "upper with textured upper surface, sole with rubber sole texture, toe with smooth toe sheen, heel with hard heel texture."
+    "output": "upper as curved upper form, sole as flat sole part, toe as rounded toe shape, heel as short heel block."
   },
   {
     "class": "snail",
     "input": "a sketch of a snail",
-    "output": "shell as spiral contour, body as low curved outline, tentacles as thin stalk lines."
+    "output": "shell as spiral shape, body as low curved form, tentacles as thin stalk parts."
   },
   {
     "class": "snail",
     "input": "a photo of a snail",
-    "output": "shell with ridged shell texture, body with moist body surface, tentacles with slender stalk texture."
+    "output": "shell as spiral shape, body as low curved form, tentacles as thin stalk parts."
   },
   {
     "class": "snake",
     "input": "a sketch of a snake",
-    "output": "head as flat wedge contour, body coils as looped ribbon lines, tail as tapered line."
+    "output": "head as flat wedge shape, body coils as looped ribbon parts, tail as tapered part."
   },
   {
     "class": "snake",
     "input": "a photo of a snake",
-    "output": "head with scaled head texture, body coils with glossy scaled coils, tail with tapered tail sheen."
+    "output": "head as flat wedge shape, body coils as looped ribbon parts, tail as tapered part."
   },
   {
     "class": "spider",
     "input": "a sketch of a spider",
-    "output": "cephalothorax as compact oval contour, abdomen as rounded bulb outline, legs as thin stick legs, pincers as curved claw lines."
+    "output": "cephalothorax as compact oval shape, abdomen as rounded bulb form, legs as thin stick legs, pincers as curved claw parts."
   },
   {
     "class": "spider",
     "input": "a photo of a spider",
-    "output": "cephalothorax with hard shell surface, abdomen with matte abdomen texture, legs with spindly leg texture, pincers with hard claw texture."
+    "output": "cephalothorax as compact oval shape, abdomen as rounded bulb form, legs as thin stick legs, pincers as curved claw parts."
   },
   {
     "class": "spoon",
     "input": "a sketch of a spoon",
-    "output": "bowl as oval bowl contour, neck as thin neck line, handle as long handle line."
+    "output": "bowl as oval bowl shape, neck as thin neck part, handle as long handle part."
   },
   {
     "class": "spoon",
     "input": "a photo of a spoon",
-    "output": "bowl with polished bowl sheen, neck with smooth neck texture, handle with metal handle surface."
+    "output": "bowl as oval bowl shape, neck as thin neck part, handle as long handle part."
   },
   {
     "class": "squirrel",
     "input": "a sketch of a squirrel",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "squirrel",
     "input": "a photo of a squirrel",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "starfish",
     "input": "a sketch of a starfish",
-    "output": "arms as tapered arm contours, center as small central circle, edges as scalloped edge lines."
+    "output": "arms as tapered arm shapes, center as small central circle, edges as scalloped edge parts."
   },
   {
     "class": "starfish",
     "input": "a photo of a starfish",
-    "output": "arms with bumpy arm texture, center with dense center texture, edges with rough edge texture."
+    "output": "arms as tapered arm shapes, center as small central circle, edges as scalloped edge parts."
   },
   {
     "class": "strawberry",
     "input": "a sketch of a strawberry",
-    "output": "body as rounded heart contour, seeds as tiny dot marks, stem as short stem line, top as small leafy cap outline."
+    "output": "body as rounded heart shape, seeds as tiny dot patterns, stem as short stem part, top as small leafy cap form."
   },
   {
     "class": "strawberry",
     "input": "a photo of a strawberry",
-    "output": "body with bumpy seed texture, seeds with matte berry surface, stem with dry stem texture, top with soft leafy top."
+    "output": "body as rounded heart shape, seeds as tiny dot patterns, stem as short stem part, top as small leafy cap form."
   },
   {
     "class": "swan",
     "input": "a sketch of a swan",
-    "output": "head as small oval contour, beak as pointed wedge line, wings as long arc-shaped strokes, legs as straight stick lines, tail as short fan contour."
+    "output": "head as small oval shape, beak as pointed wedge part, wings as long arc-shaped parts, legs as straight stick parts, tail as short fan shape."
   },
   {
     "class": "swan",
     "input": "a photo of a swan",
-    "output": "head with smooth head surface, beak with hard glossy beak, wings with layered feather texture, legs with scaly leg texture, tail with layered tail feathers."
+    "output": "head as small oval shape, beak as pointed wedge part, wings as long arc-shaped parts, legs as straight stick parts, tail as short fan shape."
   },
   {
     "class": "table",
     "input": "a sketch of a table",
-    "output": "top as flat rectangle outline, legs as straight stick legs, apron as thin edge line."
+    "output": "top as flat rectangle form, legs as straight stick legs, apron as thin edge part."
   },
   {
     "class": "table",
     "input": "a photo of a table",
-    "output": "top with smooth top surface, legs with solid leg texture, apron with subtle edge detail."
+    "output": "top as flat rectangle form, legs as straight stick legs, apron as thin edge part."
   },
   {
     "class": "tank",
     "input": "a sketch of a tank",
-    "output": "body as low block outline, turret as rounded dome contour, barrel as long tube line, tracks as linked tread lines."
+    "output": "body as low block form, turret as rounded dome shape, barrel as long tube part, tracks as linked tread parts."
   },
   {
     "class": "tank",
     "input": "a photo of a tank",
-    "output": "body with matte armored surface, turret with rounded turret sheen, barrel with metal barrel texture, tracks with gritty track texture."
+    "output": "body as low block form, turret as rounded dome shape, barrel as long tube part, tracks as linked tread parts."
   },
   {
     "class": "teapot",
     "input": "a sketch of a teapot",
-    "output": "body as round body outline, spout as tapered spout line, handle as loop handle contour, lid as small lid cap."
+    "output": "body as round body form, spout as tapered spout part, handle as loop handle shape, lid as small lid cap."
   },
   {
     "class": "teapot",
     "input": "a photo of a teapot",
-    "output": "body with glazed body sheen, spout with smooth spout texture, handle with rounded handle surface, lid with hard lid texture."
+    "output": "body as round body form, spout as tapered spout part, handle as loop handle shape, lid as small lid cap."
   },
   {
     "class": "teddy_bear",
     "input": "a sketch of a teddy_bear",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "teddy_bear",
     "input": "a photo of a teddy_bear",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "tiger",
     "input": "a sketch of a tiger",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "tiger",
     "input": "a photo of a tiger",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "trumpet",
     "input": "a sketch of a trumpet",
-    "output": "bell as flared bell outline, tubes as curved tube line, keys as small key dots, mouthpiece as short tip line."
+    "output": "bell as flared bell form, tubes as curved tube part, keys as small key spots, mouthpiece as short tip part."
   },
   {
     "class": "trumpet",
     "input": "a photo of a trumpet",
-    "output": "bell with polished metal sheen, tubes with smooth tube surface, keys with raised key texture, mouthpiece with hard mouthpiece detail."
+    "output": "bell as flared bell form, tubes as curved tube part, keys as small key spots, mouthpiece as short tip part."
   },
   {
     "class": "turtle",
     "input": "a sketch of a turtle",
-    "output": "head as small oval contour, shell as domed shell outline, flippers as paddle-shaped strokes, tail as short taper line."
+    "output": "head as small oval shape, shell as domed shell form, flippers as paddle-shaped parts, tail as short taper part."
   },
   {
     "class": "turtle",
     "input": "a photo of a turtle",
-    "output": "head with scaled head texture, shell with patterned shell surface, flippers with rubbery flipper texture, tail with short tail texture."
+    "output": "head as small oval shape, shell as domed shell form, flippers as paddle-shaped parts, tail as short taper part."
   },
   {
     "class": "umbrella",
     "input": "a sketch of a umbrella",
-    "output": "canopy as wide arc contour, ribs as thin rib lines, shaft as straight shaft line, handle as hooked handle line."
+    "output": "canopy as wide arc shape, ribs as thin rib parts, shaft as straight shaft part, handle as hooked handle part."
   },
   {
     "class": "umbrella",
     "input": "a photo of a umbrella",
-    "output": "canopy with fabric canopy texture, ribs with slim rib detail, shaft with metal shaft sheen, handle with curved handle texture."
+    "output": "canopy as wide arc shape, ribs as thin rib parts, shaft as straight shaft part, handle as hooked handle part."
   },
   {
     "class": "violin",
     "input": "a sketch of a violin",
-    "output": "body as rounded body outline, neck as long neck line, strings as parallel string lines, bridge as small bar contour."
+    "output": "body as rounded body form, neck as long neck part, strings as parallel string parts, bridge as small bar shape."
   },
   {
     "class": "violin",
     "input": "a photo of a violin",
-    "output": "body with polished wood surface, neck with smooth neck texture, strings with metal string sheen, bridge with hard bridge texture."
+    "output": "body as rounded body form, neck as long neck part, strings as parallel string parts, bridge as small bar shape."
   },
   {
     "class": "volcano",
     "input": "a sketch of a volcano",
-    "output": "cone as triangular cone outline, crater as round crater contour, lava flow as thick flow lines, ash plume as cloudy plume strokes."
+    "output": "cone as triangular cone form, crater as round crater shape, lava flow as thick flow parts, ash plume as cloudy plume parts."
   },
   {
     "class": "volcano",
     "input": "a photo of a volcano",
-    "output": "cone with rough rocky surface, crater with dark crater texture, lava flow with glowing lava texture, ash plume with smoky plume detail."
+    "output": "cone as triangular cone form, crater as round crater shape, lava flow as thick flow parts, ash plume as cloudy plume parts."
   },
   {
     "class": "wading_bird",
     "input": "a sketch of a wading_bird",
-    "output": "head as small oval contour, beak as pointed wedge line, wings as long arc-shaped strokes, legs as straight stick lines, tail as short fan contour."
+    "output": "head as small oval shape, beak as pointed wedge part, wings as long arc-shaped parts, legs as straight stick parts, tail as short fan shape."
   },
   {
     "class": "wading_bird",
     "input": "a photo of a wading_bird",
-    "output": "head with smooth head surface, beak with hard glossy beak, wings with layered feather texture, legs with scaly leg texture, tail with layered tail feathers."
+    "output": "head as small oval shape, beak as pointed wedge part, wings as long arc-shaped parts, legs as straight stick parts, tail as short fan shape."
   },
   {
     "class": "wine_bottle",
     "input": "a sketch of a wine_bottle",
-    "output": "body as tall oval outline, neck as narrow neck line, shoulders as sloped shoulder lines, base as flat base line."
+    "output": "body as tall oval form, neck as narrow neck part, shoulders as sloped shoulder parts, base as flat base part."
   },
   {
     "class": "wine_bottle",
     "input": "a photo of a wine_bottle",
-    "output": "body with glassy body sheen, neck with smooth neck texture, shoulders with rounded shoulder highlights, base with thick base detail."
+    "output": "body as tall oval form, neck as narrow neck part, shoulders as sloped shoulder parts, base as flat base part."
   },
   {
     "class": "zebra",
     "input": "a sketch of a zebra",
-    "output": "head as oval contour, torso as rounded block outline, limbs as tapered line-strokes, tail as curved line, ears as small triangle tips."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   },
   {
     "class": "zebra",
     "input": "a photo of a zebra",
-    "output": "head with soft skin texture, torso with rounded mass with subtle shading, limbs with jointed limbs with matte texture, tail with tapered tail with soft texture, ears with soft ear edges."
+    "output": "head as oval shape, torso as rounded block form, limbs as tapered parts, tail as curved part, ears as small triangle ends."
   }
 ]

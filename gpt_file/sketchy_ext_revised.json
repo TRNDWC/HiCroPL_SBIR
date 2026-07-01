@@ -1,0 +1,1042 @@
+[
+  {
+    "class": "airplane",
+    "input": "a sketch of a airplane",
+    "output": "Long fuselage outline with straight wing spans, a pointed nose, tail fins, and small engine pod shapes under or beside the wings."
+  },
+  {
+    "class": "airplane",
+    "input": "a photo of a airplane",
+    "output": "A photo shows a smooth white or metallic fuselage, painted markings, glass cockpit windows, dark engine intakes, and clean panel seams on the wings."
+  },
+  {
+    "class": "alarm_clock",
+    "input": "a sketch of a alarm_clock",
+    "output": "Round clock body outline with an inner face circle, two bell arcs on top, short feet, and thin hand lines at the center."
+  },
+  {
+    "class": "alarm_clock",
+    "input": "a photo of a alarm_clock",
+    "output": "A photo shows a metal or plastic clock body, glossy glass face, printed numerals, thin hands, and shiny twin bells or buttons."
+  },
+  {
+    "class": "ant",
+    "input": "a sketch of a ant",
+    "output": "Three-part insect body made of small oval head, narrow thorax, larger abdomen, six thin leg lines, and short antenna strokes."
+  },
+  {
+    "class": "ant",
+    "input": "a photo of a ant",
+    "output": "A photo shows a dark brown or black segmented body, glossy exoskeleton, fine antennae, jointed legs, and visible body hairs."
+  },
+  {
+    "class": "ape",
+    "input": "a sketch of a ape",
+    "output": "Large rounded torso with long arm contours, shorter leg lines, oval head, broad shoulder silhouette, and small ear arcs."
+  },
+  {
+    "class": "ape",
+    "input": "a photo of a ape",
+    "output": "A photo shows dark fur over the body, bare skin on the face and hands, textured wrinkles, broad shoulders, and detailed eyes and mouth."
+  },
+  {
+    "class": "apple",
+    "input": "a sketch of a apple",
+    "output": "Nearly round fruit contour with a top dimple, short stem line, and a small leaf or curved notch near the stem."
+  },
+  {
+    "class": "apple",
+    "input": "a photo of a apple",
+    "output": "A photo shows red, green, or yellow smooth skin, subtle speckles, a waxy surface sheen, a brown stem, and a shallow top dimple."
+  },
+  {
+    "class": "armor",
+    "input": "a sketch of a armor",
+    "output": "Layered plate outlines forming chest, shoulder, arm, and joint sections, with strap lines and sharp segmented edges."
+  },
+  {
+    "class": "armor",
+    "input": "a photo of a armor",
+    "output": "A photo shows reflective steel or dark metal plates, scratched edges, leather straps, rivets, hinges, and overlapping surface sections."
+  },
+  {
+    "class": "axe",
+    "input": "a sketch of a axe",
+    "output": "Long straight handle line with a broad wedge-shaped blade, curved cutting edge, and blocky head outline."
+  },
+  {
+    "class": "axe",
+    "input": "a photo of a axe",
+    "output": "A photo shows a polished or worn metal blade, sharp bright edge, wooden or rubber handle texture, and a solid dark head joint."
+  },
+  {
+    "class": "banana",
+    "input": "a sketch of a banana",
+    "output": "Long crescent-shaped outer contour with tapered ends and a few curved inner seam lines following the arc."
+  },
+  {
+    "class": "banana",
+    "input": "a photo of a banana",
+    "output": "A photo shows yellow peel with brown speckles, smooth waxy surface, darker end tips, and soft curvature along the fruit."
+  },
+  {
+    "class": "bear",
+    "input": "a sketch of a bear",
+    "output": "Heavy rounded body outline with large head, short muzzle, small rounded ears, thick limb contours, and tiny tail mark."
+  },
+  {
+    "class": "bear",
+    "input": "a photo of a bear",
+    "output": "A photo shows dense brown, black, or pale fur, rounded ears, dark nose, heavy paws, claws, and coarse hair texture across the body."
+  },
+  {
+    "class": "bee",
+    "input": "a sketch of a bee",
+    "output": "Small oval head, compact thorax, striped oval abdomen indicated by bands, six thin legs, antennae, and paired wing outlines."
+  },
+  {
+    "class": "bee",
+    "input": "a photo of a bee",
+    "output": "A photo shows a fuzzy black-and-yellow body, translucent veined wings, fine leg hairs, antennae, and glossy compound eyes."
+  },
+  {
+    "class": "beetle",
+    "input": "a sketch of a beetle",
+    "output": "Compact oval body with a small head, central wing-case seam, six short leg lines, and antenna strokes."
+  },
+  {
+    "class": "beetle",
+    "input": "a photo of a beetle",
+    "output": "A photo shows a hard glossy shell, dark or iridescent wing cases, segmented legs, antennae, and fine surface ridges."
+  },
+  {
+    "class": "bell",
+    "input": "a sketch of a bell",
+    "output": "Rounded dome outline widening to a flared rim, small handle loop on top, and a central clapper mark inside."
+  },
+  {
+    "class": "bell",
+    "input": "a photo of a bell",
+    "output": "A photo shows brass, bronze, or silver metal, a reflective dome, worn rim edges, dark inner clapper, and smooth cast surface."
+  },
+  {
+    "class": "bench",
+    "input": "a sketch of a bench",
+    "output": "Long horizontal seat and backrest rectangles with straight support lines, legs, and simple brace strokes."
+  },
+  {
+    "class": "bench",
+    "input": "a photo of a bench",
+    "output": "A photo shows wood grain or painted metal surfaces, visible slats, bolts, hard legs, and worn edges on the seat and back."
+  },
+  {
+    "class": "bicycle",
+    "input": "a sketch of a bicycle",
+    "output": "Two large circular wheel outlines connected by triangular frame lines, with handlebar, fork, chain line, and small saddle shape."
+  },
+  {
+    "class": "bicycle",
+    "input": "a photo of a bicycle",
+    "output": "A photo shows a painted metal frame, black rubber tires, shiny spokes, chain links, brake cables, and textured saddle material."
+  },
+  {
+    "class": "blimp",
+    "input": "a sketch of a blimp",
+    "output": "Large elongated oval envelope with small gondola rectangle below, triangular fins at the rear, and thin rigging lines."
+  },
+  {
+    "class": "blimp",
+    "input": "a photo of a blimp",
+    "output": "A photo shows a smooth fabric envelope, printed markings, matte gondola panels, stabilizing fins, and taut cable or seam details."
+  },
+  {
+    "class": "bread",
+    "input": "a sketch of a bread",
+    "output": "Rounded loaf silhouette with arched top, flat base line, and a few shallow curved scoring marks."
+  },
+  {
+    "class": "bread",
+    "input": "a photo of a bread",
+    "output": "A photo shows golden-brown crust, pale soft interior when cut, flour dusting, porous crumb texture, and baked scoring marks."
+  },
+  {
+    "class": "butterfly",
+    "input": "a sketch of a butterfly",
+    "output": "Small central body line with two large symmetrical wing outlines, smaller lower wing arcs, antennae, and simple vein lines."
+  },
+  {
+    "class": "butterfly",
+    "input": "a photo of a butterfly",
+    "output": "A photo shows colorful patterned wings, powdery scale texture, slender body hairs, antennae, and fine wing veins."
+  },
+  {
+    "class": "camel",
+    "input": "a sketch of a camel",
+    "output": "Long-legged body outline with one or two hump arcs, long neck, small head, thin tail line, and bent leg joints."
+  },
+  {
+    "class": "camel",
+    "input": "a photo of a camel",
+    "output": "A photo shows tan or brown coarse fur, rough padded feet, long eyelashes, textured muzzle, and one or two fur-covered humps."
+  },
+  {
+    "class": "candle",
+    "input": "a sketch of a candle",
+    "output": "Tall narrow cylinder outline with oval top rim, short wick line, teardrop flame contour, and flat base line."
+  },
+  {
+    "class": "candle",
+    "input": "a photo of a candle",
+    "output": "A photo shows smooth white or colored wax, a dark wick, melted wax edges, a bright flame, and glossy softened surface near the top."
+  },
+  {
+    "class": "cannon",
+    "input": "a sketch of a cannon",
+    "output": "Long tapered barrel tube with circular muzzle ring, blocky carriage base, two wheel circles, and support lines."
+  },
+  {
+    "class": "cannon",
+    "input": "a photo of a cannon",
+    "output": "A photo shows dark iron or bronze metal, rough barrel texture, wooden carriage grain, large wheels, and a black muzzle opening."
+  },
+  {
+    "class": "car_(sedan)",
+    "input": "a sketch of a car_(sedan)",
+    "output": "Low rectangular car body with curved roofline, two circular wheels, window rectangles, bumper lines, and wheel arch curves."
+  },
+  {
+    "class": "car_(sedan)",
+    "input": "a photo of a car_(sedan)",
+    "output": "A photo shows glossy painted body panels, reflective glass windows, black rubber tires, metallic trim, headlights, and grille details."
+  },
+  {
+    "class": "castle",
+    "input": "a sketch of a castle",
+    "output": "Blocky wall outline with tall tower rectangles, battlement notches, arched gate shape, roof triangles, and small window marks."
+  },
+  {
+    "class": "castle",
+    "input": "a photo of a castle",
+    "output": "A photo shows gray or tan stone walls, rough masonry texture, dark window openings, tiled roofs, and weathered battlements."
+  },
+  {
+    "class": "cat",
+    "input": "a sketch of a cat",
+    "output": "Small animal outline with oval head, pointed triangular ears, arched back, four leg strokes, whisker lines, and curved tail."
+  },
+  {
+    "class": "cat",
+    "input": "a photo of a cat",
+    "output": "A photo shows soft fur with visible color patterns, whiskers, reflective eyes, textured nose, pointed ears, and paw details."
+  },
+  {
+    "class": "chair",
+    "input": "a sketch of a chair",
+    "output": "Seat rectangle with upright backrest panel, four straight leg lines, and optional armrest strokes."
+  },
+  {
+    "class": "chair",
+    "input": "a photo of a chair",
+    "output": "A photo shows wood, plastic, metal, or fabric surfaces, visible seat texture, joints, screws, legs, and worn edges."
+  },
+  {
+    "class": "chicken",
+    "input": "a sketch of a chicken",
+    "output": "Rounded bird body with small head circle, pointed beak triangle, comb bumps, wing arc, stick legs, and short tail fan."
+  },
+  {
+    "class": "chicken",
+    "input": "a photo of a chicken",
+    "output": "A photo shows layered feathers, red comb and wattles, yellow or pale beak, scaly legs, clawed feet, and patterned plumage."
+  },
+  {
+    "class": "church",
+    "input": "a sketch of a church",
+    "output": "Tall building outline with peaked roof, spire or tower, arched doorway, cross mark, and repeated window shapes."
+  },
+  {
+    "class": "church",
+    "input": "a photo of a church",
+    "output": "A photo shows stone, brick, or plaster walls, stained or dark glass windows, roof tiles, spire details, and weathered surface texture."
+  },
+  {
+    "class": "couch",
+    "input": "a sketch of a couch",
+    "output": "Wide seat rectangle with rounded arm contours, tall backrest outline, cushion division lines, and short base strokes."
+  },
+  {
+    "class": "couch",
+    "input": "a photo of a couch",
+    "output": "A photo shows fabric or leather upholstery, soft cushion seams, padded arms, wrinkles, stitching, and matte or slightly glossy surface wear."
+  },
+  {
+    "class": "crab",
+    "input": "a sketch of a crab",
+    "output": "Wide oval carapace outline with two pincer shapes, multiple bent leg lines on both sides, and small eye stalk marks."
+  },
+  {
+    "class": "crab",
+    "input": "a photo of a crab",
+    "output": "A photo shows a hard red, brown, or blue shell, rough carapace texture, jointed legs, shiny claws, and small eye stalks."
+  },
+  {
+    "class": "crocodilian",
+    "input": "a sketch of a crocodilian",
+    "output": "Long low body outline with elongated snout, short leg strokes, thick tapering tail, and jagged back ridge marks."
+  },
+  {
+    "class": "crocodilian",
+    "input": "a photo of a crocodilian",
+    "output": "A photo shows dark green or brown scaly hide, bony ridges, rough snout texture, sharp teeth, and heavy tail scales."
+  },
+  {
+    "class": "cup",
+    "input": "a sketch of a cup",
+    "output": "Tapered cylinder outline with oval rim, curved side walls, loop handle contour, and flat base ellipse."
+  },
+  {
+    "class": "cup",
+    "input": "a photo of a cup",
+    "output": "A photo shows ceramic, glass, paper, or metal surface, glossy rim highlights, curved handle texture, and possible printed decoration."
+  },
+  {
+    "class": "deer",
+    "input": "a sketch of a deer",
+    "output": "Slender body outline with long thin legs, narrow head, pointed ears, antler branch lines, and short tail mark."
+  },
+  {
+    "class": "deer",
+    "input": "a photo of a deer",
+    "output": "A photo shows brown coat fur, pale underside, slender legs, dark eyes, textured nose, pointed ears, and antler surface when present."
+  },
+  {
+    "class": "dog",
+    "input": "a sketch of a dog",
+    "output": "Four-legged body outline with oval head, muzzle shape, floppy or pointed ear contour, straight legs, and raised tail line."
+  },
+  {
+    "class": "dog",
+    "input": "a photo of a dog",
+    "output": "A photo shows short or long fur, varied coat colors, wet nose texture, visible whiskers, ears, paws, and detailed eyes."
+  },
+  {
+    "class": "duck",
+    "input": "a sketch of a duck",
+    "output": "Rounded bird body on waterline shape with small head circle, broad flat beak, wing arc, short tail, and small leg marks."
+  },
+  {
+    "class": "duck",
+    "input": "a photo of a duck",
+    "output": "A photo shows smooth waterproof feathers, colored head or body patches, orange or dark bill, webbed feet, and layered wing feathers."
+  },
+  {
+    "class": "elephant",
+    "input": "a sketch of a elephant",
+    "output": "Large bulky body outline with huge ear contour, long curved trunk line, thick column legs, tusk strokes, and short tail."
+  },
+  {
+    "class": "elephant",
+    "input": "a photo of a elephant",
+    "output": "A photo shows gray wrinkled skin, large textured ears, ivory tusks, rough trunk folds, thick toenails, and sparse body hairs."
+  },
+  {
+    "class": "eyeglasses",
+    "input": "a sketch of a eyeglasses",
+    "output": "Two lens outlines joined by a short bridge, with thin frame lines and temple arms extending outward."
+  },
+  {
+    "class": "eyeglasses",
+    "input": "a photo of a eyeglasses",
+    "output": "A photo shows clear reflective lenses, metal or plastic frames, nose pads, hinges, screws, and slim temple arms."
+  },
+  {
+    "class": "fan",
+    "input": "a sketch of a fan",
+    "output": "Central hub circle with several broad blade arcs, outer guard ring, vertical stand line, and simple base shape."
+  },
+  {
+    "class": "fan",
+    "input": "a photo of a fan",
+    "output": "A photo shows plastic or metal blades, mesh guard wires, central hub, matte stand, screws, and smooth base surface."
+  },
+  {
+    "class": "fish",
+    "input": "a sketch of a fish",
+    "output": "Streamlined oval body with pointed head, triangular dorsal and side fins, forked tail outline, and small eye mark."
+  },
+  {
+    "class": "fish",
+    "input": "a photo of a fish",
+    "output": "A photo shows shiny scales, wet reflective skin, translucent fins, visible gills, round eyes, and color patterns along the body."
+  },
+  {
+    "class": "flower",
+    "input": "a sketch of a flower",
+    "output": "Circular center with repeated petal arcs around it, a thin stem line, and simple leaf contours."
+  },
+  {
+    "class": "flower",
+    "input": "a photo of a flower",
+    "output": "A photo shows colored petals, soft petal veins, textured center, green stem, leaf veins, and pollen or fine surface details."
+  },
+  {
+    "class": "frog",
+    "input": "a sketch of a frog",
+    "output": "Squat rounded body with wide head, large eye circles, bent hind-leg outlines, short front legs, and webbed foot strokes."
+  },
+  {
+    "class": "frog",
+    "input": "a photo of a frog",
+    "output": "A photo shows green, brown, or spotted moist skin, bulging glossy eyes, webbed toes, smooth belly, and small skin bumps."
+  },
+  {
+    "class": "geyser",
+    "input": "a sketch of a geyser",
+    "output": "Vertical spray lines rising from a low mound or pool outline, with curved plume strokes and scattered droplets."
+  },
+  {
+    "class": "geyser",
+    "input": "a photo of a geyser",
+    "output": "A photo shows white steam, clear water spray, wet rock surfaces, mineral crusts, mist, and a reflective pool at the base."
+  },
+  {
+    "class": "guitar",
+    "input": "a sketch of a guitar",
+    "output": "Curved hollow body outline with waist indentation, long neck rectangle, headstock shape, sound hole circle, and parallel string lines."
+  },
+  {
+    "class": "guitar",
+    "input": "a photo of a guitar",
+    "output": "A photo shows polished wood grain, glossy varnish, metal strings, fret wires, bridge pins, and a dark sound hole."
+  },
+  {
+    "class": "hamburger",
+    "input": "a sketch of a hamburger",
+    "output": "Stacked bun and filling outlines: domed top bun, horizontal patty and filling layers, and flat bottom bun."
+  },
+  {
+    "class": "hamburger",
+    "input": "a photo of a hamburger",
+    "output": "A photo shows toasted bun texture, browned patty surface, melted cheese or layered fillings, glossy sauces, and sesame seeds when present."
+  },
+  {
+    "class": "hammer",
+    "input": "a sketch of a hammer",
+    "output": "Blocky head outline with claw curve on one side, long straight handle line, and small grip end shape."
+  },
+  {
+    "class": "hammer",
+    "input": "a photo of a hammer",
+    "output": "A photo shows a steel head, polished striking face, claw edge, wooden or rubber grip texture, and worn handle marks."
+  },
+  {
+    "class": "harp",
+    "input": "a sketch of a harp",
+    "output": "Tall arched frame outline with curved neck, angled pillar, wide base, and many parallel string lines."
+  },
+  {
+    "class": "harp",
+    "input": "a photo of a harp",
+    "output": "A photo shows polished wooden frame, metallic or nylon strings, curved neck, carved details, and glossy finish on the base."
+  },
+  {
+    "class": "hat",
+    "input": "a sketch of a hat",
+    "output": "Domed crown outline with wide brim curve and a narrow band line around the base."
+  },
+  {
+    "class": "hat",
+    "input": "a photo of a hat",
+    "output": "A photo shows felt, straw, fabric, or leather texture, visible stitching, brim stiffness, band material, and surface wear."
+  },
+  {
+    "class": "hedgehog",
+    "input": "a sketch of a hedgehog",
+    "output": "Small oval head and rounded body silhouette with repeated short spine strokes along the back and tiny leg marks."
+  },
+  {
+    "class": "hedgehog",
+    "input": "a photo of a hedgehog",
+    "output": "A photo shows brown and cream spines, soft facial fur, small dark eyes, pointed nose, tiny feet, and fine whiskers."
+  },
+  {
+    "class": "hermit_crab",
+    "input": "a sketch of a hermit_crab",
+    "output": "Spiral shell outline with small crab body emerging, pincer shapes, thin legs, and short eye stalk lines."
+  },
+  {
+    "class": "hermit_crab",
+    "input": "a photo of a hermit_crab",
+    "output": "A photo shows a rough spiral shell, reddish or brown legs, glossy claws, eye stalks, and hard segmented body texture."
+  },
+  {
+    "class": "horse",
+    "input": "a sketch of a horse",
+    "output": "Long body outline with tall legs, elongated head, neck curve, mane line, pointed ears, and long tail contour."
+  },
+  {
+    "class": "horse",
+    "input": "a photo of a horse",
+    "output": "A photo shows a glossy coat, mane hair, muscular body surface, dark hooves, textured muzzle, and long tail hair."
+  },
+  {
+    "class": "hot-air_balloon",
+    "input": "a sketch of a hot-air_balloon",
+    "output": "Large balloon envelope outline with vertical panel lines, small basket rectangle below, and straight rope lines connecting them."
+  },
+  {
+    "class": "hot-air_balloon",
+    "input": "a photo of a hot-air_balloon",
+    "output": "A photo shows brightly colored fabric panels, woven basket texture, rope lines, metal burner parts, and stitched envelope seams."
+  },
+  {
+    "class": "hotdog",
+    "input": "a sketch of a hotdog",
+    "output": "Long split bun outline holding a sausage tube, with wavy topping lines across the center."
+  },
+  {
+    "class": "hotdog",
+    "input": "a photo of a hotdog",
+    "output": "A photo shows soft bun texture, glossy browned sausage, colored condiments, chopped toppings, and surface moisture on the filling."
+  },
+  {
+    "class": "hourglass",
+    "input": "a sketch of a hourglass",
+    "output": "Two rounded bulb outlines joined at a narrow waist, enclosed by straight side supports and a small sand pile line."
+  },
+  {
+    "class": "hourglass",
+    "input": "a photo of a hourglass",
+    "output": "A photo shows transparent glass bulbs, fine sand grains, wood or metal frame, narrow waist, and reflective curved surfaces."
+  },
+  {
+    "class": "jack-o-lantern",
+    "input": "a sketch of a jack-o-lantern",
+    "output": "Round pumpkin outline with rib curves, short stem, triangular eye and nose cutouts, and jagged mouth shape."
+  },
+  {
+    "class": "jack-o-lantern",
+    "input": "a photo of a jack-o-lantern",
+    "output": "A photo shows orange ribbed pumpkin skin, carved sharp openings, fibrous interior, brown stem, and dark hollow cavity."
+  },
+  {
+    "class": "jellyfish",
+    "input": "a sketch of a jellyfish",
+    "output": "Domed bell outline with scalloped lower edge, long trailing tentacle lines, and shorter inner oral-arm strokes."
+  },
+  {
+    "class": "jellyfish",
+    "input": "a photo of a jellyfish",
+    "output": "A photo shows translucent bell tissue, soft gelatinous texture, trailing tentacles, faint internal structures, and pale or colored glow-like patterns."
+  },
+  {
+    "class": "kangaroo",
+    "input": "a sketch of a kangaroo",
+    "output": "Upright body outline with small forearms, large hind legs, long thick tail, pointed ears, and narrow head shape."
+  },
+  {
+    "class": "kangaroo",
+    "input": "a photo of a kangaroo",
+    "output": "A photo shows reddish-brown or gray fur, muscular hind legs, long thick tail, pointed ears, small forearms, and textured paws."
+  },
+  {
+    "class": "knife",
+    "input": "a sketch of a knife",
+    "output": "Long narrow blade outline with pointed tip, straight cutting edge, short handle shape, and small guard line."
+  },
+  {
+    "class": "knife",
+    "input": "a photo of a knife",
+    "output": "A photo shows reflective steel blade, sharp edge highlight, pointed tip, textured handle material, rivets, and surface scratches."
+  },
+  {
+    "class": "lion",
+    "input": "a sketch of a lion",
+    "output": "Large cat body outline with round mane around head, four leg strokes, ear arcs, and long tail ending in a tuft."
+  },
+  {
+    "class": "lion",
+    "input": "a photo of a lion",
+    "output": "A photo shows tawny fur, thick mane on males, dark nose, whiskers, muscular legs, tail tuft, and detailed eyes."
+  },
+  {
+    "class": "lizard",
+    "input": "a sketch of a lizard",
+    "output": "Long narrow body outline with angular head, four splayed leg strokes, tapering tail, and small toe lines."
+  },
+  {
+    "class": "lizard",
+    "input": "a photo of a lizard",
+    "output": "A photo shows green, brown, or patterned scales, dry textured skin, small claws, round eyes, and a tapering tail."
+  },
+  {
+    "class": "lobster",
+    "input": "a sketch of a lobster",
+    "output": "Segmented long body outline with large pincer shapes, thin legs, antenna lines, and fan-shaped tail."
+  },
+  {
+    "class": "lobster",
+    "input": "a photo of a lobster",
+    "output": "A photo shows hard red, brown, or blue shell, large textured claws, segmented tail, antennae, and glossy wet surface."
+  },
+  {
+    "class": "motorcycle",
+    "input": "a sketch of a motorcycle",
+    "output": "Two circular wheels connected by compact frame lines, with handlebar, fork, seat, engine block, and exhaust stroke."
+  },
+  {
+    "class": "motorcycle",
+    "input": "a photo of a motorcycle",
+    "output": "A photo shows painted metal bodywork, black rubber tires, chrome or matte engine parts, cables, seat texture, and exhaust details."
+  },
+  {
+    "class": "mushroom",
+    "input": "a sketch of a mushroom",
+    "output": "Domed cap contour over a thick stem outline, underside gill strokes, and a small base line."
+  },
+  {
+    "class": "mushroom",
+    "input": "a photo of a mushroom",
+    "output": "A photo shows tan, brown, white, or red cap surface, fine gills, fibrous stem, spots or pores, and earthy base texture."
+  },
+  {
+    "class": "owl",
+    "input": "a sketch of a owl",
+    "output": "Round body and head outline with large eye circles, small beak triangle, wing arcs, short feet, and ear tufts when present."
+  },
+  {
+    "class": "owl",
+    "input": "a photo of a owl",
+    "output": "A photo shows layered feathers, large glossy eyes, hooked beak, facial disk pattern, talons, and soft feather texture."
+  },
+  {
+    "class": "parrot",
+    "input": "a sketch of a parrot",
+    "output": "Bird outline with curved beak, rounded head, perched body, long tail feathers, wing contour, and claw lines."
+  },
+  {
+    "class": "parrot",
+    "input": "a photo of a parrot",
+    "output": "A photo shows bright colored feathers, curved glossy beak, scaly feet, dark eye ring, and layered wing and tail plumage."
+  },
+  {
+    "class": "penguin",
+    "input": "a sketch of a penguin",
+    "output": "Upright oval body with small head, short flipper strokes, tiny beak triangle, webbed feet, and belly outline."
+  },
+  {
+    "class": "penguin",
+    "input": "a photo of a penguin",
+    "output": "A photo shows black-and-white smooth feathers, orange or dark beak details, flipper-like wings, webbed feet, and glossy eyes."
+  },
+  {
+    "class": "piano",
+    "input": "a sketch of a piano",
+    "output": "Large boxy body outline with keyboard rectangle, repeated key lines, raised lid triangle, and short leg lines."
+  },
+  {
+    "class": "piano",
+    "input": "a photo of a piano",
+    "output": "A photo shows polished black or wooden body, white and black keys, glossy lid, metal pedals, and reflective surface edges."
+  },
+  {
+    "class": "pickup_truck",
+    "input": "a sketch of a pickup_truck",
+    "output": "Boxy cab and open bed outline with two wheel circles, window rectangles, bumper lines, and wheel arch curves."
+  },
+  {
+    "class": "pickup_truck",
+    "input": "a photo of a pickup_truck",
+    "output": "A photo shows glossy painted cab, open cargo bed, black tires, metal bumper, glass windows, headlights, and body panel seams."
+  },
+  {
+    "class": "pig",
+    "input": "a sketch of a pig",
+    "output": "Rounded body outline with oval snout, small ear triangles, short legs, and curled tail line."
+  },
+  {
+    "class": "pig",
+    "input": "a photo of a pig",
+    "output": "A photo shows pink, brown, or spotted skin, sparse bristles, round snout texture, floppy ears, small hooves, and curled tail."
+  },
+  {
+    "class": "pineapple",
+    "input": "a sketch of a pineapple",
+    "output": "Oval fruit body with diamond grid lines, spiky crown leaves, and flat base contour."
+  },
+  {
+    "class": "pineapple",
+    "input": "a photo of a pineapple",
+    "output": "A photo shows rough yellow-brown diamond skin, green spiky crown leaves, dry base, and fibrous patterned surface."
+  },
+  {
+    "class": "pistol",
+    "input": "a sketch of a pistol",
+    "output": "Compact L-shaped outline with short barrel, rectangular slide, angled grip, trigger guard loop, and small trigger curve."
+  },
+  {
+    "class": "pistol",
+    "input": "a photo of a pistol",
+    "output": "A photo shows dark metal or polymer surfaces, textured grip panels, trigger guard, barrel opening, slide serrations, and small sights."
+  },
+  {
+    "class": "pizza",
+    "input": "a sketch of a pizza",
+    "output": "Triangular slice or circular pie outline with thick crust edge, scattered topping dots, and radial slice lines."
+  },
+  {
+    "class": "pizza",
+    "input": "a photo of a pizza",
+    "output": "A photo shows browned crust, melted cheese sheen, red sauce, varied toppings, oily surface spots, and baked edge texture."
+  },
+  {
+    "class": "pretzel",
+    "input": "a sketch of a pretzel",
+    "output": "Interlaced loop outline with two large loops, central crossing lines, and rounded outer edges."
+  },
+  {
+    "class": "pretzel",
+    "input": "a photo of a pretzel",
+    "output": "A photo shows glossy brown baked crust, coarse salt crystals, twisted dough seams, rounded edges, and darker baked patches."
+  },
+  {
+    "class": "rabbit",
+    "input": "a sketch of a rabbit",
+    "output": "Small rounded body with long upright ear outlines, oval head, short front legs, larger hind-leg curve, and round tail mark."
+  },
+  {
+    "class": "rabbit",
+    "input": "a photo of a rabbit",
+    "output": "A photo shows soft fur, long ears, dark glossy eyes, small nose, whiskers, hind feet, and round tail fluff."
+  },
+  {
+    "class": "racket",
+    "input": "a sketch of a racket",
+    "output": "Oval head frame with crossed string grid, narrow throat lines, and straight handle outline."
+  },
+  {
+    "class": "racket",
+    "input": "a photo of a racket",
+    "output": "A photo shows a rigid frame, woven string bed, wrapped grip texture, grommet holes, and matte or glossy painted surface."
+  },
+  {
+    "class": "ray",
+    "input": "a sketch of a ray",
+    "output": "Wide flattened diamond-like body outline with wing-like side fins, small head front, and long thin tail line."
+  },
+  {
+    "class": "ray",
+    "input": "a photo of a ray",
+    "output": "A photo shows a flat smooth body, gray or brown upper surface, pale underside when visible, wing-like fins, and long thin tail."
+  },
+  {
+    "class": "rifle",
+    "input": "a sketch of a rifle",
+    "output": "Long horizontal barrel line with stock outline, trigger guard, grip, sight marks, and narrow body shape."
+  },
+  {
+    "class": "rifle",
+    "input": "a photo of a rifle",
+    "output": "A photo shows long metal barrel, wooden or polymer stock, textured grip, trigger guard, sights or rail details, and matte surface finish."
+  },
+  {
+    "class": "rocket",
+    "input": "a sketch of a rocket",
+    "output": "Tall tube outline with pointed cone nose, triangular fins, circular window mark, and nozzle ring at the base."
+  },
+  {
+    "class": "rocket",
+    "input": "a photo of a rocket",
+    "output": "A photo shows smooth white or metallic body panels, painted markings, dark nozzle openings, rivets or seams, and sharp fin surfaces."
+  },
+  {
+    "class": "sailboat",
+    "input": "a sketch of a sailboat",
+    "output": "Curved hull outline with vertical mast line, triangular sail shapes, boom line, and small rudder mark."
+  },
+  {
+    "class": "sailboat",
+    "input": "a photo of a sailboat",
+    "output": "A photo shows white fabric sails, wood or fiberglass hull, taut ropes, metal mast, wet surfaces, and deck hardware."
+  },
+  {
+    "class": "saxophone",
+    "input": "a sketch of a saxophone",
+    "output": "Curved tube outline ending in a flared bell, mouthpiece line, small key circles, and looping body curve."
+  },
+  {
+    "class": "saxophone",
+    "input": "a photo of a saxophone",
+    "output": "A photo shows polished brass body, reflective bell, raised key pads, curved tubes, pearl-like buttons, and dark mouthpiece."
+  },
+  {
+    "class": "scorpion",
+    "input": "a sketch of a scorpion",
+    "output": "Segmented body outline with curved raised tail, stinger point, pincer shapes, and multiple bent leg lines."
+  },
+  {
+    "class": "scorpion",
+    "input": "a photo of a scorpion",
+    "output": "A photo shows tan, brown, or black hard exoskeleton, segmented tail, pointed stinger, glossy pincers, and jointed legs."
+  },
+  {
+    "class": "sea_turtle",
+    "input": "a sketch of a sea_turtle",
+    "output": "Domed shell outline with small head, four paddle-shaped flippers, shell pattern lines, and short tail mark."
+  },
+  {
+    "class": "sea_turtle",
+    "input": "a photo of a sea_turtle",
+    "output": "A photo shows patterned shell plates, scaly head, green or brown flippers, rough skin, and dark eyes."
+  },
+  {
+    "class": "seal",
+    "input": "a sketch of a seal",
+    "output": "Tapered torpedo body outline with rounded head, front flipper strokes, rear flipper split, and simple whisker lines."
+  },
+  {
+    "class": "seal",
+    "input": "a photo of a seal",
+    "output": "A photo shows smooth wet gray or brown fur, glossy skin surface, whiskers, dark eyes, flippers, and rounded body texture."
+  },
+  {
+    "class": "shark",
+    "input": "a sketch of a shark",
+    "output": "Long streamlined body with pointed snout, triangular dorsal fin, side fins, crescent tail, and gill line marks."
+  },
+  {
+    "class": "shark",
+    "input": "a photo of a shark",
+    "output": "A photo shows gray smooth skin, pale underside, gill slits, triangular dorsal fin, dark eyes, and crescent tail."
+  },
+  {
+    "class": "sheep",
+    "input": "a sketch of a sheep",
+    "output": "Cloud-like wool body outline with small head, drooping ear shapes, four short legs, and tiny tail mark."
+  },
+  {
+    "class": "sheep",
+    "input": "a photo of a sheep",
+    "output": "A photo shows curly white, cream, or dark wool, soft face fur, hooves, ears, and dense fleece texture."
+  },
+  {
+    "class": "shoe",
+    "input": "a sketch of a shoe",
+    "output": "Low shoe silhouette with curved upper, rounded toe, heel block, flat sole line, and lace or opening strokes."
+  },
+  {
+    "class": "shoe",
+    "input": "a photo of a shoe",
+    "output": "A photo shows leather, canvas, mesh, or rubber surfaces, stitched seams, laces, treaded sole, toe cap, and worn texture."
+  },
+  {
+    "class": "snail",
+    "input": "a sketch of a snail",
+    "output": "Spiral shell outline on a low body shape with long foot line and two tentacle stalks."
+  },
+  {
+    "class": "snail",
+    "input": "a photo of a snail",
+    "output": "A photo shows a ridged spiral shell, moist soft body, slim tentacles, glossy foot surface, and earthy color tones."
+  },
+  {
+    "class": "snake",
+    "input": "a sketch of a snake",
+    "output": "Long winding body drawn as a continuous curved ribbon, with small head shape, forked tongue line, and tapering tail."
+  },
+  {
+    "class": "snake",
+    "input": "a photo of a snake",
+    "output": "A photo shows patterned scales, glossy body surface, narrow head, dark eyes, forked tongue when visible, and tapering tail."
+  },
+  {
+    "class": "spider",
+    "input": "a sketch of a spider",
+    "output": "Small cephalothorax and larger abdomen ovals with eight thin bent leg lines and short fang or pedipalp marks."
+  },
+  {
+    "class": "spider",
+    "input": "a photo of a spider",
+    "output": "A photo shows dark or patterned body segments, eight hairy legs, small eyes, fine hairs, and textured abdomen surface."
+  },
+  {
+    "class": "spoon",
+    "input": "a sketch of a spoon",
+    "output": "Oval bowl outline connected to a long narrow handle line, with a thin neck transition."
+  },
+  {
+    "class": "spoon",
+    "input": "a photo of a spoon",
+    "output": "A photo shows reflective metal or smooth plastic, oval bowl highlights, narrow neck, polished handle, and curved surface reflections."
+  },
+  {
+    "class": "squirrel",
+    "input": "a sketch of a squirrel",
+    "output": "Small body outline with pointed snout, tiny forelegs, hind-leg curve, ear point, and large curled tail contour."
+  },
+  {
+    "class": "squirrel",
+    "input": "a photo of a squirrel",
+    "output": "A photo shows gray, brown, or reddish fur, bushy tail hair, small claws, dark eyes, whiskers, and textured paws."
+  },
+  {
+    "class": "starfish",
+    "input": "a sketch of a starfish",
+    "output": "Five tapered arm contours radiating from a central shape, with simple inner ridge or dot marks."
+  },
+  {
+    "class": "starfish",
+    "input": "a photo of a starfish",
+    "output": "A photo shows orange, red, or tan rough skin, bumpy tube-foot texture, central disk, tapered arms, and grainy surface details."
+  },
+  {
+    "class": "strawberry",
+    "input": "a sketch of a strawberry",
+    "output": "Heart-shaped fruit outline with many tiny seed dots, leafy cap shape, and short stem line."
+  },
+  {
+    "class": "strawberry",
+    "input": "a photo of a strawberry",
+    "output": "A photo shows red glossy skin, yellow seed dots, green leafy cap, tiny surface dimples, and moist fruit texture."
+  },
+  {
+    "class": "swan",
+    "input": "a sketch of a swan",
+    "output": "Graceful long S-shaped neck, small head, oval body, wing arc, pointed beak, and short tail contour."
+  },
+  {
+    "class": "swan",
+    "input": "a photo of a swan",
+    "output": "A photo shows white or dark smooth feathers, long curved neck, orange or dark beak, black facial markings, and layered wing feathers."
+  },
+  {
+    "class": "table",
+    "input": "a sketch of a table",
+    "output": "Flat rectangular tabletop outline with four straight legs, side edge lines, and simple support braces."
+  },
+  {
+    "class": "table",
+    "input": "a photo of a table",
+    "output": "A photo shows wood grain, metal, glass, or plastic tabletop surface, leg joints, edge wear, screws, and polished or matte finish."
+  },
+  {
+    "class": "tank",
+    "input": "a sketch of a tank",
+    "output": "Low armored body block with linked track outlines, rounded turret, long barrel tube, and hatch marks."
+  },
+  {
+    "class": "tank",
+    "input": "a photo of a tank",
+    "output": "A photo shows matte armored plates, dark tracks, metal turret, long barrel, hatches, bolts, and dusty or scratched surfaces."
+  },
+  {
+    "class": "teapot",
+    "input": "a sketch of a teapot",
+    "output": "Round body outline with curved spout, loop handle, small lid cap, knob, and base line."
+  },
+  {
+    "class": "teapot",
+    "input": "a photo of a teapot",
+    "output": "A photo shows glazed ceramic, metal, or porcelain surface, curved spout, glossy handle, lid knob, and decorative patterns when present."
+  },
+  {
+    "class": "teddy_bear",
+    "input": "a sketch of a teddy_bear",
+    "output": "Plush bear outline with round head, circular ears, oval body, stubby limbs, muzzle oval, and paw circles."
+  },
+  {
+    "class": "teddy_bear",
+    "input": "a photo of a teddy_bear",
+    "output": "A photo shows fuzzy plush fabric, stitched seams, bead-like eyes, soft rounded limbs, muzzle patch, and paw pads."
+  },
+  {
+    "class": "tiger",
+    "input": "a sketch of a tiger",
+    "output": "Large cat outline with head, pointed ears, long tail, four leg strokes, and stripe marks following body contours."
+  },
+  {
+    "class": "tiger",
+    "input": "a photo of a tiger",
+    "output": "A photo shows orange fur with black stripes, white facial patches, whiskers, muscular paws, long tail, and detailed eyes."
+  },
+  {
+    "class": "trumpet",
+    "input": "a sketch of a trumpet",
+    "output": "Straight and curved tube outlines with flared bell, three valve circles, mouthpiece line, and brace strokes."
+  },
+  {
+    "class": "trumpet",
+    "input": "a photo of a trumpet",
+    "output": "A photo shows polished brass tubing, reflective flared bell, three valve buttons, mouthpiece, braces, and small surface highlights."
+  },
+  {
+    "class": "turtle",
+    "input": "a sketch of a turtle",
+    "output": "Domed shell outline with small head, four short leg shapes, shell pattern lines, and short tail mark."
+  },
+  {
+    "class": "turtle",
+    "input": "a photo of a turtle",
+    "output": "A photo shows patterned hard shell, green or brown scaly skin, short claws, rough legs, and dark eyes."
+  },
+  {
+    "class": "umbrella",
+    "input": "a sketch of a umbrella",
+    "output": "Wide canopy arc with scalloped lower edge, radial rib lines, straight shaft, and curved hook handle."
+  },
+  {
+    "class": "umbrella",
+    "input": "a photo of a umbrella",
+    "output": "A photo shows colored fabric canopy, visible rib supports, metal shaft, plastic or wooden handle, stitching, and water-shedding surface."
+  },
+  {
+    "class": "violin",
+    "input": "a sketch of a violin",
+    "output": "Hourglass-shaped body outline with waist curves, long neck, scroll shape, bridge mark, and parallel string lines."
+  },
+  {
+    "class": "violin",
+    "input": "a photo of a violin",
+    "output": "A photo shows polished brown wood grain, dark fingerboard, metal strings, bridge, f-holes, and glossy varnished curves."
+  },
+  {
+    "class": "volcano",
+    "input": "a sketch of a volcano",
+    "output": "Broad cone outline with crater oval at the top, flowing side lines, plume curves, and base contour."
+  },
+  {
+    "class": "volcano",
+    "input": "a photo of a volcano",
+    "output": "A photo shows dark rocky slopes, ash or steam plume, red-orange lava when active, rough crater texture, and layered rock surfaces."
+  },
+  {
+    "class": "wading_bird",
+    "input": "a sketch of a wading_bird",
+    "output": "Tall bird outline with long thin legs, long neck curve, pointed beak, oval body, and small wing arc."
+  },
+  {
+    "class": "wading_bird",
+    "input": "a photo of a wading_bird",
+    "output": "A photo shows long thin legs, smooth or layered feathers, pointed beak, colored plumage, dark eyes, and scaly feet."
+  },
+  {
+    "class": "wine_bottle",
+    "input": "a sketch of a wine_bottle",
+    "output": "Tall bottle silhouette with narrow neck, sloped shoulders, oval body, base line, and label rectangle outline."
+  },
+  {
+    "class": "wine_bottle",
+    "input": "a photo of a wine_bottle",
+    "output": "A photo shows dark green, brown, or clear glass, glossy reflections, paper label, narrow neck, cork or cap, and thick base."
+  },
+  {
+    "class": "zebra",
+    "input": "a sketch of a zebra",
+    "output": "Horse-like body outline with long legs, mane line, pointed ears, tail tuft, and stripe marks across body and legs."
+  },
+  {
+    "class": "zebra",
+    "input": "a photo of a zebra",
+    "output": "A photo shows black-and-white striped coat, short mane, dark muzzle, thin legs, tail tuft, and coarse hair texture."
+  }
+]
