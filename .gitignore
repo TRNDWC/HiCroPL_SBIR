@@ -12,8 +12,9 @@ __pycache__/
 
 # Logs and outputs
 logs/
-tb_logs/
+tb_logs_th0/
 tb_logs_Sketchy/
+saved_models/
 
 # Scripts
 rewrite_json.py

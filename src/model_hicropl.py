@@ -178,9 +178,13 @@ class CustomCLIP(nn.Module):
         gpt_text_file = getattr(cfg, 'gpt_text_file', 'gpt_file/sketchy_ext.json')
         gpt_prompts = _load_gpt_distill_prompts(classnames, gpt_text_file)
         from src.clip import clip as _clip
+        n_ctx = getattr(cfg, 'n_ctx', 2)
+        dummy_prefix = " ".join(["X"] * n_ctx)
         if classnames:
-            self.register_buffer("tokenized_gpt_photo", _clip.tokenize(gpt_prompts["photo"], truncate=True))
-            self.register_buffer("tokenized_gpt_sketch", _clip.tokenize(gpt_prompts["sketch"], truncate=True))
+            gpt_p_dummy = [dummy_prefix + " " + p for p in gpt_prompts["photo"]]
+            gpt_s_dummy = [dummy_prefix + " " + p for p in gpt_prompts["sketch"]]
+            self.register_buffer("tokenized_gpt_photo", _clip.tokenize(gpt_p_dummy, truncate=True))
+            self.register_buffer("tokenized_gpt_sketch", _clip.tokenize(gpt_s_dummy, truncate=True))
         else:
             self.register_buffer("tokenized_gpt_photo", torch.empty(0, 77, dtype=torch.long))
             self.register_buffer("tokenized_gpt_sketch", torch.empty(0, 77, dtype=torch.long))
@@ -280,11 +284,25 @@ class CustomCLIP(nn.Module):
         text_feat_sketch = text_feat_sketch_prompted / text_feat_sketch_prompted.norm(dim=-1, keepdim=True)
 
         # TH1: Use shared text encoder (clip_photo / clip_sketch) to encode GPT descriptions
-        # This means the GPT descriptions are passed through the tunable LayerNorms.
-        text_distill_photo = self.clip_photo.encode_text(self.tokenized_gpt_photo)
+        # This means the GPT descriptions are passed through the tunable LayerNorms and use the SAME learned prompts!
+        # For photo:
+        gpt_emb_photo = self.clip_photo.token_embedding(self.tokenized_gpt_photo).type(self.dtype)
+        ctx_photo = self.text_prompt_photo.cross_prompts_text[0]
+        n_ctx_p = ctx_photo.shape[0]
+        if ctx_photo.dim() == 2:
+            ctx_photo = ctx_photo.unsqueeze(0).expand(gpt_emb_photo.shape[0], -1, -1)
+        gpt_input_photo = torch.cat([gpt_emb_photo[:, :1, :], ctx_photo, gpt_emb_photo[:, 1 + n_ctx_p:, :]], dim=1)
+        text_distill_photo = self.text_encoder_photo(gpt_input_photo, self.tokenized_gpt_photo, cross_prompts_text_deeper_photo)
         text_distill_photo = text_distill_photo / text_distill_photo.norm(dim=-1, keepdim=True)
 
-        text_distill_sketch = self.clip_sketch.encode_text(self.tokenized_gpt_sketch)
+        # For sketch:
+        gpt_emb_sketch = self.clip_sketch.token_embedding(self.tokenized_gpt_sketch).type(self.dtype)
+        ctx_sketch = self.text_prompt_sketch.cross_prompts_text[0]
+        n_ctx_s = ctx_sketch.shape[0]
+        if ctx_sketch.dim() == 2:
+            ctx_sketch = ctx_sketch.unsqueeze(0).expand(gpt_emb_sketch.shape[0], -1, -1)
+        gpt_input_sketch = torch.cat([gpt_emb_sketch[:, :1, :], ctx_sketch, gpt_emb_sketch[:, 1 + n_ctx_s:, :]], dim=1)
+        text_distill_sketch = self.text_encoder_sketch(gpt_input_sketch, self.tokenized_gpt_sketch, cross_prompts_text_deeper_sketch)
         text_distill_sketch = text_distill_sketch / text_distill_sketch.norm(dim=-1, keepdim=True)
 
         # 5. Compute Logits
