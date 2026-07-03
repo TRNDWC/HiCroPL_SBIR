@@ -4,3 +4,19 @@ src/__pycache__/
 src/clip/__pycache__/
 claude.md
 .gitignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+*~
+
+# Logs and outputs
+logs/
+tb_logs/
+tb_logs_Sketchy/
+
+# Scripts
+rewrite_json.py
+run_batch_cont.sh
+submit_hicro.sh
+run_batch.sh
