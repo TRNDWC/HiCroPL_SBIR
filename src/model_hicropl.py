@@ -279,11 +279,12 @@ class CustomCLIP(nn.Module):
         text_feat_sketch_prompted = out_s["text_features"]
         text_feat_sketch = text_feat_sketch_prompted / text_feat_sketch_prompted.norm(dim=-1, keepdim=True)
 
-        # Encode GPT distill features for all classes (loss will select batch entries)
-        text_distill_photo = self.clip_distill_photo.encode_text(self.tokenized_gpt_photo)
+        # TH1: Use shared text encoder (clip_photo / clip_sketch) to encode GPT descriptions
+        # This means the GPT descriptions are passed through the tunable LayerNorms.
+        text_distill_photo = self.clip_photo.encode_text(self.tokenized_gpt_photo)
         text_distill_photo = text_distill_photo / text_distill_photo.norm(dim=-1, keepdim=True)
 
-        text_distill_sketch = self.clip_distill_sketch.encode_text(self.tokenized_gpt_sketch)
+        text_distill_sketch = self.clip_sketch.encode_text(self.tokenized_gpt_sketch)
         text_distill_sketch = text_distill_sketch / text_distill_sketch.norm(dim=-1, keepdim=True)
 
         # 5. Compute Logits
