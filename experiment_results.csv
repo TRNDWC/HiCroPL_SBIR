@@ -1,0 +1,4 @@
+Experiment Name,Dataset,Epochs,Prompt Depth,Cross Layer,Lambda CE,Best mAP
+Full_TH2_Mode_B,sketchy_ext,8,3,2,0.1,0.7999812364578247
+Full_TH2_Mode_A_12,sketchy_ext,8,12,6,0.1,0.8026862740516663
+Full_TH2_Mode_B_12,sketchy_ext,8,12,6,0.1,0.8029372692108154
