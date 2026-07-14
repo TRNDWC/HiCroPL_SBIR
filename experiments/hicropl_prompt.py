@@ -178,3 +178,14 @@ if __name__ == '__main__':
         trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
     else:
         trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader], ckpt_path=ckpt_path)
+
+    # Ghi nhận kết quả tốt nhất vào file CSV tổng hợp
+    import csv
+    results_file = 'experiment_results.csv'
+    file_exists = os.path.isfile(results_file)
+    with open(results_file, mode='a', newline='') as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(['Experiment Name', 'Dataset', 'Epochs', 'Prompt Depth', 'Cross Layer', 'Lambda CE', 'Best mAP'])
+        writer.writerow([opts.exp_name, opts.dataset, opts.epochs, opts.prompt_depth, opts.cross_layer, opts.lambda_ce, model.best_metric])
+    print(f"\n=> Đã lưu kết quả Best mAP: {model.best_metric:.4f} vào file {results_file}")

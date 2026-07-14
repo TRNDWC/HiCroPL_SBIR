@@ -440,6 +440,16 @@ class HiCroPL_SBIR(pl.LightningModule):
         return torch.optim.Adam(param_groups, weight_decay=weight_decay)
 
     def training_step(self, batch, batch_idx):
+        # Epoch-based Decaying for lambda_text_consistency to prevent overfitting
+        current_epoch = self.current_epoch
+        max_epochs = self.trainer.max_epochs
+        
+        if not hasattr(self.args, 'lambda_text_consistency_init'):
+            self.args.lambda_text_consistency_init = getattr(self.args, 'lambda_text_consistency', 2.0)
+            
+        decayed_lambda = max(0.1, self.args.lambda_text_consistency_init * (1.0 - current_epoch / max_epochs))
+        self.args.lambda_text_consistency = decayed_lambda
+
         features = self.model(batch, self.classnames)
         loss, loss_dict = loss_fn_hicropl(self.args, features)
         
