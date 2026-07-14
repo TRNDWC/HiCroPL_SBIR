@@ -51,6 +51,7 @@ def loss_fn_hicropl(args, features):
         text_distill_photo, text_distill_sketch,
         photo_feat_fixed, sketch_feat_fixed,
         text_zero_shot_photo, text_zero_shot_sketch,
+        gpt_zero_shot_photo, gpt_zero_shot_sketch,
         *_
     ) = features
 
@@ -92,9 +93,18 @@ def loss_fn_hicropl(args, features):
 
     if getattr(args, 'enhance_text', False):
         # --- L3: Text Consistency (LLM-guided dual sketch/photo descriptions) ---
+        # 1. Short prompt anchors
         loss_cons_text_sketch = 1.0 - F.cosine_similarity(text_feat_sketch, text_zero_shot_sketch, dim=-1)
         loss_cons_text_photo = 1.0 - F.cosine_similarity(text_feat_photo, text_zero_shot_photo, dim=-1)
-        loss_cons_text = lambda_text_consistency * (loss_cons_text_sketch.mean() + loss_cons_text_photo.mean())
+        
+        # 2. GPT prompt anchors
+        loss_cons_gpt_sketch = 1.0 - F.cosine_similarity(text_distill_sketch, gpt_zero_shot_sketch, dim=-1)
+        loss_cons_gpt_photo = 1.0 - F.cosine_similarity(text_distill_photo, gpt_zero_shot_photo, dim=-1)
+        
+        loss_cons_text = lambda_text_consistency * (
+            loss_cons_text_sketch.mean() + loss_cons_text_photo.mean() +
+            loss_cons_gpt_sketch.mean() + loss_cons_gpt_photo.mean()
+        )
     
         # --- L_cons_visual_cross: Cross-anchor Visual to Text ---
         lambda_visual_cross = getattr(args, 'lambda_visual_cross', 0.1)

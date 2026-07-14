@@ -204,9 +204,23 @@ class CustomCLIP(nn.Module):
                 zero_s = self.clip_distill_sketch.encode_text(self.text_prompt_sketch.tokenized_prompts.to(original_device))
                 zero_s = zero_s / zero_s.norm(dim=-1, keepdim=True)
                 self.register_buffer("cached_text_zero_shot_sketch", zero_s)
+
+                # Pure GPT zero-shot anchor features
+                self.register_buffer("tokenized_gpt_pure_photo", _clip.tokenize(gpt_prompts["photo"], truncate=True))
+                self.register_buffer("tokenized_gpt_pure_sketch", _clip.tokenize(gpt_prompts["sketch"], truncate=True))
+                
+                gpt_zero_p = self.clip_distill_photo.encode_text(self.tokenized_gpt_pure_photo.to(original_device))
+                gpt_zero_p = gpt_zero_p / gpt_zero_p.norm(dim=-1, keepdim=True)
+                self.register_buffer("cached_text_gpt_zero_shot_photo", gpt_zero_p)
+                
+                gpt_zero_s = self.clip_distill_sketch.encode_text(self.tokenized_gpt_pure_sketch.to(original_device))
+                gpt_zero_s = gpt_zero_s / gpt_zero_s.norm(dim=-1, keepdim=True)
+                self.register_buffer("cached_text_gpt_zero_shot_sketch", gpt_zero_s)
             else:
                 self.register_buffer("cached_text_zero_shot_photo", torch.empty(0, 512))
                 self.register_buffer("cached_text_zero_shot_sketch", torch.empty(0, 512))
+                self.register_buffer("cached_text_gpt_zero_shot_photo", torch.empty(0, 512))
+                self.register_buffer("cached_text_gpt_zero_shot_sketch", torch.empty(0, 512))
 
         # -- Extractors removed: logic will be inlined in forward() --
 
@@ -347,6 +361,7 @@ class CustomCLIP(nn.Module):
             text_distill_photo, text_distill_sketch,
             photo_feat_fixed, sketch_feat_fixed,
             self.cached_text_zero_shot_photo, self.cached_text_zero_shot_sketch,
+            self.cached_text_gpt_zero_shot_photo, self.cached_text_gpt_zero_shot_sketch,
         )
 
 
