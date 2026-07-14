@@ -189,6 +189,25 @@ class CustomCLIP(nn.Module):
             self.register_buffer("tokenized_gpt_photo", torch.empty(0, 77, dtype=torch.long))
             self.register_buffer("tokenized_gpt_sketch", torch.empty(0, 77, dtype=torch.long))
 
+        # -- Precompute Frozen Text Features (to save massive GPU memory and provide stable anchors) --
+        print("Precomputing frozen text anchors to save GPU memory and stabilize training...")
+        with torch.no_grad():
+            self.clip_distill_photo.eval()
+            self.clip_distill_sketch.eval()
+            
+            if classnames:
+                # Zero-shot anchor features (short prompts)
+                zero_p = self.clip_distill_photo.encode_text(self.text_prompt_photo.tokenized_prompts.to(original_device))
+                zero_p = zero_p / zero_p.norm(dim=-1, keepdim=True)
+                self.register_buffer("cached_text_zero_shot_photo", zero_p)
+                
+                zero_s = self.clip_distill_sketch.encode_text(self.text_prompt_sketch.tokenized_prompts.to(original_device))
+                zero_s = zero_s / zero_s.norm(dim=-1, keepdim=True)
+                self.register_buffer("cached_text_zero_shot_sketch", zero_s)
+            else:
+                self.register_buffer("cached_text_zero_shot_photo", torch.empty(0, 512))
+                self.register_buffer("cached_text_zero_shot_sketch", torch.empty(0, 512))
+
         # -- Extractors removed: logic will be inlined in forward() --
 
     def normalize_features(self, feat_prenorm):
@@ -327,6 +346,7 @@ class CustomCLIP(nn.Module):
             text_feat_photo, text_feat_sketch,
             text_distill_photo, text_distill_sketch,
             photo_feat_fixed, sketch_feat_fixed,
+            self.cached_text_zero_shot_photo, self.cached_text_zero_shot_sketch,
         )
 
 
