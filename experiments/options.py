@@ -60,8 +60,6 @@ parser.add_argument('--temperature', type=float, default=0.07, help='Temperature
 parser.add_argument('--lambda_cross_modal', type=float, default=1.0, help='Weight for sketch-photo InfoNCE alignment')
 parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for prompted visual-text classification loss')
 parser.add_argument('--lambda_consistency', type=float, default=1.0, help='Weight for visual distill consistency loss')
-parser.add_argument('--lambda_text_consistency', type=float, default=1.0, help='Weight for GPT text distill consistency loss')
-parser.add_argument('--gpt_text_file', type=str, default='gpt_file/sketchy_ext.json', help='GPT text prompt JSON for modality-specific distill text branches')
 
 # CLIP design_details (CoPrompt-style builder config)
 parser.add_argument('--clip_trainer', type=str, default='HiCroPL', help='Trainer key for CLIP block routing')

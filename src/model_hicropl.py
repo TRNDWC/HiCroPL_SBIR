@@ -1,7 +1,4 @@
 import copy
-import json
-import numpy as np
-from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -46,58 +43,6 @@ def unfreeze_ln(m):
             m.weight.requires_grad_(True)
         if hasattr(m, 'bias') and m.bias is not None:
             m.bias.requires_grad_(True)
-
-def _normalize_classname(name):
-    return str(name).strip().lower().replace(" ", "_")
-
-
-def _resolve_text_file(path_like):
-    path = Path(path_like)
-    if path.is_absolute():
-        return path
-    return Path(__file__).resolve().parents[1] / path
-
-
-def _load_gpt_distill_prompts(classnames, gpt_text_file):
-    text_file = _resolve_text_file(gpt_text_file)
-    if not text_file.exists():
-        raise FileNotFoundError(f"GPT text file not found: {text_file}")
-
-    with text_file.open("r", encoding="utf-8") as f:
-        rows = json.load(f)
-
-    prompts_by_modality = {"photo": {}, "sketch": {}}
-    for row in rows:
-        cls = _normalize_classname(row.get("class", ""))
-        input_text = str(row.get("input", "")).lower()
-        output_text = str(row.get("output", "")).strip()
-        if not cls or not output_text:
-            continue
-        if "sketch" in input_text:
-            prompts_by_modality["sketch"][cls] = output_text
-        elif "photo" in input_text:
-            prompts_by_modality["photo"][cls] = output_text
-
-    prompts = {"photo": [], "sketch": []}
-    missing = {"photo": [], "sketch": []}
-    for classname in classnames:
-        key = _normalize_classname(classname)
-        for modality in ("photo", "sketch"):
-            prompt = prompts_by_modality[modality].get(key)
-            if prompt is None:
-                missing[modality].append(classname)
-                prompt = f"a {modality} of a {str(classname).replace('_', ' ')}."
-            prompts[modality].append(prompt)
-
-    for modality, names in missing.items():
-        if names:
-            print(
-                f"Warning: missing {len(names)} {modality} GPT prompts in {text_file}; "
-                "falling back to template prompts."
-            )
-
-    return prompts
-
 
 class CustomCLIP(nn.Module):
     """
@@ -174,16 +119,6 @@ class CustomCLIP(nn.Module):
         self.text_encoder_sketch = TextEncoder(self.clip_sketch)
         self.visual_encoder_photo = VisualEncoder(self.clip_photo)
         self.visual_encoder_sketch = VisualEncoder(self.clip_sketch)
-
-        gpt_text_file = getattr(cfg, 'gpt_text_file', 'gpt_file/sketchy_ext.json')
-        gpt_prompts = _load_gpt_distill_prompts(classnames, gpt_text_file)
-        from src.clip import clip as _clip
-        if classnames:
-            self.register_buffer("tokenized_gpt_photo", _clip.tokenize(gpt_prompts["photo"], truncate=True))
-            self.register_buffer("tokenized_gpt_sketch", _clip.tokenize(gpt_prompts["sketch"], truncate=True))
-        else:
-            self.register_buffer("tokenized_gpt_photo", torch.empty(0, 77, dtype=torch.long))
-            self.register_buffer("tokenized_gpt_sketch", torch.empty(0, 77, dtype=torch.long))
 
         # -- Extractors removed: logic will be inlined in forward() --
 
@@ -279,13 +214,6 @@ class CustomCLIP(nn.Module):
         text_feat_sketch_prompted = out_s["text_features"]
         text_feat_sketch = text_feat_sketch_prompted / text_feat_sketch_prompted.norm(dim=-1, keepdim=True)
 
-        # Encode GPT distill features for all classes (loss will select batch entries)
-        text_distill_photo = self.clip_distill_photo.encode_text(self.tokenized_gpt_photo)
-        text_distill_photo = text_distill_photo / text_distill_photo.norm(dim=-1, keepdim=True)
-
-        text_distill_sketch = self.clip_distill_sketch.encode_text(self.tokenized_gpt_sketch)
-        text_distill_sketch = text_distill_sketch / text_distill_sketch.norm(dim=-1, keepdim=True)
-
         # 5. Compute Logits
         logit_scale = out_p["logit_scale"]
         logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
@@ -306,7 +234,6 @@ class CustomCLIP(nn.Module):
             photo_aug_feat_fixed, sketch_aug_feat_fixed,
             logits_photo_aug, logits_sketch_aug,
             text_feat_photo, text_feat_sketch,
-            text_distill_photo, text_distill_sketch,
             photo_feat_fixed, sketch_feat_fixed,
         )
 

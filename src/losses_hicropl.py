@@ -38,7 +38,6 @@ def loss_fn_hicropl(args, features):
     Loss Components:
     L1: InfoNCE Loss (sketch - positive_photo) - Cross-modal alignment
     L2: InfoNCE Loss (sketch - sketch_aug) + (photo - photo_aug) - Visual consistency regularization
-    L3: InfoNCE Loss (text_sketch - text_sketch_distill) + (text_photo - text_photo_distill) - Text consistency regularization
     L4: Cross-Entropy Loss (text - photo) + (text - sketch) - Classification
     """
     (
@@ -48,18 +47,16 @@ def loss_fn_hicropl(args, features):
         photo_aug_feat, sketch_aug_feat,
         logits_photo_aug, logits_sketch_aug,
         text_feat_photo, text_feat_sketch,
-        text_distill_photo, text_distill_sketch,
         *_
     ) = features
 
     device = logits_photo.device
     label = label.to(device)
-    
+
     # Get hyperparameters
     temperature = getattr(args, 'temperature', 0.07)
     lambda_cross_modal = getattr(args, 'lambda_cross_modal', 1.0)
     lambda_consistency = getattr(args, 'lambda_consistency', 1.0)
-    lambda_text_consistency = getattr(args, 'lambda_text_consistency', lambda_consistency)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
     triplet_margin = getattr(args, 'triplet_margin', 0.3)
     use_triplet_l1 = getattr(args, 'eval_mode', 'category') == 'fine_grained' or getattr(args, 'use_triplet_l1', False)
@@ -89,7 +86,6 @@ def loss_fn_hicropl(args, features):
     loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
     # Total loss: L1 (cross-modal) + L2 (visual consistency) + L4 (CE)
-    # Text distillation consistency remains disabled in this configuration.
     total_loss = loss_cross_modal + loss_consistency + loss_ce
 
     return total_loss
