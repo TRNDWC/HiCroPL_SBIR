@@ -123,9 +123,12 @@ class FactorizationReg(nn.Module):
         g = tS_tuned - tP_tuned
 
         l_leak = 0.5 * (self._sq_in(dP, self.S) + self._sq_in(dS, self.S)).mean()
-        off = self._sq_out(g, self.M)
+        # Same projection as L_leak (onto S only), not (I - P_M): penalizing the
+        # full M-complement would also punish the residual/leftover directions
+        # that are neither modality nor semantics, over-constraining the gap.
+        off = self._sq_in(g, self.S)
         if self.normalize_par:
-            off = off / g.pow(2).sum(-1).clamp_min(1e-8)   # fraction of gap that's off-axis
+            off = off / g.pow(2).sum(-1).clamp_min(1e-8)   # fraction of gap explained by S
         l_par = off.mean()
         return l_leak, l_par
 
