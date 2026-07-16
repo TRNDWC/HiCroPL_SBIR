@@ -42,7 +42,7 @@ parser.add_argument('--num_trainable_ln', type=int, default=-1,
 # Ablation Study Flags
 # ----------------------
 parser.add_argument('--disable_cross_exchange', action='store_true', help='Disable Visual-Visual cross-modal token exchange')
-parser.add_argument('--disable_augmentation', action='store_true', help='Disable data augmentation and consistency loss')
+parser.add_argument('--disable_augmentation', action='store_true', default=True, help='Disable data augmentation and consistency loss (default: disabled)')
 
 # ----------------------
 # ViT & HiCroPL Prompt Parameters
