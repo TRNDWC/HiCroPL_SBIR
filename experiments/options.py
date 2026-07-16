@@ -61,6 +61,11 @@ parser.add_argument('--lambda_cross_modal', type=float, default=1.0, help='Weigh
 parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for prompted visual-text classification loss')
 parser.add_argument('--lambda_consistency', type=float, default=1.0, help='Weight for visual distill consistency loss')
 
+# FactorizationReg (modality/semantic subspace regularizer on the text branch)
+parser.add_argument('--lam_leak', type=float, default=4.0, help='Weight for semantic-leakage loss (FactorizationReg L_leak)')
+parser.add_argument('--lam_par', type=float, default=6.0, help='Weight for modality-parallelism loss (FactorizationReg L_par)')
+parser.add_argument('--reg_warmup_steps', type=int, default=500, help='Warmup steps before FactorizationReg losses ramp to full weight')
+
 # CLIP design_details (CoPrompt-style builder config)
 parser.add_argument('--clip_trainer', type=str, default='HiCroPL', help='Trainer key for CLIP block routing')
 parser.add_argument('--vision_depth', type=int, default=-1, help='Prompted visual depth; -1 means use prompt_depth')

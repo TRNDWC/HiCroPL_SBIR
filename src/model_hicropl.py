@@ -245,7 +245,7 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.args = args
         self.classnames = classnames
         self.model = model
-        
+
         self.best_metric = 1e-3
         self.distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
 
@@ -253,6 +253,40 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.test_sketch_features = []
         self.test_photo_labels = []
         self.test_sketch_labels = []
+
+        self._init_semantic_reg()
+
+    def _init_semantic_reg(self):
+        """Build the modality/semantic factorization regularizer for the text branch.
+
+        Estimates the modality axis M (photo<->sketch direction) and the
+        orthogonal semantic subspace S from a frozen, never-trained CLIP text
+        encoder (`clip_distill_photo`, whose text tower is otherwise unused),
+        so the estimate reflects CLIP's original, un-scrambled semantic map.
+        """
+        from src.factorization_reg import FactorizationReg, make_encode_text_fn
+        from src.dataset_retrieval import UNSEEN_CLASSES
+
+        dataset_key = getattr(self.args, 'dataset', 'sketchy')
+        unseen_classnames = UNSEEN_CLASSES.get(dataset_key, UNSEEN_CLASSES['sketchy'])
+
+        def fmt(name):
+            return name.replace("_", " ")
+
+        seen_formatted = [fmt(c) for c in self.classnames]
+        vocab_words = sorted(set(seen_formatted) | {fmt(c) for c in unseen_classnames})
+
+        encode_text_fn = make_encode_text_fn(self.model.clip_distill_photo)
+
+        self.semantic_reg = FactorizationReg.build(
+            encode_text=encode_text_fn,
+            vocab_words=vocab_words,
+            class_names=seen_formatted,
+            l2_normalize=True,
+            lam_leak=getattr(self.args, 'lam_leak', 4.0),
+            lam_par=getattr(self.args, 'lam_par', 6.0),
+            warmup_steps=getattr(self.args, 'reg_warmup_steps', 500),
+        )
 
     def on_train_epoch_start(self):
         # NOTE: Encoders stay in training mode (required for LayerNorm to use batch statistics)
@@ -351,10 +385,17 @@ class HiCroPL_SBIR(pl.LightningModule):
         from src.losses_hicropl import loss_fn_hicropl
         features = self.model(batch, self.classnames)
         loss = loss_fn_hicropl(self.args, features)
-        
+
+        text_feat_photo, text_feat_sketch = features[10], features[11]
+        class_ids = torch.arange(text_feat_photo.shape[0], device=text_feat_photo.device)
+        reg_loss, reg_info = self.semantic_reg(text_feat_photo, text_feat_sketch, class_ids, self.global_step)
+        loss = loss + reg_loss
+
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
         self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False, logger=False)
-        
+        self.log('l_leak', reg_info['l_leak'], on_step=True, on_epoch=True, prog_bar=False, logger=True)
+        self.log('l_par', reg_info['l_par'], on_step=True, on_epoch=True, prog_bar=False, logger=True)
+
         return loss
 
     def extract_eval_features(self, tensor, modality):
