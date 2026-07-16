@@ -46,7 +46,8 @@ def estimate_subspaces(feat_photo, feat_sketch, r_m=2, s_var=0.90, tol=1e-6):
     abar = abar - abar.mean(0, keepdim=True)
     _, sS, VhS = torch.linalg.svd(abar, full_matrices=False)
     evr_S = (sS ** 2) / (sS ** 2).sum()
-    r_s = int(torch.searchsorted(torch.cumsum(evr_S, 0), torch.tensor(s_var)).item()) + 1
+    threshold = torch.tensor(s_var, device=evr_S.device, dtype=evr_S.dtype)
+    r_s = int(torch.searchsorted(torch.cumsum(evr_S, 0), threshold).item()) + 1
     S_raw = VhS[:r_s]
 
     overlap = torch.linalg.svdvals(M @ S_raw.t()).max()
