@@ -2,42 +2,37 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-def cross_loss(feature_1, feature_2, temperature):
-    device = feature_1.device
-    labels = torch.cat([torch.arange(len(feature_1)) for _ in range(2)], dim=0)
-    labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
-    labels = labels.to(device)
+def nt_xent_loss(features_view1, features_view2, temperature):
+    """NT-Xent (SimCLR-style): pool of 2B = both modalities together, so
+    same-modality pairs also act as negatives alongside cross-modal ones.
+    """
+    features_view1 = F.normalize(features_view1, dim=-1)
+    features_view2 = F.normalize(features_view2, dim=-1)
+    B = features_view1.shape[0]
+    device = features_view1.device
 
-    feature_1 = F.normalize(feature_1, dim=1)
-    feature_2 = F.normalize(feature_2, dim=1)
-    features = torch.cat((feature_1, feature_2), dim=0)  # (2*B, Feat_dim)
+    z = torch.cat([features_view1, features_view2], dim=0)
 
-    similarity_matrix = torch.matmul(features, features.T)  # (2*B, 2*B)
-
-    # discard the main diagonal from both: labels and similarities matrix
-    mask = torch.eye(labels.shape[0], dtype=torch.bool).to(device)
-    labels = labels[~mask].view(labels.shape[0], -1)
-    similarity_matrix = similarity_matrix[~mask].view(similarity_matrix.shape[0], -1)  # (2*B, 2*B - 1)
-
-    # select and combine multiple positives
-    positives = similarity_matrix[labels.bool()].view(labels.shape[0], -1)  # (2*B, 1)
-
-    negatives = similarity_matrix[~labels.bool()].view(similarity_matrix.shape[0], -1)  # (2*B, 2*(B - 1))
-
-    logits = torch.cat([positives, negatives], dim=1)
-    labels_target = torch.zeros(logits.shape[0], dtype=torch.long).to(device)
-
+    logits = z @ z.t()  # (2B, 2B)
+    mask = torch.eye(2 * B, dtype=torch.bool, device=device)
+    logits = logits.masked_fill(mask, float('-inf'))
     logits = logits / temperature
 
-    return F.cross_entropy(logits, labels_target)
+    labels = torch.cat([
+        torch.arange(B, 2 * B, device=device),
+        torch.arange(0, B, device=device),
+    ], dim=0).long()
+
+    return F.cross_entropy(logits, labels)
 
 def loss_fn_hicropl(args, features):
     """
     Combined Loss Function for HiCroPL-SBIR.
 
     Loss Components:
-    L1: InfoNCE Loss (sketch - positive_photo) - Cross-modal alignment
-    L4: Cross-Entropy Loss (text - photo) + (text - sketch) - Classification
+    L_cls: Cross-Entropy (text - photo) + (text - sketch) - Classification
+    L_triplet: Sketch-photo-negative triplet (cosine distance)
+    L_nt_xent: NT-Xent (photo + sketch pool) - cross-modal alignment
     """
     (
         photo_feat, logits_photo,
@@ -54,24 +49,20 @@ def loss_fn_hicropl(args, features):
     lambda_cross_modal = getattr(args, 'lambda_cross_modal', 1.0)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
     triplet_margin = getattr(args, 'triplet_margin', 0.3)
-    use_triplet_l1 = getattr(args, 'eval_mode', 'category') == 'fine_grained' or getattr(args, 'use_triplet_l1', False)
 
-    # --- L1: cross-modal alignment ---
-    # Category mode keeps the original InfoNCE objective.
-    # Fine-grained mode can replace it with triplet loss using the paired negative photo.
-    if use_triplet_l1:
-        dist_pos = 1.0 - F.cosine_similarity(sketch_feat, photo_feat)
-        dist_neg = 1.0 - F.cosine_similarity(sketch_feat, neg_feat)
-        loss_cross_modal = lambda_cross_modal * F.relu(dist_pos - dist_neg + triplet_margin).mean()
-    else:
-        loss_cross_modal = lambda_cross_modal * cross_loss(sketch_feat, photo_feat, temperature)
-
-    # --- L4: Cross-Entropy Loss (text - photo) + (text - sketch) ---
+    # --- L_cls: classification ---
     loss_ce_photo = F.cross_entropy(logits_photo, label)
     loss_ce_sketch = F.cross_entropy(logits_sketch, label)
-    loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
+    loss_cls = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
-    # Total loss: L1 (cross-modal) + L4 (CE)
-    total_loss = loss_cross_modal + loss_ce
+    # --- L_triplet: sketch anchor, photo positive, negative photo ---
+    distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
+    triplet_fn = nn.TripletMarginWithDistanceLoss(distance_function=distance_fn, margin=triplet_margin)
+    loss_triplet = triplet_fn(sketch_feat, photo_feat, neg_feat)
+
+    # --- L_nt_xent: cross-modal alignment ---
+    loss_nt_xent = lambda_cross_modal * nt_xent_loss(photo_feat, sketch_feat, temperature)
+
+    total_loss = loss_cls + loss_triplet + loss_nt_xent
 
     return total_loss
