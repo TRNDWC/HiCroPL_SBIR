@@ -256,7 +256,7 @@ class VisualVisualPromptLearner(nn.Module):
     def __init__(self, cfg, clip_model_photo, clip_model_sketch):
         super().__init__()
 
-        self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
+        self.prompt_depth = getattr(cfg, 'vision_depth', 9)
         n_ctx = getattr(cfg, 'n_ctx', 4)
 
         assert self.prompt_depth >= 1
@@ -327,7 +327,7 @@ class SimpleTextPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
         n_cls = len(classnames)
-        self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
+        self.prompt_depth = getattr(cfg, 'text_depth', 9)
         n_ctx = getattr(cfg, 'n_ctx', 4)
         ctx_init = getattr(cfg, 'ctx_init', "a photo of a")
         dtype = clip_model.dtype

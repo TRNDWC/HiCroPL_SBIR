@@ -226,7 +226,7 @@ class HiCroPL_SBIR(pl.LightningModule):
         """
         try:
             vv = self.model.visual_visual_learner
-            # visual tokens: number of prompt vectors (prompt_depth * n_ctx)
+            # visual tokens: number of prompt vectors (vision_depth * n_ctx)
             tokens_visual_photo = len(vv.cross_prompts_photo) * vv.n_ctx
             tokens_visual_sketch = len(vv.cross_prompts_sketch) * vv.n_ctx
         except Exception:
