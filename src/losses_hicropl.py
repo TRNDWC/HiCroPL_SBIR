@@ -34,20 +34,16 @@ def cross_loss(feature_1, feature_2, temperature):
 def loss_fn_hicropl(args, features):
     """
     Combined Loss Function for HiCroPL-SBIR.
-    
+
     Loss Components:
     L1: InfoNCE Loss (sketch - positive_photo) - Cross-modal alignment
-    L2: InfoNCE Loss (sketch - sketch_aug) + (photo - photo_aug) - Visual consistency regularization
     L4: Cross-Entropy Loss (text - photo) + (text - sketch) - Classification
     """
     (
         photo_feat, logits_photo,
         sketch_feat, logits_sketch,
         neg_feat, label,
-        photo_aug_feat, sketch_aug_feat,
-        logits_photo_aug, logits_sketch_aug,
         text_feat_photo, text_feat_sketch,
-        *_
     ) = features
 
     device = logits_photo.device
@@ -56,7 +52,6 @@ def loss_fn_hicropl(args, features):
     # Get hyperparameters
     temperature = getattr(args, 'temperature', 0.07)
     lambda_cross_modal = getattr(args, 'lambda_cross_modal', 1.0)
-    lambda_consistency = getattr(args, 'lambda_consistency', 1.0)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
     triplet_margin = getattr(args, 'triplet_margin', 0.3)
     use_triplet_l1 = getattr(args, 'eval_mode', 'category') == 'fine_grained' or getattr(args, 'use_triplet_l1', False)
@@ -71,21 +66,12 @@ def loss_fn_hicropl(args, features):
     else:
         loss_cross_modal = lambda_cross_modal * cross_loss(sketch_feat, photo_feat, temperature)
 
-    # --- L2: Visual consistency (sketch/photo vs augmented) ---
-    if sketch_aug_feat is not None and photo_aug_feat is not None:
-        loss_consistency = lambda_consistency * (
-            cross_loss(sketch_feat, sketch_aug_feat, temperature) +
-            cross_loss(photo_feat, photo_aug_feat, temperature)
-        )
-    else:
-        loss_consistency = 0.0
-
     # --- L4: Cross-Entropy Loss (text - photo) + (text - sketch) ---
     loss_ce_photo = F.cross_entropy(logits_photo, label)
     loss_ce_sketch = F.cross_entropy(logits_sketch, label)
     loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
-    # Total loss: L1 (cross-modal) + L2 (visual consistency) + L4 (CE)
-    total_loss = loss_cross_modal + loss_consistency + loss_ce
+    # Total loss: L1 (cross-modal) + L4 (CE)
+    total_loss = loss_cross_modal + loss_ce
 
     return total_loss

@@ -50,10 +50,10 @@ class CustomCLIP(nn.Module):
     Sử dụng HiCroPLFeatureExtractor làm nòng cốt.
     """
 
-    def __init__(self, cfg, clip_model, clip_model_frozen, classnames=None):
+    def __init__(self, cfg, clip_model, classnames=None):
         super().__init__()
         self.cfg = cfg
-        
+
         if classnames is None:
             classnames = []
         if len(classnames) == 0:
@@ -62,19 +62,12 @@ class CustomCLIP(nn.Module):
         original_device = next(clip_model.parameters()).device
         self.dtype = clip_model.dtype
 
-        # 1. Branch-specific models (3 deep copies + 2 distill branches)
+        # 1. Branch-specific models (2 deep copies: photo, sketch)
         self.clip_photo = copy.deepcopy(clip_model).to(original_device)
         self.clip_sketch = copy.deepcopy(clip_model).to(original_device)
-        self.clip_distill_photo = copy.deepcopy(clip_model_frozen).to(original_device)
-        self.clip_distill_sketch = copy.deepcopy(clip_model_frozen).to(original_device)
-
-        # Backward-compatible alias for older code paths
-        self.clip_distill = self.clip_distill_photo
 
         self.clip_sketch.apply(freeze_all_but_bn)
         self.clip_photo.apply(freeze_all_but_bn)
-        self.clip_distill_photo.apply(freeze_all_but_bn)  
-        self.clip_distill_sketch.apply(freeze_all_but_bn) 
 
         # Print trainable param counts per branch for verification
         def _count_trainable(m):
@@ -89,8 +82,6 @@ class CustomCLIP(nn.Module):
         for name, module in (
             ("clip_photo", self.clip_photo),
             ("clip_sketch", self.clip_sketch),
-            ("clip_distill_photo", self.clip_distill_photo),
-            ("clip_distill_sketch", self.clip_distill_sketch),
         ):
             tot, tr = _count_trainable(module)
             print(f"{name}: trainable {tr:,} / total {tot:,} params")
@@ -133,12 +124,11 @@ class CustomCLIP(nn.Module):
         """
         if len(x) == 5:
             sk_tensor, photo_tensor, neg_tensor, label, filename = x
-            sk_aug_tensor = photo_aug_tensor = None
         elif len(x) == 7:
-            sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label, filename = x
+            sk_tensor, photo_tensor, neg_tensor, _, _, label, filename = x
         else:
-            sk_tensor, photo_tensor, neg_tensor, sk_aug_tensor, photo_aug_tensor, label = x[:6]
-        
+            sk_tensor, photo_tensor, neg_tensor, _, _, label = x[:6]
+
         # 1. Call visual-visual learner ONCE (shared by both branches)
         vis1_shallow, vis2_shallow, vis1_deeper, vis2_deeper = self.visual_visual_learner()
         
@@ -175,36 +165,13 @@ class CustomCLIP(nn.Module):
             "logit_scale": self.logit_scale_photo.exp()
         }
         
-        # 2. Distill Visual Features (Open LN branches) - RUN ONCE
-        if photo_aug_tensor is not None and sk_aug_tensor is not None:
-            photo_aug_feat_fixed = self.clip_distill_photo.visual(photo_aug_tensor.type(self.dtype))
-            photo_aug_feat_fixed = photo_aug_feat_fixed / photo_aug_feat_fixed.norm(dim=-1, keepdim=True)
-            
-            sketch_aug_feat_fixed = self.clip_distill_sketch.visual(sk_aug_tensor.type(self.dtype))
-            sketch_aug_feat_fixed = sketch_aug_feat_fixed / sketch_aug_feat_fixed.norm(dim=-1, keepdim=True)
-        else:
-            photo_aug_feat_fixed = None
-            sketch_aug_feat_fixed = None
-
-        # Distill Visual Features for Original (for residual mix)
-        photo_feat_fixed = self.clip_distill_photo.visual(photo_tensor.type(self.dtype))
-        photo_feat_fixed = photo_feat_fixed / photo_feat_fixed.norm(dim=-1, keepdim=True)
-        
-        sketch_feat_fixed = self.clip_distill_sketch.visual(sk_tensor.type(self.dtype))
-        sketch_feat_fixed = sketch_feat_fixed / sketch_feat_fixed.norm(dim=-1, keepdim=True)
-
-        # 3. Residual Mix & Final Normalization
-        # Image
+        # 2. Final Normalization (prompted feature only, no frozen-CLIP residual mix)
         photo_feat_prompted = out_p["image_features"]
-        photo_feat_prompted_norm = photo_feat_prompted / photo_feat_prompted.norm(dim=-1, keepdim=True)
-        photo_feat_prenorm = photo_feat_prompted_norm + photo_feat_fixed
-        photo_feat = photo_feat_prenorm / photo_feat_prenorm.norm(dim=-1, keepdim=True)
+        photo_feat = photo_feat_prompted / photo_feat_prompted.norm(dim=-1, keepdim=True)
 
         sketch_feat_prompted = out_s["image_features"]
-        sketch_feat_prompted_norm = sketch_feat_prompted / sketch_feat_prompted.norm(dim=-1, keepdim=True)
-        sketch_feat_prenorm = sketch_feat_prompted_norm + sketch_feat_fixed
-        sketch_feat = sketch_feat_prenorm / sketch_feat_prenorm.norm(dim=-1, keepdim=True)
-        
+        sketch_feat = sketch_feat_prompted / sketch_feat_prompted.norm(dim=-1, keepdim=True)
+
         neg_feat_prompted = out_neg["image_features"]
         neg_feat = neg_feat_prompted / neg_feat_prompted.norm(dim=-1, keepdim=True)
 
@@ -214,27 +181,16 @@ class CustomCLIP(nn.Module):
         text_feat_sketch_prompted = out_s["text_features"]
         text_feat_sketch = text_feat_sketch_prompted / text_feat_sketch_prompted.norm(dim=-1, keepdim=True)
 
-        # 5. Compute Logits
+        # 3. Compute Logits
         logit_scale = out_p["logit_scale"]
         logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
         logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
-        
-        # Logits for Augmented Images
-        if photo_aug_feat_fixed is not None and sketch_aug_feat_fixed is not None:
-            logits_photo_aug = logit_scale * photo_aug_feat_fixed @ text_feat_photo.t()
-            logits_sketch_aug = logit_scale * sketch_aug_feat_fixed @ text_feat_sketch.t()
-        else:
-            logits_photo_aug = None
-            logits_sketch_aug = None
-        
+
         return (
             photo_feat, logits_photo,
             sketch_feat, logits_sketch,
             neg_feat, label,
-            photo_aug_feat_fixed, sketch_aug_feat_fixed,
-            logits_photo_aug, logits_sketch_aug,
             text_feat_photo, text_feat_sketch,
-            photo_feat_fixed, sketch_feat_fixed,
         )
 
 
@@ -253,40 +209,6 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.test_sketch_features = []
         self.test_photo_labels = []
         self.test_sketch_labels = []
-
-        self._init_semantic_reg()
-
-    def _init_semantic_reg(self):
-        """Build the modality/semantic factorization regularizer for the text branch.
-
-        Estimates the modality axis M (photo<->sketch direction) and the
-        orthogonal semantic subspace S from a frozen, never-trained CLIP text
-        encoder (`clip_distill_photo`, whose text tower is otherwise unused),
-        so the estimate reflects CLIP's original, un-scrambled semantic map.
-        """
-        from src.factorization_reg import FactorizationReg, make_encode_text_fn
-        from src.dataset_retrieval import UNSEEN_CLASSES
-
-        dataset_key = getattr(self.args, 'dataset', 'sketchy')
-        unseen_classnames = UNSEEN_CLASSES.get(dataset_key, UNSEEN_CLASSES['sketchy'])
-
-        def fmt(name):
-            return name.replace("_", " ")
-
-        seen_formatted = [fmt(c) for c in self.classnames]
-        vocab_words = sorted(set(seen_formatted) | {fmt(c) for c in unseen_classnames})
-
-        encode_text_fn = make_encode_text_fn(self.model.clip_distill_photo)
-
-        self.semantic_reg = FactorizationReg.build(
-            encode_text=encode_text_fn,
-            vocab_words=vocab_words,
-            class_names=seen_formatted,
-            l2_normalize=True,
-            lam_leak=getattr(self.args, 'lam_leak', 4.0),
-            lam_par=getattr(self.args, 'lam_par', 6.0),
-            warmup_steps=getattr(self.args, 'reg_warmup_steps', 500),
-        )
 
     def on_train_epoch_start(self):
         # NOTE: Encoders stay in training mode (required for LayerNorm to use batch statistics)
@@ -386,44 +308,25 @@ class HiCroPL_SBIR(pl.LightningModule):
         features = self.model(batch, self.classnames)
         loss = loss_fn_hicropl(self.args, features)
 
-        text_feat_photo, text_feat_sketch = features[10], features[11]
-        class_ids = torch.arange(text_feat_photo.shape[0], device=text_feat_photo.device)
-        reg_loss, reg_info = self.semantic_reg(text_feat_photo, text_feat_sketch, class_ids, self.global_step)
-        loss = loss + reg_loss
-
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
         self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False, logger=False)
-        self.log('l_leak', reg_info['l_leak'], on_step=True, on_epoch=True, prog_bar=False, logger=True)
-        self.log('l_par', reg_info['l_par'], on_step=True, on_epoch=True, prog_bar=False, logger=True)
 
         return loss
 
     def extract_eval_features(self, tensor, modality):
-        """Extract visual features: Prompted + Distill Fixed (Residual Mix)"""
+        """Extract visual features from the prompted encoder for the given modality."""
         # Call visual learner once, cache outputs
         vis1_shallow, vis2_shallow, vis1_deeper, vis2_deeper = self.model.visual_visual_learner()
-        
+
         if modality == 'photo':
-            text_learner = self.model.text_prompt_photo
             visual_encoder = self.model.visual_encoder_photo
-            distill_encoder = self.model.clip_distill_photo.visual
             vis_shallow, vis_deeper = vis2_shallow, vis2_deeper
         else:
-            text_learner = self.model.text_prompt_sketch
             visual_encoder = self.model.visual_encoder_sketch
-            distill_encoder = self.model.clip_distill_sketch.visual
             vis_shallow, vis_deeper = vis1_shallow, vis1_deeper
-        
-        # Get text prompts and compute image features
-        _, cross_prompts_text_deeper = text_learner(label=None)
+
         prompted_feat = visual_encoder(tensor.type(self.model.dtype), vis_shallow, vis_deeper)
-        prompted_feat_norm = prompted_feat / prompted_feat.norm(dim=-1, keepdim=True)
-        
-        fixed_feat = distill_encoder(tensor.type(self.model.dtype))
-        fixed_feat_norm = fixed_feat / fixed_feat.norm(dim=-1, keepdim=True)
-        
-        combined_prenorm = prompted_feat_norm + fixed_feat_norm
-        return combined_prenorm / combined_prenorm.norm(dim=-1, keepdim=True)
+        return prompted_feat / prompted_feat.norm(dim=-1, keepdim=True)
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         return self._validation_step_category(batch, batch_idx, dataloader_idx)

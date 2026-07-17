@@ -39,12 +39,6 @@ parser.add_argument('--num_trainable_ln', type=int, default=-1,
 # (patch-shuffle handled in FG training code; no CLI options required)
 
 # ----------------------
-# Ablation Study Flags
-# ----------------------
-parser.add_argument('--disable_cross_exchange', action='store_true', help='Disable Visual-Visual cross-modal token exchange')
-parser.add_argument('--disable_augmentation', action='store_true', default=True, help='Disable data augmentation and consistency loss (default: disabled)')
-
-# ----------------------
 # ViT & HiCroPL Prompt Parameters
 # ----------------------
 parser.add_argument('--prompt_dim', type=int, default=768)
@@ -59,12 +53,6 @@ parser.add_argument('--ctx_init_sketch', type=str, default='a sketch of a', help
 parser.add_argument('--temperature', type=float, default=0.07, help='Temperature for InfoNCE Loss')
 parser.add_argument('--lambda_cross_modal', type=float, default=1.0, help='Weight for sketch-photo InfoNCE alignment')
 parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for prompted visual-text classification loss')
-parser.add_argument('--lambda_consistency', type=float, default=1.0, help='Weight for visual distill consistency loss')
-
-# FactorizationReg (modality/semantic subspace regularizer on the text branch)
-parser.add_argument('--lam_leak', type=float, default=4.0, help='Weight for semantic-leakage loss (FactorizationReg L_leak)')
-parser.add_argument('--lam_par', type=float, default=6.0, help='Weight for modality-parallelism loss (FactorizationReg L_par)')
-parser.add_argument('--reg_warmup_steps', type=int, default=500, help='Warmup steps before FactorizationReg losses ramp to full weight')
 
 # CLIP design_details (CoPrompt-style builder config)
 parser.add_argument('--clip_trainer', type=str, default='HiCroPL', help='Trainer key for CLIP block routing')
