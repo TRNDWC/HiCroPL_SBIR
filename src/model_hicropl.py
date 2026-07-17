@@ -5,6 +5,13 @@ from torch.nn import functional as F
 import pytorch_lightning as pl
 from torchmetrics.functional.retrieval import retrieval_average_precision, retrieval_precision
 
+from src.hicropl import (
+    TextEncoder,
+    VisualEncoder,
+    VisualPromptLearner,
+    TextPromptLearner,
+)
+
 
 def freeze_model(m):
     """Freeze all parameters of the given module."""
@@ -83,19 +90,73 @@ class CustomCLIP(nn.Module):
         self.logit_scale_photo = self.clip_photo.logit_scale
         self.logit_scale_sketch = self.clip_sketch.logit_scale
 
-        # -- Prompt learning components removed (src/hicropl.py emptied) --
-        # New prompt-learning logic to be added in a later step.
+        # -- Prompt learners: simple deep prompts, one set per branch, no
+        # cross-modal exchange. Depth is independent per modality
+        # (--vision_depth for both visual branches, --text_depth for both
+        # text branches); n_ctx (tokens per layer) is shared.
+        self.visual_prompt_photo = VisualPromptLearner(cfg, self.clip_photo)
+        self.visual_prompt_sketch = VisualPromptLearner(cfg, self.clip_sketch)
+
+        cfg_photo = copy.copy(cfg)
+        cfg_photo.ctx_init = getattr(cfg, 'ctx_init', 'a photo of a')
+        self.text_prompt_photo = TextPromptLearner(cfg_photo, classnames, self.clip_photo)
+
+        cfg_sketch = copy.copy(cfg)
+        cfg_sketch.ctx_init = getattr(cfg, 'ctx_init_sketch', 'a sketch of a')
+        self.text_prompt_sketch = TextPromptLearner(cfg_sketch, classnames, self.clip_sketch)
+
+        # -- Encoders (feed prompts into CLIP's per-layer injection) --
+        self.text_encoder_photo = TextEncoder(self.clip_photo)
+        self.text_encoder_sketch = TextEncoder(self.clip_sketch)
+        self.visual_encoder_photo = VisualEncoder(self.clip_photo)
+        self.visual_encoder_sketch = VisualEncoder(self.clip_sketch)
 
     def normalize_features(self, feat_prenorm):
         """L2-normalize feature tensors."""
         return feat_prenorm / feat_prenorm.norm(dim=-1, keepdim=True)
 
     def forward(self, x, classnames):
-        """Forward pass placeholder. Prompt-learning logic was removed along
-        with src/hicropl.py and has not been rebuilt yet."""
-        raise NotImplementedError(
-            "CustomCLIP.forward() has no prompt-learning logic yet — "
-            "src/hicropl.py was emptied; rebuild this in a later step."
+        if len(x) == 5:
+            sk_tensor, photo_tensor, neg_tensor, label, filename = x
+        elif len(x) == 7:
+            sk_tensor, photo_tensor, neg_tensor, _, _, label, filename = x
+        else:
+            sk_tensor, photo_tensor, neg_tensor, _, _, label = x[:6]
+
+        # Text branch: text features for ALL classes (needed for classification logits)
+        text_input_photo, deeper_text_photo = self.text_prompt_photo()
+        text_feat_photo_raw = self.text_encoder_photo(
+            text_input_photo, self.text_prompt_photo.tokenized_prompts, deeper_text_photo
+        )
+
+        text_input_sketch, deeper_text_sketch = self.text_prompt_sketch()
+        text_feat_sketch_raw = self.text_encoder_sketch(
+            text_input_sketch, self.text_prompt_sketch.tokenized_prompts, deeper_text_sketch
+        )
+
+        # Visual branch
+        vis_shallow_photo, vis_deeper_photo = self.visual_prompt_photo()
+        photo_feat_raw = self.visual_encoder_photo(photo_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
+        neg_feat_raw = self.visual_encoder_photo(neg_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
+
+        vis_shallow_sketch, vis_deeper_sketch = self.visual_prompt_sketch()
+        sketch_feat_raw = self.visual_encoder_sketch(sk_tensor.type(self.dtype), vis_shallow_sketch, vis_deeper_sketch)
+
+        photo_feat = photo_feat_raw / photo_feat_raw.norm(dim=-1, keepdim=True)
+        sketch_feat = sketch_feat_raw / sketch_feat_raw.norm(dim=-1, keepdim=True)
+        neg_feat = neg_feat_raw / neg_feat_raw.norm(dim=-1, keepdim=True)
+        text_feat_photo = text_feat_photo_raw / text_feat_photo_raw.norm(dim=-1, keepdim=True)
+        text_feat_sketch = text_feat_sketch_raw / text_feat_sketch_raw.norm(dim=-1, keepdim=True)
+
+        logit_scale = self.logit_scale_photo.exp()
+        logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
+        logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
+
+        return (
+            photo_feat, logits_photo,
+            sketch_feat, logits_sketch,
+            neg_feat, label,
+            text_feat_photo, text_feat_sketch,
         )
 
 
@@ -121,18 +182,38 @@ class HiCroPL_SBIR(pl.LightningModule):
         pass
 
     def configure_optimizers(self):
-        # Prompt-learner param grouping removed along with src/hicropl.py.
-        # Falls back to a single group over whatever is trainable on the
-        # model (currently just the opened LayerNorms in clip_photo/clip_sketch)
-        # until new prompt-learning modules are added.
-        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        def add_unique_params(candidates, out_list, seen_ids):
+            for p in candidates:
+                if p.requires_grad and id(p) not in seen_ids:
+                    seen_ids.add(id(p))
+                    out_list.append(p)
 
-        self.print(f"Number of trainable params: {sum(p.numel() for p in trainable_params):,}")
+        seen_ids = set()
 
+        prompt_params = []
+        add_unique_params(self.model.visual_prompt_photo.parameters(), prompt_params, seen_ids)
+        add_unique_params(self.model.visual_prompt_sketch.parameters(), prompt_params, seen_ids)
+        add_unique_params(self.model.text_prompt_photo.parameters(), prompt_params, seen_ids)
+        add_unique_params(self.model.text_prompt_sketch.parameters(), prompt_params, seen_ids)
+
+        non_prompt_params = []
+        for _, p in self.model.named_parameters():
+            if p.requires_grad and id(p) not in seen_ids:
+                seen_ids.add(id(p))
+                non_prompt_params.append(p)
+
+        self.print(f"Number of trainable prompt params: {sum(p.numel() for p in prompt_params):,}")
+        self.print(f"Number of trainable non-prompt params: {sum(p.numel() for p in non_prompt_params):,}")
+
+        prompt_lr = getattr(self.cfg, 'prompt_lr', 1e-5)
         clip_ln_lr = getattr(self.cfg, 'clip_LN_lr', 1e-5)
         weight_decay = getattr(self.cfg, 'weight_decay', 1e-4)
 
-        return torch.optim.Adam(trainable_params, lr=clip_ln_lr, weight_decay=weight_decay)
+        param_groups = [{'params': prompt_params, 'lr': prompt_lr}]
+        if non_prompt_params:
+            param_groups.append({'params': non_prompt_params, 'lr': clip_ln_lr})
+
+        return torch.optim.Adam(param_groups, weight_decay=weight_decay)
 
     def training_step(self, batch, batch_idx):
         from src.losses_hicropl import loss_fn_hicropl
@@ -145,13 +226,17 @@ class HiCroPL_SBIR(pl.LightningModule):
         return loss
 
     def extract_eval_features(self, tensor, modality):
-        """Extract visual features for the given modality. Placeholder — the
-        prompted visual encoders were removed along with src/hicropl.py and
-        have not been rebuilt yet."""
-        raise NotImplementedError(
-            "extract_eval_features() has no visual encoder yet — "
-            "src/hicropl.py was emptied; rebuild this in a later step."
-        )
+        """Extract visual features from the prompted encoder for the given modality."""
+        if modality == 'photo':
+            visual_prompt = self.model.visual_prompt_photo
+            visual_encoder = self.model.visual_encoder_photo
+        else:
+            visual_prompt = self.model.visual_prompt_sketch
+            visual_encoder = self.model.visual_encoder_sketch
+
+        vis_shallow, vis_deeper = visual_prompt()
+        feat = visual_encoder(tensor.type(self.model.dtype), vis_shallow, vis_deeper)
+        return feat / feat.norm(dim=-1, keepdim=True)
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         return self._validation_step_category(batch, batch_idx, dataloader_idx)
