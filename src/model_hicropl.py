@@ -9,6 +9,7 @@ from src.hicropl import (
     TextEncoder,
     VisualEncoder,
     VisualPromptLearner,
+    VisualPromptLearnerConditioned,
     TextPromptLearner,
 )
 
@@ -94,8 +95,16 @@ class CustomCLIP(nn.Module):
         # cross-modal exchange. Depth is independent per modality
         # (--vision_depth for both visual branches, --text_depth for both
         # text branches); n_ctx (tokens per layer) is shared.
+        self.use_content_cond = getattr(cfg, 'use_content_cond', False)
         self.visual_prompt_photo = VisualPromptLearner(cfg, self.clip_photo)
-        self.visual_prompt_sketch = VisualPromptLearner(cfg, self.clip_sketch)
+        if self.use_content_cond:
+            # H2 (cheapest variant): sketch prompt is optionally conditioned on
+            # this batch's actual photo embedding (see forward()). Photo branch
+            # is left untouched.
+            self.visual_prompt_sketch = VisualPromptLearnerConditioned(cfg, self.clip_sketch)
+        else:
+            self.visual_prompt_sketch = VisualPromptLearner(cfg, self.clip_sketch)
+        self.last_gate_values = None
 
         cfg_photo = copy.copy(cfg)
         cfg_photo.ctx_init = getattr(cfg, 'ctx_init', 'a photo of a')
@@ -139,7 +148,26 @@ class CustomCLIP(nn.Module):
         photo_feat_raw = self.visual_encoder_photo(photo_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
         neg_feat_raw = self.visual_encoder_photo(neg_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
 
-        vis_shallow_sketch, vis_deeper_sketch = self.visual_prompt_sketch()
+        self.last_gate_values = None
+        if self.use_content_cond:
+            # H2: condition sketch's prompt on this batch's actual photo
+            # embedding (detached -- keeps photo's own training unaffected by
+            # sketch's losses through this path). Modality dropout: sketch has
+            # no paired photo at retrieval time, so randomly withhold the
+            # descriptor during training too, so the gate/modulator learns to
+            # cope with its absence (matches extract_eval_features, which
+            # always passes descriptor=None for the sketch branch).
+            content_dropout_prob = getattr(self.cfg, 'content_dropout_prob', 0.4)
+            drop_descriptor = self.training and (torch.rand(1).item() < content_dropout_prob)
+            descriptor = None if drop_descriptor else photo_feat_raw.detach()
+            sketch_prompt_out = self.visual_prompt_sketch(descriptor)
+            if len(sketch_prompt_out) == 3:
+                vis_shallow_sketch, vis_deeper_sketch, self.last_gate_values = sketch_prompt_out
+            else:
+                vis_shallow_sketch, vis_deeper_sketch = sketch_prompt_out
+        else:
+            vis_shallow_sketch, vis_deeper_sketch = self.visual_prompt_sketch()
+
         sketch_feat_raw = self.visual_encoder_sketch(sk_tensor.type(self.dtype), vis_shallow_sketch, vis_deeper_sketch)
 
         photo_feat = photo_feat_raw / photo_feat_raw.norm(dim=-1, keepdim=True)
@@ -223,18 +251,49 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
         self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False, logger=False)
 
+        gate_values = getattr(self.model, 'last_gate_values', None)
+        if gate_values is not None:
+            for i, v in enumerate(gate_values):
+                self.log(f'gate_p2s_L{i}', v, on_step=False, on_epoch=True, prog_bar=(i == 0))
+
         return loss
+
+    def on_after_backward(self):
+        """[H2 diagnostic] Log raw gradient norms right after backward(), before
+        any optimizer/weight-decay step. Distinguishes "gradient genuinely never
+        reaches gate_logit/cross_attn" (a real graph/wiring bug) from "gradient
+        is nonzero but tiny, and weight_decay + Adam warmup keeps the visible
+        sigmoid(gate_logit) pinned near 0.5 for a long time" (a slow-learning-
+        signal issue, not a bug). Remove once the H2 gate-frozen investigation
+        is resolved.
+        """
+        sketch_prompt = getattr(self.model, 'visual_prompt_sketch', None)
+        gate_logit = getattr(sketch_prompt, 'gate_logit', None)
+        if gate_logit is None:
+            return
+        gate_grad_norm = gate_logit.grad.norm().item() if gate_logit.grad is not None else float('nan')
+        self.log('diag_gate_logit_grad_norm', gate_grad_norm, on_step=True, on_epoch=False, prog_bar=True, logger=True)
+
+        cross_attn_0 = sketch_prompt.cross_attn[0]
+        k_grad = cross_attn_0.linear_k.weight.grad
+        k_grad_norm = k_grad.norm().item() if k_grad is not None else float('nan')
+        self.log('diag_cross_attn0_k_grad_norm', k_grad_norm, on_step=True, on_epoch=False, prog_bar=False, logger=True)
 
     def extract_eval_features(self, tensor, modality):
         """Extract visual features from the prompted encoder for the given modality."""
         if modality == 'photo':
             visual_prompt = self.model.visual_prompt_photo
             visual_encoder = self.model.visual_encoder_photo
+            prompt_out = visual_prompt()
         else:
             visual_prompt = self.model.visual_prompt_sketch
             visual_encoder = self.model.visual_encoder_sketch
+            # No paired photo available at retrieval time -- force the
+            # static-only path (descriptor=None), matching what modality
+            # dropout in CustomCLIP.forward() trained the gate to handle.
+            prompt_out = visual_prompt(None) if self.model.use_content_cond else visual_prompt()
 
-        vis_shallow, vis_deeper = visual_prompt()
+        vis_shallow, vis_deeper = prompt_out[:2]
         feat = visual_encoder(tensor.type(self.model.dtype), vis_shallow, vis_deeper)
         return feat / feat.norm(dim=-1, keepdim=True)
 

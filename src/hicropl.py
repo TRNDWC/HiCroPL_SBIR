@@ -63,6 +63,97 @@ class VisualPromptLearner(nn.Module):
         return self.learner()
 
 
+class ContentCrossAttention(nn.Module):
+    """Cross-attend one layer's static prompt tokens (query) onto a per-sample
+    content descriptor (single-token key/value), producing a per-sample
+    modulated prompt. Unlike self/pooling attention over a static bank, the
+    key/value sequence length is 1 (the descriptor), so this is effectively a
+    per-sample FiLM-style modulation of the query's own tokens.
+    """
+
+    def __init__(self, prompt_dim, descriptor_dim, num_heads=8):
+        super().__init__()
+        self.linear_k = nn.Linear(descriptor_dim, prompt_dim)
+        self.linear_v = nn.Linear(descriptor_dim, prompt_dim)
+        self.attn = nn.MultiheadAttention(embed_dim=prompt_dim, num_heads=num_heads)
+        self.ln_q = nn.LayerNorm(prompt_dim)
+        self.ln_out = nn.LayerNorm(prompt_dim)
+
+    def forward(self, query, descriptor):
+        """
+        query: (n_ctx, dim) -- this layer's own static prompt tokens
+        descriptor: (B, descriptor_dim) -- per-sample content descriptor
+        returns: (B, n_ctx, dim) -- per-sample modulated prompt
+        """
+        B = descriptor.shape[0]
+        q = self.ln_q(query).unsqueeze(1).expand(-1, B, -1)  # (n_ctx, B, dim)
+        k = self.linear_k(descriptor).unsqueeze(0)  # (1, B, dim)
+        v = self.linear_v(descriptor).unsqueeze(0)  # (1, B, dim)
+        out, _ = self.attn(q, k, v, need_weights=False)  # (n_ctx, B, dim)
+        out = self.ln_out(out)
+        return out.permute(1, 0, 2)  # (B, n_ctx, dim)
+
+
+class VisualPromptLearnerConditioned(nn.Module):
+    """Deep prompt learner for the sketch branch: the usual static per-layer
+    tokens (inherited from VisualPromptLearner), plus an optional per-sample
+    modulation driven by a photo content descriptor (H2 hypothesis).
+
+    forward(descriptor=None):
+        descriptor is None   -> (shallow, deeper), same 2-tuple as
+                                 VisualPromptLearner (static only, used at
+                                 eval time and under modality dropout, since a
+                                 query sketch has no paired photo at retrieval
+                                 time).
+        descriptor (B, D)    -> (shallow, deeper, gate_values), where shallow
+                                 is (B, n_ctx, dim) and each deeper layer is
+                                 (B, n_ctx, dim) -- per-sample blend of the
+                                 static prompt and a cross-attention modulation
+                                 conditioned on descriptor. CLIP's own prompt
+                                 injection (VisionTransformer_HiCroPL.forward,
+                                 ResidualAttentionBlock_HiCroPL.forward) already
+                                 handles a per-sample (B, n_ctx, dim) prompt
+                                 correctly via a no-op expand() when the batch
+                                 dim already matches, so no changes are needed
+                                 there.
+    """
+
+    def __init__(self, cfg, clip_model):
+        super().__init__()
+        self.base = VisualPromptLearner(cfg, clip_model)
+        depth = getattr(cfg, 'vision_depth', 1)
+        prompt_dim = clip_model.visual.conv1.weight.shape[0]
+        descriptor_dim = clip_model.visual.proj.shape[1]
+        self.cross_attn = nn.ModuleList([
+            ContentCrossAttention(prompt_dim, descriptor_dim) for _ in range(depth)
+        ])
+        self.gate_logit = nn.Parameter(torch.zeros(depth, dtype=clip_model.dtype))
+
+    def forward(self, descriptor=None):
+        shallow, deeper = self.base()
+        if descriptor is None:
+            return shallow, deeper
+
+        layers = [shallow] + deeper
+        gates = torch.sigmoid(self.gate_logit)
+        blended = []
+        for layer, cross_attn, gate in zip(layers, self.cross_attn, gates):
+            own = layer.unsqueeze(0).expand(descriptor.shape[0], -1, -1)  # (B, n_ctx, dim)
+            mod = cross_attn(layer, descriptor)  # (B, n_ctx, dim)
+            # ContentCrossAttention ends in LayerNorm (~unit scale), but prompt
+            # tokens are initialized at std=0.02 to match CLIP's expected
+            # activation range -> rescale mod to own's per-token norm so gate
+            # actually controls the blend ratio instead of being swamped by a
+            # ~50x scale mismatch (own is (n_ctx,1), mod is (B,n_ctx,1) -- broadcasts).
+            own_norm = layer.norm(dim=-1, keepdim=True)  # (n_ctx, 1)
+            mod_norm = mod.norm(dim=-1, keepdim=True)  # (B, n_ctx, 1)
+            mod = mod * (own_norm / (mod_norm + 1e-6))
+            blended.append((1 - gate) * own + gate * mod)
+
+        gate_values = [g.item() for g in gates]
+        return blended[0], blended[1:], gate_values
+
+
 class TextPromptLearner(nn.Module):
     """Deep prompt learner for one text branch (photo or sketch), plus the
     fixed prefix/suffix token embeddings needed to build a prompt per class.

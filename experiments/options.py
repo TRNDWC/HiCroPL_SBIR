@@ -54,6 +54,8 @@ parser.add_argument('--ctx_init_sketch', type=str, default='a sketch of a', help
 parser.add_argument('--temperature', type=float, default=0.07, help='Temperature for InfoNCE Loss')
 parser.add_argument('--lambda_cross_modal', type=float, default=1.0, help='Weight for sketch-photo InfoNCE alignment')
 parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for prompted visual-text classification loss')
+parser.add_argument('--use_content_cond', action='store_true', help='[H2] Condition sketch prompt on this batch\'s photo embedding via cross-attention gate (photo branch unchanged)')
+parser.add_argument('--content_dropout_prob', type=float, default=0.4, help='[H2] Probability of withholding the photo descriptor during training (modality dropout), so the gate copes with the no-photo case at retrieval time')
 
 # CLIP design_details (CoPrompt-style builder config)
 parser.add_argument('--clip_trainer', type=str, default='HiCroPL', help='Trainer key for CLIP block routing')
