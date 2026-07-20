@@ -55,14 +55,9 @@ def loss_fn_hicropl(args, features):
     loss_ce_sketch = F.cross_entropy(logits_sketch, label)
     loss_cls = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
-    # --- L_triplet: sketch anchor, photo positive, negative photo ---
-    distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
-    triplet_fn = nn.TripletMarginWithDistanceLoss(distance_function=distance_fn, margin=triplet_margin)
-    loss_triplet = triplet_fn(sketch_feat, photo_feat, neg_feat)
-
     # --- L_nt_xent: cross-modal alignment ---
     loss_nt_xent = lambda_cross_modal * nt_xent_loss(photo_feat, sketch_feat, temperature)
 
-    total_loss = loss_cls + loss_triplet + loss_nt_xent
+    total_loss = loss_cls + loss_nt_xent
 
     return total_loss
