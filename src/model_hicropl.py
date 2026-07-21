@@ -70,6 +70,21 @@ class CustomCLIP(nn.Module):
         self.clip_sketch.apply(freeze_all_but_bn)
         self.clip_photo.apply(freeze_all_but_bn)
 
+        # Optional: fully freeze the CLIP text backbone (transformer,
+        # token_embedding, ln_final, positional_embedding, text_projection),
+        # overriding freeze_all_but_bn's LN-stays-trainable behavior for text
+        # only -- visual branch is untouched. Prompt learner tokens
+        # (text_prompt_photo/sketch) are separate modules, unaffected, still
+        # trainable -- this only removes the CLIP text backbone's own capacity.
+        self.freeze_text = getattr(cfg, 'freeze_text', False)
+        if self.freeze_text:
+            for clip_branch in (self.clip_photo, self.clip_sketch):
+                freeze_model(clip_branch.transformer)
+                freeze_model(clip_branch.token_embedding)
+                freeze_model(clip_branch.ln_final)
+                clip_branch.positional_embedding.requires_grad_(False)
+                clip_branch.text_projection.requires_grad_(False)
+
         # Print trainable param counts per branch for verification
         def _count_trainable(m):
             total = 0

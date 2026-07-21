@@ -50,6 +50,7 @@ parser.add_argument('--vision_depth', type=int, default=1, help='Number of ViT l
 parser.add_argument('--text_depth', type=int, default=1, help='Number of text transformer layers with learnable prompt injection')
 parser.add_argument('--cross_layer', type=int, default=4, help='Layer at which bidirectional flow switches direction')
 parser.add_argument('--use_visual_exchange', action='store_true', help='Enable HiCroPL-style photo<->sketch prompt exchange: [0,cross_layer) sketch->photo, [cross_layer,vision_depth) photo->sketch, no gate yet')
+parser.add_argument('--freeze_text', action='store_true', help='Fully freeze the CLIP text backbone (transformer, token_embedding, ln_final, positional_embedding, text_projection) for both photo/sketch branches -- overrides freeze_all_but_bn for text only. Text prompt learner tokens stay trainable.')
 parser.add_argument('--ctx_init', type=str, default='a photo of a', help='Initial text context for photo prompt learner')
 parser.add_argument('--ctx_init_sketch', type=str, default='a sketch of a', help='Initial text context for sketch prompt learner')
 parser.add_argument('--temperature', type=float, default=0.07, help='Temperature for InfoNCE Loss')
