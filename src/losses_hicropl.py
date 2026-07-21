@@ -25,14 +25,33 @@ def nt_xent_loss(features_view1, features_view2, temperature):
 
     return F.cross_entropy(logits, labels)
 
+def coral_loss(source, target):
+    """Deep CORAL (Sun & Saenko, ECCV-W 2016): align 2nd-order statistics
+    (feature covariance) between two domain batches.
+
+        L_CORAL = 1 / (4 d^2) * || C_source - C_target ||_F^2
+
+    source, target: (B, D) each -- does not require paired/same-size batches
+    beyond matching D. Meant to close the CLIP "cone effect" / modality gap
+    between photo and sketch batch distributions, upstream of whatever
+    cross-domain prompt exchange consumes them.
+    """
+    d = source.shape[1]
+    source_c = source - source.mean(dim=0, keepdim=True)
+    target_c = target - target.mean(dim=0, keepdim=True)
+    cov_source = source_c.t() @ source_c / (source.shape[0] - 1)
+    cov_target = target_c.t() @ target_c / (target.shape[0] - 1)
+    return (cov_source - cov_target).pow(2).sum() / (4 * d * d)
+
+
 def loss_fn_hicropl(args, features):
     """
     Combined Loss Function for HiCroPL-SBIR.
 
     Loss Components:
     L_cls: Cross-Entropy (text - photo) + (text - sketch) - Classification
-    L_triplet: Sketch-photo-negative triplet (cosine distance)
     L_nt_xent: NT-Xent (photo + sketch pool) - cross-modal alignment
+    L_coral: Deep CORAL - align photo/sketch batch covariance (domain gap)
     """
     (
         photo_feat, logits_photo,
@@ -48,7 +67,7 @@ def loss_fn_hicropl(args, features):
     temperature = getattr(args, 'temperature', 0.07)
     lambda_cross_modal = getattr(args, 'lambda_cross_modal', 1.0)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
-    triplet_margin = getattr(args, 'triplet_margin', 0.3)
+    lambda_coral = getattr(args, 'lambda_coral', 0.0)
 
     # --- L_cls: classification ---
     loss_ce_photo = F.cross_entropy(logits_photo, label)
@@ -59,5 +78,9 @@ def loss_fn_hicropl(args, features):
     loss_nt_xent = lambda_cross_modal * nt_xent_loss(photo_feat, sketch_feat, temperature)
 
     total_loss = loss_cls + loss_nt_xent
+
+    # --- L_coral: close the photo/sketch domain gap (off by default) ---
+    if lambda_coral > 0:
+        total_loss = total_loss + lambda_coral * coral_loss(photo_feat, sketch_feat)
 
     return total_loss

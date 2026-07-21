@@ -1,19 +1,52 @@
 """
-Simple deep prompt learning for ZS-SBIR: one learnable token set per transformer
-layer, no cross-modal exchange. Depth is independent per branch:
-    --vision_depth  -> number of ViT layers (photo AND sketch) with a prompt
-    --text_depth    -> number of text transformer layers (photo AND sketch) with a prompt
+Deep prompt learning for ZS-SBIR.
+
+Text branch (photo/sketch): independent per-layer learnable tokens, no exchange.
+    --text_depth -> number of text transformer layers (photo AND sketch) with a prompt
+
+Visual branch (photo/sketch): reuses HiCroPL's original exchange machinery
+(AttentionPooling + CrossPromptAttention, https://github.com/zzeoZheng/HiCroPL)
+verbatim, applied photo<->sketch instead of text<->image, with a fixed
+directional split (no gate for now):
+    [0, cross_layer)      : sketch -> photo
+    [cross_layer, depth)  : photo -> sketch
+Each direction compresses the source branch's per-layer prompt into a single
+proxy token (AttentionPooling), then cross-attends the target branch's own
+prompt onto that proxy (CrossPromptAttention) to produce the target's new
+prompt for that layer -- a full replacement, matching the original HiCroPL
+design (no learned blend gate yet). Unlike the original HiCroPL code (which
+used an in-place `.data.copy_()` to swap prompt values -- that detaches from
+autograd, so the mapper networks never receive gradient), this version keeps
+the whole thing on the normal autograd graph via plain reassignment, so
+sketch2photo_net/photo2sketch_net/the AttentionPooling nets are actually
+trained by the main loss.
 
 Components:
-    - DeepPromptLearner: generic per-layer learnable token container
-    - VisualPromptLearner: wraps DeepPromptLearner for one visual branch
+    - DeepPromptLearner: generic per-layer learnable token container (text only)
     - TextPromptLearner: wraps DeepPromptLearner for one text branch + per-class prompts
+    - VisualPromptLearner: independent per-branch visual prompts (used when
+      --use_visual_exchange is off)
+    - AttentionPooling: compress a layer's prompt sequence into one proxy token
+    - CrossPromptAttention: cross-attend target branch's prompt onto source's proxy
+    - VisualVisualPromptLearner: owns both visual branches' prompts + the exchange
     - TextEncoder / VisualEncoder: thin wrappers feeding prompts into CLIP's
       per-layer injection mechanism (ResidualAttentionBlock_HiCroPL)
 """
 
+from collections import OrderedDict
+
 import torch
 import torch.nn as nn
+
+
+class QuickGELU(nn.Module):
+    def forward(self, x: torch.Tensor):
+        return x * torch.sigmoid(1.702 * x)
+
+
+def _get_clones(module, n):
+    import copy
+    return nn.ModuleList([copy.deepcopy(module) for _ in range(n)])
 
 
 class DeepPromptLearner(nn.Module):
@@ -63,95 +96,133 @@ class VisualPromptLearner(nn.Module):
         return self.learner()
 
 
-class ContentCrossAttention(nn.Module):
-    """Cross-attend one layer's static prompt tokens (query) onto a per-sample
-    content descriptor (single-token key/value), producing a per-sample
-    modulated prompt. Unlike self/pooling attention over a static bank, the
-    key/value sequence length is 1 (the descriptor), so this is effectively a
-    per-sample FiLM-style modulation of the query's own tokens.
+class AttentionPooling(nn.Module):
+    """Compress a sequence of prompt tokens into a single proxy token.
+    Reused verbatim from HiCroPL's LKP (learnable key pooling)."""
+
+    def __init__(self, hidden_size, num_attention_heads):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_attention_heads)
+        self.ln_1 = nn.LayerNorm(hidden_size)
+        self.ln_2 = nn.LayerNorm(hidden_size)
+
+    def forward(self, token_query, sequence_key, sequence_value):
+        token_query = token_query + self.attn(
+            self.ln_1(token_query), self.ln_1(sequence_key), self.ln_1(sequence_value), need_weights=False
+        )[0]
+        token_query = self.ln_2(token_query)
+        return token_query
+
+
+class CrossPromptAttention(nn.Module):
+    """Cross-attend a target branch's own prompt (query) onto a source
+    branch's proxy token (key/value), producing the target's new prompt for
+    that layer. Reused verbatim from HiCroPL's knowledge mapper network."""
+
+    def __init__(self, hidden_size, encoder_hidden_size, num_attention_heads):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_attention_heads)
+        # hidden_size is Q's dim, encoder_hidden_size is K/V's dim
+        self.linear_q = nn.Linear(hidden_size, hidden_size)
+        self.linear_k = nn.Linear(encoder_hidden_size, hidden_size)
+        self.linear_v = nn.Linear(encoder_hidden_size, hidden_size)
+        self.ln_1 = nn.LayerNorm(hidden_size)
+        self.ffn = nn.Sequential(OrderedDict([
+            ("c_fc", nn.Linear(hidden_size, hidden_size * 4)),
+            ("gelu", QuickGELU()),
+            ("c_proj", nn.Linear(hidden_size * 4, hidden_size)),
+        ]))
+        self.ln_2 = nn.LayerNorm(hidden_size)
+
+    def forward(self, q, k, v):
+        q_proj = self.linear_q(q)
+        k_proj = self.linear_k(k)
+        v_proj = self.linear_v(v)
+        q_proj = q_proj + self.attn(self.ln_1(q_proj), self.ln_1(k_proj), self.ln_1(v_proj), need_weights=False)[0]
+        q_proj = q_proj + self.ffn(self.ln_2(q_proj))
+        return q_proj
+
+
+class VisualVisualPromptLearner(nn.Module):
+    """Per-layer learnable tokens for both visual branches (photo, sketch),
+    with a directional cross-domain exchange split at `cross_layer`:
+        [0, cross_layer)      : sketch -> photo
+        [cross_layer, depth)  : photo -> sketch
+    No gate yet -- full replacement of the target's prompt with the mapped
+    value at each layer in its zone (matches original HiCroPL; a learned
+    blend gate can be added later once this directional split is validated).
     """
 
-    def __init__(self, prompt_dim, descriptor_dim, num_heads=8):
+    def __init__(self, cfg, clip_model_photo, clip_model_sketch):
         super().__init__()
-        self.linear_k = nn.Linear(descriptor_dim, prompt_dim)
-        self.linear_v = nn.Linear(descriptor_dim, prompt_dim)
-        self.attn = nn.MultiheadAttention(embed_dim=prompt_dim, num_heads=num_heads)
-        self.ln_q = nn.LayerNorm(prompt_dim)
-        self.ln_out = nn.LayerNorm(prompt_dim)
+        self.depth = getattr(cfg, 'vision_depth', 1)
+        self.cross_layer = getattr(cfg, 'cross_layer', max(1, self.depth // 2))
+        n_ctx = getattr(cfg, 'n_ctx', 4)
 
-    def forward(self, query, descriptor):
-        """
-        query: (n_ctx, dim) -- this layer's own static prompt tokens
-        descriptor: (B, descriptor_dim) -- per-sample content descriptor
-        returns: (B, n_ctx, dim) -- per-sample modulated prompt
-        """
-        B = descriptor.shape[0]
-        q = self.ln_q(query).unsqueeze(1).expand(-1, B, -1)  # (n_ctx, B, dim)
-        k = self.linear_k(descriptor).unsqueeze(0)  # (1, B, dim)
-        v = self.linear_v(descriptor).unsqueeze(0)  # (1, B, dim)
-        out, _ = self.attn(q, k, v, need_weights=False)  # (n_ctx, B, dim)
-        out = self.ln_out(out)
-        return out.permute(1, 0, 2)  # (B, n_ctx, dim)
+        assert 0 < self.cross_layer < self.depth, (
+            f"cross_layer ({self.cross_layer}) must be strictly between 0 and "
+            f"vision_depth ({self.depth}) so both zones (sketch->photo, photo->sketch) are non-empty."
+        )
 
+        dtype = clip_model_photo.dtype
+        p_dim = clip_model_photo.visual.conv1.weight.shape[0]
+        s_dim = clip_model_sketch.visual.conv1.weight.shape[0]
+        assert p_dim == s_dim, "Both branches must share the same embedding dim"
 
-class VisualPromptLearnerConditioned(nn.Module):
-    """Deep prompt learner for the sketch branch: the usual static per-layer
-    tokens (inherited from VisualPromptLearner), plus an optional per-sample
-    modulation driven by a photo content descriptor (H2 hypothesis).
+        self.dtype = dtype
+        self.n_ctx = n_ctx
 
-    forward(descriptor=None):
-        descriptor is None   -> (shallow, deeper), same 2-tuple as
-                                 VisualPromptLearner (static only, used at
-                                 eval time and under modality dropout, since a
-                                 query sketch has no paired photo at retrieval
-                                 time).
-        descriptor (B, D)    -> (shallow, deeper, gate_values), where shallow
-                                 is (B, n_ctx, dim) and each deeper layer is
-                                 (B, n_ctx, dim) -- per-sample blend of the
-                                 static prompt and a cross-attention modulation
-                                 conditioned on descriptor. CLIP's own prompt
-                                 injection (VisionTransformer_HiCroPL.forward,
-                                 ResidualAttentionBlock_HiCroPL.forward) already
-                                 handles a per-sample (B, n_ctx, dim) prompt
-                                 correctly via a no-op expand() when the batch
-                                 dim already matches, so no changes are needed
-                                 there.
-    """
+        def _init_layers(depth, dim):
+            layers = []
+            for _ in range(depth):
+                v = nn.Parameter(torch.empty(n_ctx, dim, dtype=dtype))
+                nn.init.normal_(v, std=0.02)
+                layers.append(v)
+            return nn.ParameterList(layers)
 
-    def __init__(self, cfg, clip_model):
-        super().__init__()
-        self.base = VisualPromptLearner(cfg, clip_model)
-        depth = getattr(cfg, 'vision_depth', 1)
-        prompt_dim = clip_model.visual.conv1.weight.shape[0]
-        descriptor_dim = clip_model.visual.proj.shape[1]
-        self.cross_attn = nn.ModuleList([
-            ContentCrossAttention(prompt_dim, descriptor_dim) for _ in range(depth)
+        self.own_prompts_photo = _init_layers(self.depth, p_dim)
+        self.own_prompts_sketch = _init_layers(self.depth, s_dim)
+
+        # Direction 1: sketch -> photo, zone [0, cross_layer)
+        self.sketch2photo_net = CrossPromptAttention(hidden_size=p_dim, encoder_hidden_size=s_dim, num_attention_heads=8)
+        self.attn_pool_sketch_shallow = _get_clones(AttentionPooling(s_dim, 8), self.cross_layer)
+        self.proxy_sketch_shallow = nn.ParameterList([
+            nn.Parameter(torch.randn(1, s_dim, dtype=dtype) * 0.02) for _ in range(self.cross_layer)
         ])
-        self.gate_logit = nn.Parameter(torch.zeros(depth, dtype=clip_model.dtype))
 
-    def forward(self, descriptor=None):
-        shallow, deeper = self.base()
-        if descriptor is None:
-            return shallow, deeper
+        # Direction 2: photo -> sketch, zone [cross_layer, depth)
+        self.photo2sketch_net = CrossPromptAttention(hidden_size=s_dim, encoder_hidden_size=p_dim, num_attention_heads=8)
+        self.attn_pool_photo_deep = _get_clones(AttentionPooling(p_dim, 8), self.depth - self.cross_layer)
+        self.proxy_photo_deep = nn.ParameterList([
+            nn.Parameter(torch.randn(1, p_dim, dtype=dtype) * 0.02) for _ in range(self.depth - self.cross_layer)
+        ])
 
-        layers = [shallow] + deeper
-        gates = torch.sigmoid(self.gate_logit)
-        blended = []
-        for layer, cross_attn, gate in zip(layers, self.cross_attn, gates):
-            own = layer.unsqueeze(0).expand(descriptor.shape[0], -1, -1)  # (B, n_ctx, dim)
-            mod = cross_attn(layer, descriptor)  # (B, n_ctx, dim)
-            # ContentCrossAttention ends in LayerNorm (~unit scale), but prompt
-            # tokens are initialized at std=0.02 to match CLIP's expected
-            # activation range -> rescale mod to own's per-token norm so gate
-            # actually controls the blend ratio instead of being swamped by a
-            # ~50x scale mismatch (own is (n_ctx,1), mod is (B,n_ctx,1) -- broadcasts).
-            own_norm = layer.norm(dim=-1, keepdim=True)  # (n_ctx, 1)
-            mod_norm = mod.norm(dim=-1, keepdim=True)  # (B, n_ctx, 1)
-            mod = mod * (own_norm / (mod_norm + 1e-6))
-            blended.append((1 - gate) * own + gate * mod)
+    def forward(self):
+        photo_prompts = list(self.own_prompts_photo)
+        sketch_prompts = list(self.own_prompts_sketch)
 
-        gate_values = [g.item() for g in gates]
-        return blended[0], blended[1:], gate_values
+        # --- sketch -> photo: zone [0, cross_layer) ---
+        for i in range(self.cross_layer):
+            proxy_sketch = self.attn_pool_sketch_shallow[i](
+                token_query=self.proxy_sketch_shallow[i],
+                sequence_key=self.own_prompts_sketch[i],
+                sequence_value=self.own_prompts_sketch[i],
+            )
+            photo_prompts[i] = self.sketch2photo_net(self.own_prompts_photo[i], proxy_sketch, proxy_sketch)
+
+        # --- photo -> sketch: zone [cross_layer, depth) ---
+        for i in range(self.cross_layer, self.depth):
+            j = i - self.cross_layer
+            proxy_photo = self.attn_pool_photo_deep[j](
+                token_query=self.proxy_photo_deep[j],
+                sequence_key=self.own_prompts_photo[i],
+                sequence_value=self.own_prompts_photo[i],
+            )
+            sketch_prompts[i] = self.photo2sketch_net(self.own_prompts_sketch[i], proxy_photo, proxy_photo)
+
+        photo_shallow, photo_deeper = photo_prompts[0], photo_prompts[1:]
+        sketch_shallow, sketch_deeper = sketch_prompts[0], sketch_prompts[1:]
+        return photo_shallow, sketch_shallow, photo_deeper, sketch_deeper
 
 
 class TextPromptLearner(nn.Module):
