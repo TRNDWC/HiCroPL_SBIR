@@ -11,8 +11,8 @@ from src.hicropl import (
     VisualPromptLearner,
     VisualVisualPromptLearner,
     TextPromptLearner,
-    TextSubspaceRegularizer,
 )
+from src.factorization_reg import build_for_sbir
 
 
 def freeze_model(m):
@@ -135,12 +135,13 @@ class CustomCLIP(nn.Module):
         self.visual_encoder_photo = VisualEncoder(self.clip_photo)
         self.visual_encoder_sketch = VisualEncoder(self.clip_sketch)
 
-        # -- Text subspace-leak regularizer (off by default: --lambda_leak=0) --
-        # No learnable params -- frozen M/S computed once here from the
-        # untrained backbone. See TextSubspaceRegularizer docstring.
-        self.use_text_leak_reg = getattr(cfg, 'lambda_leak', 0.0) > 0
+        # -- Modality-semantic factorization regularizer (L_leak + L_par) --
+        # off by default: --lambda_leak=0 and --lambda_par=0. No learnable
+        # params -- frozen M/S computed once here from the untrained backbone
+        # and an ImageNet-1k vocabulary. See src/factorization_reg.py.
+        self.use_text_leak_reg = getattr(cfg, 'lambda_leak', 0.0) > 0 or getattr(cfg, 'lambda_par', 0.0) > 0
         if self.use_text_leak_reg:
-            self.text_subspace_reg = TextSubspaceRegularizer(cfg, self.clip_photo, self.clip_sketch, classnames)
+            self.factorization_reg = build_for_sbir(cfg, self.clip_photo, self.clip_sketch, classnames)
 
     def normalize_features(self, feat_prenorm):
         """L2-normalize feature tensors."""
@@ -256,8 +257,17 @@ class HiCroPL_SBIR(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         from src.losses_hicropl import loss_fn_hicropl
         features = self.model(batch, self.classnames)
-        text_subspace_reg = getattr(self.model, 'text_subspace_reg', None)
-        loss = loss_fn_hicropl(self.args, features, text_subspace_reg=text_subspace_reg)
+        loss = loss_fn_hicropl(self.args, features)
+
+        factorization_reg = getattr(self.model, 'factorization_reg', None)
+        if factorization_reg is not None:
+            text_feat_photo_raw, text_feat_sketch_raw = features[-2], features[-1]
+            class_ids = torch.arange(text_feat_photo_raw.shape[0], device=text_feat_photo_raw.device)
+            extra, info = factorization_reg(text_feat_photo_raw, text_feat_sketch_raw, class_ids, self.global_step)
+            loss = loss + extra
+            self.log('l_leak', info['l_leak'], on_step=False, on_epoch=True, logger=True)
+            self.log('l_par', info['l_par'], on_step=False, on_epoch=True, logger=True)
+            self.log('reg_ramp', info['ramp'], on_step=False, on_epoch=True, prog_bar=True, logger=True)
 
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
         self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False, logger=False)

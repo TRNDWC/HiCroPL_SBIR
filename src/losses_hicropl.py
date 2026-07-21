@@ -44,7 +44,7 @@ def coral_loss(source, target):
     return (cov_source - cov_target).pow(2).sum() / (4 * d * d)
 
 
-def loss_fn_hicropl(args, features, text_subspace_reg=None):
+def loss_fn_hicropl(args, features):
     """
     Combined Loss Function for HiCroPL-SBIR.
 
@@ -52,9 +52,11 @@ def loss_fn_hicropl(args, features, text_subspace_reg=None):
     L_cls: Cross-Entropy (text - photo) + (text - sketch) - Classification
     L_nt_xent: NT-Xent (photo + sketch pool) - cross-modal alignment
     L_coral: Deep CORAL - align photo/sketch batch covariance (domain gap)
-    L_leak: subspace-leak regularizer - penalize prompt drift into the
-            semantic subspace S (orthogonal to the modality axis M), off by
-            default. See TextSubspaceRegularizer in src/hicropl.py.
+
+    L_leak/L_par (modality-semantic factorization regularizer) are computed
+    separately in HiCroPL_SBIR.training_step, not here -- they need
+    self.global_step (warmup ramp) and self.log, which this function doesn't
+    have access to. See src/factorization_reg.py.
     """
     (
         photo_feat, logits_photo,
@@ -72,7 +74,6 @@ def loss_fn_hicropl(args, features, text_subspace_reg=None):
     lambda_cross_modal = getattr(args, 'lambda_cross_modal', 1.0)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
     lambda_coral = getattr(args, 'lambda_coral', 0.0)
-    lambda_leak = getattr(args, 'lambda_leak', 0.0)
 
     # --- L_cls: classification ---
     loss_ce_photo = F.cross_entropy(logits_photo, label)
@@ -87,10 +88,5 @@ def loss_fn_hicropl(args, features, text_subspace_reg=None):
     # --- L_coral: close the photo/sketch domain gap (off by default) ---
     if lambda_coral > 0:
         total_loss = total_loss + lambda_coral * coral_loss(photo_feat, sketch_feat)
-
-    # --- L_leak: penalize prompt drift into the semantic subspace (off by default) ---
-    if lambda_leak > 0 and text_subspace_reg is not None:
-        leak = text_subspace_reg.leak_loss(text_feat_photo_raw, text_feat_sketch_raw)
-        total_loss = total_loss + lambda_leak * leak
 
     return total_loss

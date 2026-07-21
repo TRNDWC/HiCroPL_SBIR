@@ -145,12 +145,20 @@ class CrossPromptAttention(nn.Module):
 
 class VisualVisualPromptLearner(nn.Module):
     """Per-layer learnable tokens for both visual branches (photo, sketch),
-    with a directional cross-domain exchange split at `cross_layer`:
-        [0, cross_layer)      : sketch -> photo
-        [cross_layer, depth)  : photo -> sketch
-    No gate yet -- full replacement of the target's prompt with the mapped
-    value at each layer in its zone (matches original HiCroPL; a learned
-    blend gate can be added later once this directional split is validated).
+    with a directional cross-domain exchange split at `cross_layer`. No gate
+    -- full replacement of the target's prompt with the mapped value at each
+    layer in its zone (matches original HiCroPL).
+
+    Direction controlled by --exchange_photo_first (default False):
+        False (default -- empirically +0.34 mAP over no-exchange baseline):
+            [0, cross_layer)      : sketch -> photo
+            [cross_layer, depth)  : photo -> sketch
+        True (the direction originally tried WITH a learned gate, which
+              failed -- this flag isolates whether direction or gate-removal
+              explains the improvement, by testing the same direction
+              without a gate):
+            [0, cross_layer)      : photo -> sketch
+            [cross_layer, depth)  : sketch -> photo
     """
 
     def __init__(self, cfg, clip_model_photo, clip_model_sketch):
@@ -158,10 +166,11 @@ class VisualVisualPromptLearner(nn.Module):
         self.depth = getattr(cfg, 'vision_depth', 1)
         self.cross_layer = getattr(cfg, 'cross_layer', max(1, self.depth // 2))
         n_ctx = getattr(cfg, 'n_ctx', 4)
+        self.photo_first = getattr(cfg, 'exchange_photo_first', False)
 
         assert 0 < self.cross_layer < self.depth, (
             f"cross_layer ({self.cross_layer}) must be strictly between 0 and "
-            f"vision_depth ({self.depth}) so both zones (sketch->photo, photo->sketch) are non-empty."
+            f"vision_depth ({self.depth}) so both zones are non-empty."
         )
 
         dtype = clip_model_photo.dtype
@@ -183,38 +192,47 @@ class VisualVisualPromptLearner(nn.Module):
         self.own_prompts_photo = _init_layers(self.depth, p_dim)
         self.own_prompts_sketch = _init_layers(self.depth, s_dim)
 
-        # Direction 1: sketch -> photo, zone [0, cross_layer)
+        zone1_len = self.cross_layer               # [0, cross_layer)
+        zone2_len = self.depth - self.cross_layer   # [cross_layer, depth)
+        # zone1 is photo->sketch if photo_first else sketch->photo; zone2 is the opposite.
+        p2s_len = zone1_len if self.photo_first else zone2_len
+        s2p_len = zone2_len if self.photo_first else zone1_len
+
+        # sketch -> photo direction, applied over s2p_len layers (whichever zone that is)
         self.sketch2photo_net = CrossPromptAttention(hidden_size=p_dim, encoder_hidden_size=s_dim, num_attention_heads=8)
-        self.attn_pool_sketch_shallow = _get_clones(AttentionPooling(s_dim, 8), self.cross_layer)
-        self.proxy_sketch_shallow = nn.ParameterList([
-            nn.Parameter(torch.randn(1, s_dim, dtype=dtype) * 0.02) for _ in range(self.cross_layer)
+        self.attn_pool_sketch = _get_clones(AttentionPooling(s_dim, 8), s2p_len)
+        self.proxy_sketch = nn.ParameterList([
+            nn.Parameter(torch.randn(1, s_dim, dtype=dtype) * 0.02) for _ in range(s2p_len)
         ])
 
-        # Direction 2: photo -> sketch, zone [cross_layer, depth)
+        # photo -> sketch direction, applied over p2s_len layers (whichever zone that is)
         self.photo2sketch_net = CrossPromptAttention(hidden_size=s_dim, encoder_hidden_size=p_dim, num_attention_heads=8)
-        self.attn_pool_photo_deep = _get_clones(AttentionPooling(p_dim, 8), self.depth - self.cross_layer)
-        self.proxy_photo_deep = nn.ParameterList([
-            nn.Parameter(torch.randn(1, p_dim, dtype=dtype) * 0.02) for _ in range(self.depth - self.cross_layer)
+        self.attn_pool_photo = _get_clones(AttentionPooling(p_dim, 8), p2s_len)
+        self.proxy_photo = nn.ParameterList([
+            nn.Parameter(torch.randn(1, p_dim, dtype=dtype) * 0.02) for _ in range(p2s_len)
         ])
 
     def forward(self):
         photo_prompts = list(self.own_prompts_photo)
         sketch_prompts = list(self.own_prompts_sketch)
 
-        # --- sketch -> photo: zone [0, cross_layer) ---
-        for i in range(self.cross_layer):
-            proxy_sketch = self.attn_pool_sketch_shallow[i](
-                token_query=self.proxy_sketch_shallow[i],
+        zone1 = range(0, self.cross_layer)
+        zone2 = range(self.cross_layer, self.depth)
+        p2s_zone, s2p_zone = (zone1, zone2) if self.photo_first else (zone2, zone1)
+
+        # --- sketch -> photo ---
+        for j, i in enumerate(s2p_zone):
+            proxy_sketch = self.attn_pool_sketch[j](
+                token_query=self.proxy_sketch[j],
                 sequence_key=self.own_prompts_sketch[i],
                 sequence_value=self.own_prompts_sketch[i],
             )
             photo_prompts[i] = self.sketch2photo_net(self.own_prompts_photo[i], proxy_sketch, proxy_sketch)
 
-        # --- photo -> sketch: zone [cross_layer, depth) ---
-        for i in range(self.cross_layer, self.depth):
-            j = i - self.cross_layer
-            proxy_photo = self.attn_pool_photo_deep[j](
-                token_query=self.proxy_photo_deep[j],
+        # --- photo -> sketch ---
+        for j, i in enumerate(p2s_zone):
+            proxy_photo = self.attn_pool_photo[j](
+                token_query=self.proxy_photo[j],
                 sequence_key=self.own_prompts_photo[i],
                 sequence_value=self.own_prompts_photo[i],
             )
@@ -223,97 +241,6 @@ class VisualVisualPromptLearner(nn.Module):
         photo_shallow, photo_deeper = photo_prompts[0], photo_prompts[1:]
         sketch_shallow, sketch_deeper = sketch_prompts[0], sketch_prompts[1:]
         return photo_shallow, sketch_shallow, photo_deeper, sketch_deeper
-
-
-class TextSubspaceRegularizer(nn.Module):
-    """Subspace-separation regularizer for text prompt drift.
-
-    For each class, Delta = (prompted text feature) - (frozen zero-shot text
-    feature for the hand-written template, no learnable prompt) decomposes
-    into two orthogonal pieces:
-        M -- "modality axis": the ~one shared direction separating "a sketch
-             of a X" from "a photo of a X" in frozen CLIP text space,
-             estimated once from frozen embeddings across all seen
-             classnames. Movement of Delta along M is legitimate sketch/photo
-             adaptation -- left free, not penalized.
-        S -- "semantic subspace": the span of "what category is this"
-             directions among frozen photo-template class embeddings,
-             explicitly orthogonalized against M (Gram-Schmidt) so the two
-             never overlap. Movement of Delta along S means the prompt is
-             quietly rewriting what categories mean -- penalized, since
-             unseen classes at test time rely on that meaning being intact.
-
-    L_leak = ||P_S Delta||^2, summed over classes, for each branch.
-    No learnable parameters -- M/S are computed once from the frozen backbone
-    at construction time and cached as buffers.
-
-    Caveat: frozen reference embeddings are computed by running the literal
-    hand-written template ("a photo of a X.") through the plain CLIP text
-    pipeline with an empty deeper-prompt list. This is only valid when
-    text_depth == 1 (the depth used throughout this project so far) --
-    with text_depth > 1, deeper-layer prompt injection is wired into the
-    resblocks at construction time and can't be cleanly bypassed at runtime,
-    so this is asserted rather than silently computing a wrong target.
-    """
-
-    def __init__(self, cfg, clip_photo, clip_sketch, classnames):
-        super().__init__()
-        text_depth = getattr(cfg, 'text_depth', 1)
-        assert text_depth == 1, (
-            f"TextSubspaceRegularizer's frozen-reference encoding is only valid for "
-            f"text_depth=1 (got {text_depth}) -- deeper-layer prompt injection can't be "
-            f"cleanly bypassed at runtime for text_depth > 1."
-        )
-
-        with torch.no_grad():
-            frozen_photo = self._encode_frozen(clip_photo, classnames, getattr(cfg, 'ctx_init', 'a photo of a'))
-            frozen_sketch = self._encode_frozen(clip_sketch, classnames, getattr(cfg, 'ctx_init_sketch', 'a sketch of a'))
-
-            # M: shared modality-shift direction, averaged over classes, unit norm.
-            m = (frozen_sketch - frozen_photo).mean(dim=0)
-            m = m / (m.norm() + 1e-6)
-
-            # S: semantic subspace from centered photo-template embeddings,
-            # with M explicitly removed before the SVD (belt-and-suspenders on
-            # top of using only the orthogonal complement of M below).
-            centered = frozen_photo - frozen_photo.mean(dim=0, keepdim=True)
-            centered = centered - torch.outer(centered @ m, m)
-            _, s, vt = torch.linalg.svd(centered.float(), full_matrices=False)
-            rank = max(1, int((s > 1e-4 * s[0]).sum().item()))
-            basis = vt[:rank].to(frozen_photo.dtype)  # (rank, D), orthonormal, already _|_ M
-
-        self.register_buffer('frozen_photo', frozen_photo)
-        self.register_buffer('frozen_sketch', frozen_sketch)
-        self.register_buffer('modality_axis', m)
-        self.register_buffer('semantic_basis', basis)
-
-    @staticmethod
-    def _encode_frozen(clip_model, classnames, template):
-        from src.clip import clip as _clip
-
-        template = template.replace("_", " ")
-        prompts = [f"{template} {name.replace('_', ' ')}." for name in classnames]
-        tokenized = torch.cat([_clip.tokenize(p) for p in prompts])
-        tokenized = tokenized.to(clip_model.token_embedding.weight.device)
-        dtype = clip_model.dtype
-
-        x = clip_model.token_embedding(tokenized).type(dtype)
-        x = x + clip_model.positional_embedding.type(dtype)
-        x = x.permute(1, 0, 2)  # NLD -> LND
-        x = clip_model.transformer([x, []])[0]
-        x = x.permute(1, 0, 2)  # LND -> NLD
-        x = clip_model.ln_final(x).type(dtype)
-        x = x[torch.arange(x.shape[0]), tokenized.argmax(dim=-1)] @ clip_model.text_projection
-        return x
-
-    def leak_loss(self, text_feat_photo_raw, text_feat_sketch_raw):
-        """text_feat_*_raw: (C, D), pre-normalization prompted text features
-        for all classes (same ones frozen_photo/frozen_sketch were built from)."""
-        delta_photo = text_feat_photo_raw - self.frozen_photo
-        delta_sketch = text_feat_sketch_raw - self.frozen_sketch
-        leak_photo = delta_photo @ self.semantic_basis.t()   # (C, rank)
-        leak_sketch = delta_sketch @ self.semantic_basis.t()
-        return leak_photo.pow(2).sum(dim=-1).mean() + leak_sketch.pow(2).sum(dim=-1).mean()
 
 
 class TextPromptLearner(nn.Module):
