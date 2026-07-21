@@ -44,7 +44,7 @@ def coral_loss(source, target):
     return (cov_source - cov_target).pow(2).sum() / (4 * d * d)
 
 
-def loss_fn_hicropl(args, features):
+def loss_fn_hicropl(args, features, text_subspace_reg=None):
     """
     Combined Loss Function for HiCroPL-SBIR.
 
@@ -52,12 +52,16 @@ def loss_fn_hicropl(args, features):
     L_cls: Cross-Entropy (text - photo) + (text - sketch) - Classification
     L_nt_xent: NT-Xent (photo + sketch pool) - cross-modal alignment
     L_coral: Deep CORAL - align photo/sketch batch covariance (domain gap)
+    L_leak: subspace-leak regularizer - penalize prompt drift into the
+            semantic subspace S (orthogonal to the modality axis M), off by
+            default. See TextSubspaceRegularizer in src/hicropl.py.
     """
     (
         photo_feat, logits_photo,
         sketch_feat, logits_sketch,
         neg_feat, label,
         text_feat_photo, text_feat_sketch,
+        text_feat_photo_raw, text_feat_sketch_raw,
     ) = features
 
     device = logits_photo.device
@@ -68,6 +72,7 @@ def loss_fn_hicropl(args, features):
     lambda_cross_modal = getattr(args, 'lambda_cross_modal', 1.0)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
     lambda_coral = getattr(args, 'lambda_coral', 0.0)
+    lambda_leak = getattr(args, 'lambda_leak', 0.0)
 
     # --- L_cls: classification ---
     loss_ce_photo = F.cross_entropy(logits_photo, label)
@@ -82,5 +87,10 @@ def loss_fn_hicropl(args, features):
     # --- L_coral: close the photo/sketch domain gap (off by default) ---
     if lambda_coral > 0:
         total_loss = total_loss + lambda_coral * coral_loss(photo_feat, sketch_feat)
+
+    # --- L_leak: penalize prompt drift into the semantic subspace (off by default) ---
+    if lambda_leak > 0 and text_subspace_reg is not None:
+        leak = text_subspace_reg.leak_loss(text_feat_photo_raw, text_feat_sketch_raw)
+        total_loss = total_loss + lambda_leak * leak
 
     return total_loss

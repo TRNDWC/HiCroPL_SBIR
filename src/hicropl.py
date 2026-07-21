@@ -225,6 +225,97 @@ class VisualVisualPromptLearner(nn.Module):
         return photo_shallow, sketch_shallow, photo_deeper, sketch_deeper
 
 
+class TextSubspaceRegularizer(nn.Module):
+    """Subspace-separation regularizer for text prompt drift.
+
+    For each class, Delta = (prompted text feature) - (frozen zero-shot text
+    feature for the hand-written template, no learnable prompt) decomposes
+    into two orthogonal pieces:
+        M -- "modality axis": the ~one shared direction separating "a sketch
+             of a X" from "a photo of a X" in frozen CLIP text space,
+             estimated once from frozen embeddings across all seen
+             classnames. Movement of Delta along M is legitimate sketch/photo
+             adaptation -- left free, not penalized.
+        S -- "semantic subspace": the span of "what category is this"
+             directions among frozen photo-template class embeddings,
+             explicitly orthogonalized against M (Gram-Schmidt) so the two
+             never overlap. Movement of Delta along S means the prompt is
+             quietly rewriting what categories mean -- penalized, since
+             unseen classes at test time rely on that meaning being intact.
+
+    L_leak = ||P_S Delta||^2, summed over classes, for each branch.
+    No learnable parameters -- M/S are computed once from the frozen backbone
+    at construction time and cached as buffers.
+
+    Caveat: frozen reference embeddings are computed by running the literal
+    hand-written template ("a photo of a X.") through the plain CLIP text
+    pipeline with an empty deeper-prompt list. This is only valid when
+    text_depth == 1 (the depth used throughout this project so far) --
+    with text_depth > 1, deeper-layer prompt injection is wired into the
+    resblocks at construction time and can't be cleanly bypassed at runtime,
+    so this is asserted rather than silently computing a wrong target.
+    """
+
+    def __init__(self, cfg, clip_photo, clip_sketch, classnames):
+        super().__init__()
+        text_depth = getattr(cfg, 'text_depth', 1)
+        assert text_depth == 1, (
+            f"TextSubspaceRegularizer's frozen-reference encoding is only valid for "
+            f"text_depth=1 (got {text_depth}) -- deeper-layer prompt injection can't be "
+            f"cleanly bypassed at runtime for text_depth > 1."
+        )
+
+        with torch.no_grad():
+            frozen_photo = self._encode_frozen(clip_photo, classnames, getattr(cfg, 'ctx_init', 'a photo of a'))
+            frozen_sketch = self._encode_frozen(clip_sketch, classnames, getattr(cfg, 'ctx_init_sketch', 'a sketch of a'))
+
+            # M: shared modality-shift direction, averaged over classes, unit norm.
+            m = (frozen_sketch - frozen_photo).mean(dim=0)
+            m = m / (m.norm() + 1e-6)
+
+            # S: semantic subspace from centered photo-template embeddings,
+            # with M explicitly removed before the SVD (belt-and-suspenders on
+            # top of using only the orthogonal complement of M below).
+            centered = frozen_photo - frozen_photo.mean(dim=0, keepdim=True)
+            centered = centered - torch.outer(centered @ m, m)
+            _, s, vt = torch.linalg.svd(centered.float(), full_matrices=False)
+            rank = max(1, int((s > 1e-4 * s[0]).sum().item()))
+            basis = vt[:rank].to(frozen_photo.dtype)  # (rank, D), orthonormal, already _|_ M
+
+        self.register_buffer('frozen_photo', frozen_photo)
+        self.register_buffer('frozen_sketch', frozen_sketch)
+        self.register_buffer('modality_axis', m)
+        self.register_buffer('semantic_basis', basis)
+
+    @staticmethod
+    def _encode_frozen(clip_model, classnames, template):
+        from src.clip import clip as _clip
+
+        template = template.replace("_", " ")
+        prompts = [f"{template} {name.replace('_', ' ')}." for name in classnames]
+        tokenized = torch.cat([_clip.tokenize(p) for p in prompts])
+        tokenized = tokenized.to(clip_model.token_embedding.weight.device)
+        dtype = clip_model.dtype
+
+        x = clip_model.token_embedding(tokenized).type(dtype)
+        x = x + clip_model.positional_embedding.type(dtype)
+        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = clip_model.transformer([x, []])[0]
+        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = clip_model.ln_final(x).type(dtype)
+        x = x[torch.arange(x.shape[0]), tokenized.argmax(dim=-1)] @ clip_model.text_projection
+        return x
+
+    def leak_loss(self, text_feat_photo_raw, text_feat_sketch_raw):
+        """text_feat_*_raw: (C, D), pre-normalization prompted text features
+        for all classes (same ones frozen_photo/frozen_sketch were built from)."""
+        delta_photo = text_feat_photo_raw - self.frozen_photo
+        delta_sketch = text_feat_sketch_raw - self.frozen_sketch
+        leak_photo = delta_photo @ self.semantic_basis.t()   # (C, rank)
+        leak_sketch = delta_sketch @ self.semantic_basis.t()
+        return leak_photo.pow(2).sum(dim=-1).mean() + leak_sketch.pow(2).sum(dim=-1).mean()
+
+
 class TextPromptLearner(nn.Module):
     """Deep prompt learner for one text branch (photo or sketch), plus the
     fixed prefix/suffix token embeddings needed to build a prompt per class.

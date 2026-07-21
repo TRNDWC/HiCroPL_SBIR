@@ -57,6 +57,7 @@ parser.add_argument('--temperature', type=float, default=0.07, help='Temperature
 parser.add_argument('--lambda_cross_modal', type=float, default=1.0, help='Weight for sketch-photo InfoNCE alignment')
 parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for prompted visual-text classification loss')
 parser.add_argument('--lambda_coral', type=float, default=0.0, help='Weight for Deep CORAL loss aligning photo/sketch batch covariance (0 = off). Closes the CLIP modality-gap between the two domains before/alongside any cross-domain prompt exchange.')
+parser.add_argument('--lambda_leak', type=float, default=0.0, help='Weight for subspace-leak regularizer on text prompt drift (0 = off). Penalizes the component of prompt drift that falls in the semantic subspace S (orthogonal to the modality axis M), leaving M-aligned (sketch/photo) drift free. Requires --text_depth=1.')
 
 # CLIP design_details (CoPrompt-style builder config)
 parser.add_argument('--clip_trainer', type=str, default='HiCroPL', help='Trainer key for CLIP block routing')

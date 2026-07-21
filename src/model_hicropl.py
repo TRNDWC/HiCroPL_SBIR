@@ -11,6 +11,7 @@ from src.hicropl import (
     VisualPromptLearner,
     VisualVisualPromptLearner,
     TextPromptLearner,
+    TextSubspaceRegularizer,
 )
 
 
@@ -134,6 +135,13 @@ class CustomCLIP(nn.Module):
         self.visual_encoder_photo = VisualEncoder(self.clip_photo)
         self.visual_encoder_sketch = VisualEncoder(self.clip_sketch)
 
+        # -- Text subspace-leak regularizer (off by default: --lambda_leak=0) --
+        # No learnable params -- frozen M/S computed once here from the
+        # untrained backbone. See TextSubspaceRegularizer docstring.
+        self.use_text_leak_reg = getattr(cfg, 'lambda_leak', 0.0) > 0
+        if self.use_text_leak_reg:
+            self.text_subspace_reg = TextSubspaceRegularizer(cfg, self.clip_photo, self.clip_sketch, classnames)
+
     def normalize_features(self, feat_prenorm):
         """L2-normalize feature tensors."""
         return feat_prenorm / feat_prenorm.norm(dim=-1, keepdim=True)
@@ -183,6 +191,7 @@ class CustomCLIP(nn.Module):
             sketch_feat, logits_sketch,
             neg_feat, label,
             text_feat_photo, text_feat_sketch,
+            text_feat_photo_raw, text_feat_sketch_raw,
         )
 
 
@@ -247,7 +256,8 @@ class HiCroPL_SBIR(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         from src.losses_hicropl import loss_fn_hicropl
         features = self.model(batch, self.classnames)
-        loss = loss_fn_hicropl(self.args, features)
+        text_subspace_reg = getattr(self.model, 'text_subspace_reg', None)
+        loss = loss_fn_hicropl(self.args, features, text_subspace_reg=text_subspace_reg)
 
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
         self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False, logger=False)
