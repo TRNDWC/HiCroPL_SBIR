@@ -35,21 +35,6 @@ UNSEEN_CLASSES = {
 
 
         
-def augmented_transform():
-    """Strong augmentation for consistency regularization (CoPrompt-style)"""
-    transform_list = [
-        transforms.RandomResizedCrop(224, scale=(0.85, 1.0)),
-        transforms.RandomHorizontalFlip(0.5),
-        transforms.ToTensor(),
-        transforms.RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ]
-    return transforms.Compose(transform_list)
-
-
-
- 
-
 def normal_transform():
     dataset_transforms = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -71,7 +56,6 @@ class SketchyDataset(torch.utils.data.Dataset):
         self.all_categories = os.listdir(
             os.path.join(self.root, 'sketch'))
         self.transform = normal_transform()
-        self.augmentation = augmented_transform()
 
         if self.mode == "train":
             self.all_categories = list(
@@ -117,10 +101,7 @@ class SketchyDataset(torch.utils.data.Dataset):
         neg_tensor = self.transform(neg_data)
 
         if self.mode == "train":
-            sk_aug_tensor = self.augmentation(sk_data)
-            img_aug_tensor = self.augmentation(img_data)
-
-            return img_tensor, sk_tensor, img_aug_tensor, sk_aug_tensor, neg_tensor, self.all_categories.index(category)
+            return img_tensor, sk_tensor, neg_tensor, self.all_categories.index(category)
 
         else:
             return sk_tensor, sk_path, img_tensor, pos_sample, self.all_categories.index(category)

@@ -93,16 +93,12 @@ if __name__ == '__main__':
         )
 
     # 3. Setup CLIP backbones
-    from src.utils import load_clip_to_cpu, load_clip_to_cpu_teacher
+    from src.utils import load_clip_to_cpu
     print("Loading CLIP models...")
-    
+
     clip_model = load_clip_to_cpu(opts).to(device)
     clip_model.float() # Training prompt in fp32
-    
-    clip_model_frozen = load_clip_to_cpu_teacher(opts).to(device)
-    clip_model_frozen.float()
-    clip_model_frozen.eval()
-    
+
     # Extract classnames for Context Learner initialization
     classnames = list(train_dataset.all_categories)
 
@@ -156,7 +152,7 @@ if __name__ == '__main__':
 
     # 6. Initialize Model
     if ckpt_path is None:
-        custom_clip = CustomCLIP(opts, clip_model, clip_model_frozen, classnames=classnames)
+        custom_clip = CustomCLIP(opts, clip_model, classnames=classnames)
         if opts.eval_mode == 'fine_grained':
             from src_fg.model_hicropl_fg import HiCroPL_SBIR_FG
             model = HiCroPL_SBIR_FG(cfg=opts, args=opts, classnames=classnames, model=custom_clip)
@@ -166,7 +162,7 @@ if __name__ == '__main__':
         print ('resuming training from %s'%ckpt_path)
         # Note: Depending on Lightning version, PyTorch Lightning may require the architecture 
         # to be instantiated before load_from_checkpoint or handle it directly if args are passed correctly.
-        custom_clip = CustomCLIP(opts, clip_model, clip_model_frozen, classnames=classnames)
+        custom_clip = CustomCLIP(opts, clip_model, classnames=classnames)
         if opts.eval_mode == 'fine_grained':
             from src_fg.model_hicropl_fg import HiCroPL_SBIR_FG
             model = HiCroPL_SBIR_FG.load_from_checkpoint(ckpt_path, cfg=opts, args=opts, classnames=classnames, model=custom_clip)
