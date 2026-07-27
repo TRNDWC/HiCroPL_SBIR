@@ -71,54 +71,39 @@ class CustomCLIP(nn.Module):
         original_device = next(clip_model.parameters()).device
         self.dtype = clip_model.dtype
 
-        # 1. Branch-specific models (2 deep copies, no distill teacher)
-        self.clip_photo = copy.deepcopy(clip_model).to(original_device)
-        self.clip_sketch = copy.deepcopy(clip_model).to(original_device)
+        # 1. Single shared backbone for both photo and sketch (matches ducta/baseline:
+        # one CLIP copy, same LayerNorm weights updated by gradients from both modalities).
+        self.clip = copy.deepcopy(clip_model).to(original_device)
+        freeze_all_but_bn(self.clip)
 
-        freeze_all_but_bn(self.clip_photo)
-        freeze_all_but_bn(self.clip_sketch)
+        # Print trainable param counts for verification
+        total = sum(p.numel() for p in self.clip.parameters())
+        trainable = sum(p.numel() for p in self.clip.parameters() if p.requires_grad)
+        print(f"clip (shared): trainable {trainable:,} / total {total:,} params")
 
-        # Print trainable param counts per branch for verification
-        def _count_trainable(m):
-            total = 0
-            trainable = 0
-            for p in m.parameters():
-                total += p.numel()
-                if p.requires_grad:
-                    trainable += p.numel()
-            return total, trainable
-
-        for name, module in (
-            ("clip_photo", self.clip_photo),
-            ("clip_sketch", self.clip_sketch),
-        ):
-            tot, tr = _count_trainable(module)
-            print(f"{name}: trainable {tr:,} / total {tot:,} params")
-
-        # 3. Logit scales (unique to each prompted model)
-        self.logit_scale_photo = self.clip_photo.logit_scale
-        self.logit_scale_sketch = self.clip_sketch.logit_scale
+        # Single shared logit scale (matches ducta/baseline)
+        self.logit_scale = self.clip.logit_scale
 
         # -- Prompt Learners --
         # Initialize Visual-Visual learner + simple text learners + adapters
         print("Initializing Visual Prompt Learner (photo + sketch, independent)...")
-        self.visual_visual_learner = VisualVisualPromptLearner(cfg, self.clip_sketch, self.clip_photo)
+        self.visual_visual_learner = VisualVisualPromptLearner(cfg, self.clip, self.clip)
 
         print("Initializing Photo Text Prompt Learner...")
         cfg_photo = copy.copy(cfg)
         cfg_photo.ctx_init = getattr(cfg, 'ctx_init', 'a photo of a')
-        self.text_prompt_photo = SimpleTextPromptLearner(cfg_photo, classnames, self.clip_photo)
+        self.text_prompt_photo = SimpleTextPromptLearner(cfg_photo, classnames, self.clip)
 
         print("Initializing Sketch Text Prompt Learner...")
         cfg_sketch = copy.copy(cfg)
         cfg_sketch.ctx_init = getattr(cfg, 'ctx_init_sketch', 'a sketch of a')
-        self.text_prompt_sketch = SimpleTextPromptLearner(cfg_sketch, classnames, self.clip_sketch)
+        self.text_prompt_sketch = SimpleTextPromptLearner(cfg_sketch, classnames, self.clip)
 
-        # -- Encoders (Main Branches using their own models with ALL LNs open) --
-        self.text_encoder_photo = TextEncoder(self.clip_photo)
-        self.text_encoder_sketch = TextEncoder(self.clip_sketch)
-        self.visual_encoder_photo = VisualEncoder(self.clip_photo)
-        self.visual_encoder_sketch = VisualEncoder(self.clip_sketch)
+        # -- Encoders (both branches wrap the SAME shared backbone) --
+        self.text_encoder_photo = TextEncoder(self.clip)
+        self.text_encoder_sketch = TextEncoder(self.clip)
+        self.visual_encoder_photo = VisualEncoder(self.clip)
+        self.visual_encoder_sketch = VisualEncoder(self.clip)
 
     def normalize_features(self, feat_prenorm):
         """L2-normalize feature tensors."""
@@ -160,7 +145,7 @@ class CustomCLIP(nn.Module):
         text_feat_sketch = text_features_all_sketch / text_features_all_sketch.norm(dim=-1, keepdim=True)
 
         # 6. Compute logits
-        logit_scale = self.logit_scale_photo.exp()
+        logit_scale = self.logit_scale.exp()
         logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
         logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
 
@@ -273,13 +258,13 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         prompt_lr = getattr(self.cfg, 'prompt_lr', 1e-5)
         clip_ln_lr = getattr(self.cfg, 'clip_LN_lr', 1e-5)
-        weight_decay = getattr(self.cfg, 'weight_decay', 1e-4)
 
         param_groups = [{'params': prompt_params, 'lr': prompt_lr}]
         if non_prompt_params:
             param_groups.append({'params': non_prompt_params, 'lr': clip_ln_lr})
 
-        return torch.optim.Adam(param_groups, weight_decay=weight_decay)
+        # No weight_decay (matches ducta/baseline's Adam call, which also omits it -> default 0).
+        return torch.optim.Adam(param_groups)
 
     def training_step(self, batch, batch_idx):
         from src.losses_hicropl import loss_fn_hicropl

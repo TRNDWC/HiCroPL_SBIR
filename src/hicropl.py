@@ -377,46 +377,6 @@ class SimpleTextPromptLearner(nn.Module):
         return text_input, cross_prompts_text_deeper
 
 
-class BranchPromptAdapter(nn.Module):
-    """Adapter that exposes a unified prompt-learner interface for a branch.
-
-    It composes a shared VisualVisualPromptLearner (for both visuals) and a
-    SimpleTextPromptLearner for the branch's text prompts, and returns the
-    4-tuple expected by HiCroPLFeatureExtractor.forward().
-    """
-
-    def __init__(self, visual_learner: VisualVisualPromptLearner, text_learner: SimpleTextPromptLearner, branch: str):
-        super().__init__()
-        assert branch in ("photo", "sketch")
-        self.visual_learner = visual_learner
-        self.text_learner = text_learner
-        self.branch = branch
-        # Proxy token buffers from the text learner so older callers (e.g.
-        # `HiCroPLFeatureExtractor`) that access `prompt_learner.tokenized_prompts`
-        # continue to work with the adapter.
-        if hasattr(text_learner, 'tokenized_prompts'):
-            self.register_buffer('tokenized_prompts', text_learner.tokenized_prompts)
-        if hasattr(text_learner, 'token_prefix'):
-            self.register_buffer('token_prefix', text_learner.token_prefix)
-        if hasattr(text_learner, 'token_suffix'):
-            self.register_buffer('token_suffix', text_learner.token_suffix)
-
-    def forward(self, label=None):
-        # run visual-visual learner to update both visual prompt sets
-        vis1_shallow, vis2_shallow, vis1_deeper, vis2_deeper = self.visual_learner()
-
-        # run text-only learner for this branch
-        text_input, cross_prompts_text_deeper = self.text_learner(label=label)
-
-        if self.branch == 'photo':
-            first_visual_prompt = vis2_shallow
-            cross_prompts_visual_deeper = vis2_deeper
-        else:
-            first_visual_prompt = vis1_shallow
-            cross_prompts_visual_deeper = vis1_deeper
-
-        return text_input, first_visual_prompt, cross_prompts_text_deeper, cross_prompts_visual_deeper
-
 class VisualEncoder(nn.Module):
     """Wraps CLIP VisionTransformer_HiCroPL for deep prompt injection.
     
