@@ -120,22 +120,22 @@ class CustomCLIP(nn.Module):
             sk_tensor, photo_tensor, neg_tensor, label = x[:4]
 
         # 1. Call visual-visual learner ONCE (shared by both branches)
-        vis1_shallow, vis2_shallow, vis1_deeper, vis2_deeper = self.visual_visual_learner()
+        photo_shallow, sketch_shallow, photo_deeper, sketch_deeper = self.visual_visual_learner()
 
-        # 2. Photo branch: text learner + visual routing (vis2)
+        # 2. Photo branch: text learner + visual routing
         # Compute text features for ALL classes (not just batch) - needed for loss computation
         text_input_photo_all, cross_prompts_text_deeper_photo = self.text_prompt_photo(label=None)  # All classes
         text_features_all_photo = self.text_encoder_photo(text_input_photo_all, self.text_prompt_photo.tokenized_prompts, cross_prompts_text_deeper_photo)
-        image_features_photo = self.visual_encoder_photo(photo_tensor.type(self.dtype), vis2_shallow, vis2_deeper)
+        image_features_photo = self.visual_encoder_photo(photo_tensor.type(self.dtype), photo_shallow, photo_deeper)
 
-        # 3. Sketch branch: text learner + visual routing (vis1)
+        # 3. Sketch branch: text learner + visual routing
         # Compute text features for ALL classes (not just batch) - needed for loss computation
         text_input_sketch_all, cross_prompts_text_deeper_sketch = self.text_prompt_sketch(label=None)  # All classes
         text_features_all_sketch = self.text_encoder_sketch(text_input_sketch_all, self.text_prompt_sketch.tokenized_prompts, cross_prompts_text_deeper_sketch)
-        image_features_sketch = self.visual_encoder_sketch(sk_tensor.type(self.dtype), vis1_shallow, vis1_deeper)
+        image_features_sketch = self.visual_encoder_sketch(sk_tensor.type(self.dtype), sketch_shallow, sketch_deeper)
 
         # 4. Negative branch (uses photo encoder + photo visual prompts)
-        image_features_neg = self.visual_encoder_photo(neg_tensor.type(self.dtype), vis2_shallow, vis2_deeper)
+        image_features_neg = self.visual_encoder_photo(neg_tensor.type(self.dtype), photo_shallow, photo_deeper)
 
         # 5. Normalize features
         photo_feat = image_features_photo / image_features_photo.norm(dim=-1, keepdim=True)
@@ -176,7 +176,20 @@ class HiCroPL_SBIR(pl.LightningModule):
     def on_train_epoch_start(self):
         # NOTE: Encoders stay in training mode (required for LayerNorm to use batch statistics)
         # Setting eval() here would conflict with forward() expectation and break BN/LN behavior
-        pass
+
+        # Warm-up schedule for the photo<->sketch cross-exchange gates:
+        #   epochs 1-3: ramp=0   -> gates contribute nothing, base prompts stabilize first
+        #   epochs 4-8: ramp = min(epoch/8, 1.0) -> cross-domain flow ramps in gradually
+        #   epochs 9+ : ramp=1.0 -> full strength
+        epoch_1indexed = self.current_epoch + 1
+        if epoch_1indexed <= 3:
+            ramp = 0.0
+        elif epoch_1indexed <= 8:
+            ramp = min(epoch_1indexed / 8, 1.0)
+        else:
+            ramp = 1.0
+        self.model.visual_visual_learner.ramp = ramp
+        self.log('cross_exchange_ramp', ramp, on_step=False, on_epoch=True, prog_bar=True)
 
     def on_fit_start(self):
         """Log the number of learnable prompt tokens per branch once at fit start.
@@ -279,14 +292,14 @@ class HiCroPL_SBIR(pl.LightningModule):
     def extract_eval_features(self, tensor, modality):
         """Extract visual features (prompted only, no distill mixing)."""
         # Call visual learner once, cache outputs
-        vis1_shallow, vis2_shallow, vis1_deeper, vis2_deeper = self.model.visual_visual_learner()
+        photo_shallow, sketch_shallow, photo_deeper, sketch_deeper = self.model.visual_visual_learner()
 
         if modality == 'photo':
             visual_encoder = self.model.visual_encoder_photo
-            vis_shallow, vis_deeper = vis2_shallow, vis2_deeper
+            vis_shallow, vis_deeper = photo_shallow, photo_deeper
         else:
             visual_encoder = self.model.visual_encoder_sketch
-            vis_shallow, vis_deeper = vis1_shallow, vis1_deeper
+            vis_shallow, vis_deeper = sketch_shallow, sketch_deeper
 
         feat = visual_encoder(tensor.type(self.model.dtype), vis_shallow, vis_deeper)
         return feat / feat.norm(dim=-1, keepdim=True)

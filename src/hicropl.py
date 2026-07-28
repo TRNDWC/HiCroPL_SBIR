@@ -253,10 +253,30 @@ class CrossModalPromptLearner(nn.Module):
 
 
 class VisualVisualPromptLearner(nn.Module):
-    """Independent per-branch deep visual prompts for photo and sketch.
+    """Bidirectional hierarchical prompt exchange between photo and sketch visual streams.
 
-    No cross-modal exchange: each branch's per-layer prompt tokens are learned
-    directly (no mapper/proxy network coupling photo and sketch together).
+    "Option 1" design: sketch<->photo is the only cross-modal flow (text stays
+    independent, see SimpleTextPromptLearner). Two unidirectional Knowledge Mapper
+    + LKP pairs over non-overlapping layer ranges:
+      - layers [0, cross_layer):        Photo -> Sketch (photo's shallow
+        appearance/texture priors enrich sketch's sparse shallow tokens)
+      - layers [cross_layer, prompt_depth): Sketch -> Photo (sketch's deep
+        shape-abstracted structure regularizes photo toward shape-invariant
+        features)
+
+    Update rule is a GATED ADDITIVE residual, never an overwrite:
+        proxy_l = LKP(proxy_seed_l, P_src_l, P_src_l)      # compress source layer l
+        P_proxy = concat(proxy_1 .. proxy_l)               # causal, grows with l
+        delta   = Mapper(P_tgt_l, P_proxy, P_proxy)
+        P_tgt_l = P_tgt_l + tanh(gate_l) * ramp * delta
+
+    `ramp` is a training-schedule multiplier (see HiCroPL_SBIR.on_train_epoch_start):
+    kept at 0 for the first few epochs so the independent base prompts stabilize,
+    then linearly ramped in. `gate_l` is a learnable per-layer scalar, init 0, so
+    tanh(gate_l) ~= 0 at the start regardless of the schedule. Sources (`P_src_l`)
+    are always read from the untouched base ParameterLists (`cross_prompts_photo`/
+    `cross_prompts_sketch`), never from a value already updated earlier in this
+    same forward call, so the two flows stay parallel and independent.
     """
 
     def __init__(self, cfg, clip_model_photo, clip_model_sketch):
@@ -264,8 +284,11 @@ class VisualVisualPromptLearner(nn.Module):
 
         self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
         n_ctx = getattr(cfg, 'n_ctx', 4)
+        cross_layer = getattr(cfg, 'cross_layer', -1)
+        self.cross_layer = self.prompt_depth // 2 if cross_layer < 0 else cross_layer
 
         assert self.prompt_depth >= 1
+        assert 0 <= self.cross_layer <= self.prompt_depth, "cross_layer must be in [0, prompt_depth]"
 
         dtype = clip_model_photo.dtype
         p_dim = clip_model_photo.visual.conv1.weight.shape[0]   # 768
@@ -274,8 +297,10 @@ class VisualVisualPromptLearner(nn.Module):
 
         self.dtype = dtype
         self.n_ctx = n_ctx
+        # Training-schedule multiplier for the exchange gates; see on_train_epoch_start.
+        self.ramp = 1.0
 
-        ######## photo prompt initialization ########
+        ######## photo prompt initialization (base prior, per layer) ########
         photo_vectors = torch.empty(n_ctx, p_dim, dtype=dtype)
         nn.init.normal_(photo_vectors, std=0.02)
 
@@ -290,7 +315,7 @@ class VisualVisualPromptLearner(nn.Module):
         self.cross_prompts_photo = cross_prompts_photo
         ######## photo prompt initialization end ########
 
-        ######## sketch prompt initialization ########
+        ######## sketch prompt initialization (base prior, per layer) ########
         sketch_vectors = torch.empty(n_ctx, s_dim, dtype=dtype)
         nn.init.normal_(sketch_vectors, std=0.02)
         cross_prompts_sketch = nn.ParameterList(
@@ -300,20 +325,78 @@ class VisualVisualPromptLearner(nn.Module):
         self.cross_prompts_sketch = cross_prompts_sketch
         ######## sketch prompt initialization end ########
 
-    def forward(self):
-        cross_prompts_photo_deeper = [
-            self.cross_prompts_photo[i] for i in range(1, len(self.cross_prompts_photo))
-        ]
-        cross_prompts_sketch_deeper = [
-            self.cross_prompts_sketch[i] for i in range(1, len(self.cross_prompts_sketch))
-        ]
+        ######## Photo -> Sketch: shallow layers [0, cross_layer) ########
+        if self.cross_layer > 0:
+            self.p2s_lkp = _get_clones(AttentionPooling(hidden_size=p_dim, num_attention_heads=8), self.cross_layer)
+            self.p2s_mapper = CrossPromptAttention(hidden_size=s_dim, encoder_hidden_size=p_dim, num_attention_heads=8)
+            p2s_seed = torch.randn(1, p_dim, dtype=dtype)
+            self.p2s_proxy_tokens = nn.ParameterList(
+                [nn.Parameter(p2s_seed.clone()) for _ in range(self.cross_layer)]
+            )
+            self.gates_p2s = nn.ParameterList(
+                [nn.Parameter(torch.zeros(1, dtype=dtype)) for _ in range(self.cross_layer)]
+            )
+        ######## Photo -> Sketch end ########
 
-        return (
-            self.cross_prompts_photo[0],
-            self.cross_prompts_sketch[0],
-            cross_prompts_photo_deeper,
-            cross_prompts_sketch_deeper
-        )
+        ######## Sketch -> Photo: deep layers [cross_layer, prompt_depth) ########
+        n_deep = self.prompt_depth - self.cross_layer
+        if n_deep > 0:
+            self.s2p_lkp = _get_clones(AttentionPooling(hidden_size=s_dim, num_attention_heads=8), n_deep)
+            self.s2p_mapper = CrossPromptAttention(hidden_size=p_dim, encoder_hidden_size=s_dim, num_attention_heads=8)
+            s2p_seed = torch.randn(1, s_dim, dtype=dtype)
+            self.s2p_proxy_tokens = nn.ParameterList(
+                [nn.Parameter(s2p_seed.clone()) for _ in range(n_deep)]
+            )
+            self.gates_s2p = nn.ParameterList(
+                [nn.Parameter(torch.zeros(1, dtype=dtype)) for _ in range(n_deep)]
+            )
+        ######## Sketch -> Photo end ########
+
+    def forward(self):
+        photo_prompts = list(self.cross_prompts_photo)
+        sketch_prompts = list(self.cross_prompts_sketch)
+
+        ######## Photo -> Sketch mapping (shallow layers) ########
+        if self.cross_layer > 0:
+            proxies = []
+            updated_sketch = []
+            for l in range(self.cross_layer):
+                proxy_l = self.p2s_lkp[l](
+                    token_query=self.p2s_proxy_tokens[l],
+                    sequence_key=self.cross_prompts_photo[l],   # untouched source
+                    sequence_value=self.cross_prompts_photo[l],
+                )
+                proxies.append(proxy_l)
+                p_proxy = torch.cat(proxies, dim=0)  # causal: proxy_1 .. proxy_l
+                delta = self.p2s_mapper(sketch_prompts[l], p_proxy, p_proxy)
+                gate = torch.tanh(self.gates_p2s[l])
+                updated_sketch.append(sketch_prompts[l] + gate * self.ramp * delta)
+            sketch_prompts[:self.cross_layer] = updated_sketch
+        ######## Photo -> Sketch end ########
+
+        ######## Sketch -> Photo mapping (deep layers) ########
+        n_deep = self.prompt_depth - self.cross_layer
+        if n_deep > 0:
+            proxies = []
+            updated_photo = []
+            for j, l in enumerate(range(self.cross_layer, self.prompt_depth)):
+                proxy_l = self.s2p_lkp[j](
+                    token_query=self.s2p_proxy_tokens[j],
+                    sequence_key=self.cross_prompts_sketch[l],  # untouched source (deep range, never a P->S target)
+                    sequence_value=self.cross_prompts_sketch[l],
+                )
+                proxies.append(proxy_l)
+                p_proxy = torch.cat(proxies, dim=0)
+                delta = self.s2p_mapper(photo_prompts[l], p_proxy, p_proxy)
+                gate = torch.tanh(self.gates_s2p[j])
+                updated_photo.append(photo_prompts[l] + gate * self.ramp * delta)
+            photo_prompts[self.cross_layer:] = updated_photo
+        ######## Sketch -> Photo end ########
+
+        photo_deeper = photo_prompts[1:]
+        sketch_deeper = sketch_prompts[1:]
+
+        return photo_prompts[0], sketch_prompts[0], photo_deeper, sketch_deeper
 class SimpleTextPromptLearner(nn.Module):
     """Minimal text-only prompt learner: prepares tokenized prompts and text prompt tensors.
 
