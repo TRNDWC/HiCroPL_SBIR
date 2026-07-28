@@ -100,6 +100,28 @@ class CrossPromptAttention(nn.Module):
         return q_proj
 
 
+class MetaNet(nn.Module):
+    """Lightweight instance-conditioning network (CoCoOp-style bottleneck).
+
+    Turns a pooled image feature into a bias vector added to a proxy query,
+    letting the cross-domain exchange adapt per-sample instead of relying on
+    a single fixed global token for every image. Architecture matches CoCoOp
+    (arXiv:2203.05557): Linear -> ReLU -> Linear, hidden dim reduced 16x.
+    """
+
+    def __init__(self, in_dim, out_dim, reduction=16):
+        super().__init__()
+        hidden = max(in_dim // reduction, 1)
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, out_dim),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class CrossModalPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model, clip_model_distill=None):
         super().__init__()
@@ -265,7 +287,8 @@ class VisualVisualPromptLearner(nn.Module):
         features)
 
     Update rule is a GATED ADDITIVE residual, never an overwrite:
-        proxy_l = LKP(proxy_seed_l, P_src_l, P_src_l)      # compress source layer l
+        query_l = proxy_seed_l + MetaNet(target_own_patch_feat)   # CoCoOp-style instance bias
+        proxy_l = LKP(query_l, P_src_l, P_src_l)           # compress source layer l
         P_proxy = concat(proxy_1 .. proxy_l)               # causal, grows with l
         delta   = Mapper(P_tgt_l, P_proxy, P_proxy)
         P_tgt_l = P_tgt_l + tanh(gate_l) * ramp * delta
@@ -277,6 +300,17 @@ class VisualVisualPromptLearner(nn.Module):
     are always read from the untouched base ParameterLists (`cross_prompts_photo`/
     `cross_prompts_sketch`), never from a value already updated earlier in this
     same forward call, so the two flows stay parallel and independent.
+
+    Instance conditioning (CoCoOp-style, arXiv:2203.05557): the LKP query is
+    biased by a lightweight MetaNet fed with the TARGET modality's own raw
+    patch-embedding (conv1 output, pooled) -- e.g. Photo->Sketch is biased by
+    sketch's own patch feature, not photo's. Self-conditioning (by the target,
+    not the source) is deliberate: it is the only choice that works identically
+    at eval time too, since retrieval evaluates one modality at a time with no
+    paired counterpart available (see HiCroPL_SBIR.extract_eval_features).
+    `forward()` accepts `photo_patch`/`sketch_patch` as optional [B, dim]
+    tensors; passing None for one of them just skips conditioning for the
+    direction that needs it (falls back to the shared global proxy seed).
     """
 
     def __init__(self, cfg, clip_model_photo, clip_model_sketch):
@@ -336,6 +370,10 @@ class VisualVisualPromptLearner(nn.Module):
             self.gates_p2s = nn.ParameterList(
                 [nn.Parameter(torch.zeros(1, dtype=dtype)) for _ in range(self.cross_layer)]
             )
+            # Self-conditioning (CoCoOp-style): biases the query with SKETCH's own
+            # patch feature (the target of this direction), shared across all
+            # cross_layer layers.
+            self.meta_p2s = MetaNet(in_dim=s_dim, out_dim=p_dim)
         ######## Photo -> Sketch end ########
 
         ######## Sketch -> Photo: deep layers [cross_layer, prompt_depth) ########
@@ -350,46 +388,77 @@ class VisualVisualPromptLearner(nn.Module):
             self.gates_s2p = nn.ParameterList(
                 [nn.Parameter(torch.zeros(1, dtype=dtype)) for _ in range(n_deep)]
             )
+            # Self-conditioning: biases the query with PHOTO's own patch feature
+            # (the target of this direction), shared across all n_deep layers.
+            self.meta_s2p = MetaNet(in_dim=p_dim, out_dim=s_dim)
         ######## Sketch -> Photo end ########
 
-    def forward(self):
+    def forward(self, photo_patch=None, sketch_patch=None):
+        """
+        Args:
+            photo_patch: optional [B, p_dim] pooled conv1 patch embedding of the
+                current photo batch (self-conditions the Sketch->Photo direction,
+                since photo is the target there). None -> that direction falls
+                back to the plain global proxy seed (no instance bias).
+            sketch_patch: optional [B, s_dim], symmetric role for Photo->Sketch.
+        """
         photo_prompts = list(self.cross_prompts_photo)
         sketch_prompts = list(self.cross_prompts_sketch)
 
         ######## Photo -> Sketch mapping (shallow layers) ########
         if self.cross_layer > 0:
+            p2s_bias = self.meta_p2s(sketch_patch) if sketch_patch is not None else None  # [B, p_dim]
+
             proxies = []
             updated_sketch = []
             for l in range(self.cross_layer):
-                proxy_l = self.p2s_lkp[l](
-                    token_query=self.p2s_proxy_tokens[l],
-                    sequence_key=self.cross_prompts_photo[l],   # untouched source
-                    sequence_value=self.cross_prompts_photo[l],
-                )
+                seed = self.p2s_proxy_tokens[l]           # [1, p_dim]
+                src = self.cross_prompts_photo[l]          # [n_ctx, p_dim], untouched source
+                tgt = sketch_prompts[l]                     # [n_ctx, s_dim]
+
+                if p2s_bias is not None:
+                    B = p2s_bias.shape[0]
+                    token_query = seed.unsqueeze(1).expand(-1, B, -1) + p2s_bias.unsqueeze(0)  # [1, B, p_dim]
+                    src = src.unsqueeze(1).expand(-1, B, -1)   # [n_ctx, B, p_dim]
+                    tgt = tgt.unsqueeze(1).expand(-1, B, -1)   # [n_ctx, B, s_dim]
+                else:
+                    token_query = seed
+
+                proxy_l = self.p2s_lkp[l](token_query=token_query, sequence_key=src, sequence_value=src)
                 proxies.append(proxy_l)
                 p_proxy = torch.cat(proxies, dim=0)  # causal: proxy_1 .. proxy_l
-                delta = self.p2s_mapper(sketch_prompts[l], p_proxy, p_proxy)
+                delta = self.p2s_mapper(tgt, p_proxy, p_proxy)
                 gate = torch.tanh(self.gates_p2s[l])
-                updated_sketch.append(sketch_prompts[l] + gate * self.ramp * delta)
+                updated_sketch.append(tgt + gate * self.ramp * delta)
             sketch_prompts[:self.cross_layer] = updated_sketch
         ######## Photo -> Sketch end ########
 
         ######## Sketch -> Photo mapping (deep layers) ########
         n_deep = self.prompt_depth - self.cross_layer
         if n_deep > 0:
+            s2p_bias = self.meta_s2p(photo_patch) if photo_patch is not None else None  # [B, s_dim]
+
             proxies = []
             updated_photo = []
             for j, l in enumerate(range(self.cross_layer, self.prompt_depth)):
-                proxy_l = self.s2p_lkp[j](
-                    token_query=self.s2p_proxy_tokens[j],
-                    sequence_key=self.cross_prompts_sketch[l],  # untouched source (deep range, never a P->S target)
-                    sequence_value=self.cross_prompts_sketch[l],
-                )
+                seed = self.s2p_proxy_tokens[j]
+                src = self.cross_prompts_sketch[l]  # untouched source (deep range, never a P->S target)
+                tgt = photo_prompts[l]
+
+                if s2p_bias is not None:
+                    B = s2p_bias.shape[0]
+                    token_query = seed.unsqueeze(1).expand(-1, B, -1) + s2p_bias.unsqueeze(0)
+                    src = src.unsqueeze(1).expand(-1, B, -1)
+                    tgt = tgt.unsqueeze(1).expand(-1, B, -1)
+                else:
+                    token_query = seed
+
+                proxy_l = self.s2p_lkp[j](token_query=token_query, sequence_key=src, sequence_value=src)
                 proxies.append(proxy_l)
                 p_proxy = torch.cat(proxies, dim=0)
-                delta = self.s2p_mapper(photo_prompts[l], p_proxy, p_proxy)
+                delta = self.s2p_mapper(tgt, p_proxy, p_proxy)
                 gate = torch.tanh(self.gates_s2p[j])
-                updated_photo.append(photo_prompts[l] + gate * self.ramp * delta)
+                updated_photo.append(tgt + gate * self.ramp * delta)
             photo_prompts[self.cross_layer:] = updated_photo
         ######## Sketch -> Photo end ########
 

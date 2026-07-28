@@ -109,6 +109,17 @@ class CustomCLIP(nn.Module):
         """L2-normalize feature tensors."""
         return feat_prenorm / feat_prenorm.norm(dim=-1, keepdim=True)
 
+    def patch_feature(self, image_tensor):
+        """Cheap, prompt-independent image signal for instance-conditioning the exchange.
+
+        Only runs conv1 (patch embed) -- prompts are concatenated AFTER this
+        point in the encoder, so there is no circular dependency on the very
+        prompts this feature is used to bias.
+        """
+        with torch.no_grad():
+            feat = self.clip.visual.conv1(image_tensor.type(self.dtype))  # [B, width, grid, grid]
+            return feat.mean(dim=[2, 3])  # [B, width]
+
     def forward(self, x, classnames):
         """
         Forward pass for training with optimized redundancy.
@@ -119,8 +130,13 @@ class CustomCLIP(nn.Module):
         else:
             sk_tensor, photo_tensor, neg_tensor, label = x[:4]
 
-        # 1. Call visual-visual learner ONCE (shared by both branches)
-        photo_shallow, sketch_shallow, photo_deeper, sketch_deeper = self.visual_visual_learner()
+        # 1. Call visual-visual learner ONCE (shared by both branches), instance-
+        # conditioned on each modality's own (prompt-free) patch feature.
+        photo_patch = self.patch_feature(photo_tensor)
+        sketch_patch = self.patch_feature(sk_tensor)
+        photo_shallow, sketch_shallow, photo_deeper, sketch_deeper = self.visual_visual_learner(
+            photo_patch=photo_patch, sketch_patch=sketch_patch
+        )
 
         # 2. Photo branch: text learner + visual routing
         # Compute text features for ALL classes (not just batch) - needed for loss computation
@@ -294,14 +310,22 @@ class HiCroPL_SBIR(pl.LightningModule):
         return loss
 
     def extract_eval_features(self, tensor, modality):
-        """Extract visual features (prompted only, no distill mixing)."""
-        # Call visual learner once, cache outputs
-        photo_shallow, sketch_shallow, photo_deeper, sketch_deeper = self.model.visual_visual_learner()
+        """Extract visual features (prompted only, no distill mixing).
+
+        Retrieval evaluates one modality at a time (no paired counterpart
+        available), so only the current modality's own patch feature is
+        passed for instance-conditioning -- see VisualVisualPromptLearner's
+        self-conditioning design (target's own feature, not the other
+        modality's).
+        """
+        patch = self.model.patch_feature(tensor)
 
         if modality == 'photo':
+            photo_shallow, _, photo_deeper, _ = self.model.visual_visual_learner(photo_patch=patch, sketch_patch=None)
             visual_encoder = self.model.visual_encoder_photo
             vis_shallow, vis_deeper = photo_shallow, photo_deeper
         else:
+            _, sketch_shallow, _, sketch_deeper = self.model.visual_visual_learner(photo_patch=None, sketch_patch=patch)
             visual_encoder = self.model.visual_encoder_sketch
             vis_shallow, vis_deeper = sketch_shallow, sketch_deeper
 
