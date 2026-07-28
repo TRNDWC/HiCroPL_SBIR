@@ -85,9 +85,23 @@ class CustomCLIP(nn.Module):
         self.logit_scale = self.clip.logit_scale
 
         # -- Prompt Learners --
-        # Initialize Visual-Visual learner + simple text learners + adapters
+        # Snapshot RNG state so that constructing the visual exchange machinery
+        # below (whose parameter count changes across ablations -- MetaNet,
+        # extra mappers, etc.) can NEVER perturb the random initialization of
+        # the text prompt learners. Without this, adding/removing anything in
+        # VisualVisualPromptLearner shifts the global RNG stream, and
+        # text_prompt_photo/sketch's deeper layers (nn.init.normal_, layers
+        # 1..prompt_depth-1) silently draw different random values even though
+        # their own code never changed -- confounding any "with vs without X"
+        # comparison of the visual exchange with unrelated text-branch noise.
+        rng_state = torch.get_rng_state()
+
         print("Initializing Visual Prompt Learner (photo + sketch, independent)...")
         self.visual_visual_learner = VisualVisualPromptLearner(cfg, self.clip, self.clip)
+
+        # Rewind: text branch always starts from the exact same RNG state,
+        # regardless of what visual_visual_learner consumed above.
+        torch.set_rng_state(rng_state)
 
         print("Initializing Photo Text Prompt Learner...")
         cfg_photo = copy.copy(cfg)
