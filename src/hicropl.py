@@ -293,10 +293,10 @@ class VisualVisualPromptLearner(nn.Module):
         delta   = Mapper(P_tgt_l, P_proxy, P_proxy)
         P_tgt_l = P_tgt_l + tanh(gate_l) * ramp * delta
 
-    `ramp` is a training-schedule multiplier (see HiCroPL_SBIR.on_train_epoch_start):
-    kept at 0 for the first few epochs so the independent base prompts stabilize,
-    then linearly ramped in. `gate_l` is a learnable per-layer scalar, init 0, so
-    tanh(gate_l) ~= 0 at the start regardless of the schedule. Sources (`P_src_l`)
+    `ramp` is fixed at 1.0 (no epoch-based warm-up schedule -- removed for
+    debugging simplicity). `gate_l` is a learnable per-layer scalar, init 0, so
+    tanh(gate_l) ~= 0 at the very start of training and the exchange only
+    "opens" once the gate itself has learned to move away from 0. Sources (`P_src_l`)
     are always read from the untouched base ParameterLists (`cross_prompts_photo`/
     `cross_prompts_sketch`), never from a value already updated earlier in this
     same forward call, so the two flows stay parallel and independent.
@@ -331,7 +331,8 @@ class VisualVisualPromptLearner(nn.Module):
 
         self.dtype = dtype
         self.n_ctx = n_ctx
-        # Training-schedule multiplier for the exchange gates; see on_train_epoch_start.
+        # Kept as a hook for a future epoch-based schedule if needed again;
+        # currently always 1.0 (no warm-up).
         self.ramp = 1.0
 
         ######## photo prompt initialization (base prior, per layer) ########

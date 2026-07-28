@@ -206,22 +206,7 @@ class HiCroPL_SBIR(pl.LightningModule):
     def on_train_epoch_start(self):
         # NOTE: Encoders stay in training mode (required for LayerNorm to use batch statistics)
         # Setting eval() here would conflict with forward() expectation and break BN/LN behavior
-
-        # Warm-up schedule for the photo<->sketch cross-exchange gates:
-        #   epochs 1-3: ramp=0   -> gates contribute nothing, base prompts stabilize first
-        #   epochs 4-8: ramp = min(epoch/8, 1.0) -> cross-domain flow ramps in gradually
-        #   epochs 9+ : ramp=1.0 -> full strength
-        epoch_1indexed = self.current_epoch + 1
-        if epoch_1indexed <= 3:
-            ramp = 0.0
-        elif epoch_1indexed <= 8:
-            ramp = min(epoch_1indexed / 8, 1.0)
-        else:
-            ramp = 1.0
-        self.model.visual_visual_learner.ramp = ramp
-        # prog_bar=False: TQDM/notebook progress bars wrap badly with extra columns;
-        # this is still logged to TensorBoard (logger=True by default) for monitoring.
-        self.log('cross_exchange_ramp', ramp, on_step=False, on_epoch=True, prog_bar=False)
+        pass
 
     def on_fit_start(self):
         """Log the number of learnable prompt tokens per branch once at fit start.
