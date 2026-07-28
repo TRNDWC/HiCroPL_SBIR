@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.callbacks import ModelCheckpoint, RichProgressBar
+from pytorch_lightning.callbacks import ModelCheckpoint
 
 from src.clip import clip
 from src.model_hicropl import CustomCLIP, HiCroPL_SBIR
@@ -136,10 +136,9 @@ if __name__ == '__main__':
         print ('resuming training from %s'%ckpt_path)
 
     # 5. Initialize Trainer
-    rich_progress_bar = RichProgressBar(
-        leave=True
-    )
-
+    # NOTE: uses Lightning's default (TQDM) progress bar, not RichProgressBar --
+    # Rich mis-detects terminal width in Kaggle/Jupyter notebook output cells and
+    # wraps every step across multiple lines, flooding the log.
     trainer = Trainer(accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1,
         min_epochs=1, max_epochs=opts.epochs,
         benchmark=False,  # Set False for reproducibility (True causes CUDNN non-determinism)
@@ -147,7 +146,7 @@ if __name__ == '__main__':
         logger=logger,
         check_val_every_n_epoch=1,
         enable_progress_bar=True,
-        callbacks=[checkpoint_callback, rich_progress_bar]
+        callbacks=[checkpoint_callback]
     )
 
     # 6. Initialize Model

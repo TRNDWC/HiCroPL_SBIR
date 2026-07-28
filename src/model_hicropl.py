@@ -189,7 +189,9 @@ class HiCroPL_SBIR(pl.LightningModule):
         else:
             ramp = 1.0
         self.model.visual_visual_learner.ramp = ramp
-        self.log('cross_exchange_ramp', ramp, on_step=False, on_epoch=True, prog_bar=True)
+        # prog_bar=False: TQDM/notebook progress bars wrap badly with extra columns;
+        # this is still logged to TensorBoard (logger=True by default) for monitoring.
+        self.log('cross_exchange_ramp', ramp, on_step=False, on_epoch=True, prog_bar=False)
 
     def on_fit_start(self):
         """Log the number of learnable prompt tokens per branch once at fit start.
@@ -223,10 +225,12 @@ class HiCroPL_SBIR(pl.LightningModule):
         # Use self.log so TensorBoard/other loggers capture these scalars
         # Use rank_zero_only to avoid duplicate logs in distributed runs
         try:
-            self.log('tokens_visual_photo', tokens_visual_photo, prog_bar=True, logger=True)
-            self.log('tokens_visual_sketch', tokens_visual_sketch, prog_bar=True, logger=True)
-            self.log('tokens_text_photo', tokens_text_photo, prog_bar=True, logger=True)
-            self.log('tokens_text_sketch', tokens_text_sketch, prog_bar=True, logger=True)
+            # prog_bar=False: static one-time values (already printed above); keeping
+            # them off the progress bar avoids the line wrapping across the terminal.
+            self.log('tokens_visual_photo', tokens_visual_photo, prog_bar=False, logger=True)
+            self.log('tokens_visual_sketch', tokens_visual_sketch, prog_bar=False, logger=True)
+            self.log('tokens_text_photo', tokens_text_photo, prog_bar=False, logger=True)
+            self.log('tokens_text_sketch', tokens_text_sketch, prog_bar=False, logger=True)
         except Exception:
             # Fallback to print-only if logger not ready
             pass
