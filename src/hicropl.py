@@ -253,10 +253,29 @@ class CrossModalPromptLearner(nn.Module):
 
 
 class VisualVisualPromptLearner(nn.Module):
-    """Independent per-branch deep visual prompts for photo and sketch.
+    """Bidirectional cross-domain prompt exchange between photo and sketch.
 
-    No cross-modal exchange: each branch's per-layer prompt tokens are learned
-    directly (no mapper/proxy network coupling photo and sketch together).
+    Faithful port of the original HiCroPL CrossModalPromptLearner's T<->I
+    mapping mechanics (github.com/zzeoZheng/HiCroPL/blob/main/trainers/hicropl.py),
+    adapted from text<->visual to photo<->sketch:
+      - Photo plays the "text" role (source, shallow layers [0, cross_layer)):
+        LKP compresses each shallow-layer photo prompt into one proxy token;
+        all proxies in the range are concatenated and fed through ONE joint
+        CrossPromptAttention (Mapper) call that produces the new sketch
+        prompts for that same range.
+      - Sketch plays the "visual" role (source, deep layers
+        [cross_layer, prompt_depth)): symmetric direction, updates photo.
+
+    Update rule matches the ORIGINAL HiCroPL exactly: plain REPLACEMENT, no
+    gate, no additive residual -- `current_x_prompts[i] = updated[i]` on a
+    local Python list, never `.data.copy_()` on the stored nn.Parameter (that
+    breaks autograd; see CrossModalPromptLearner above, which has that bug
+    from a faulty port and is otherwise unused/dead code).
+
+    Note: this joint-per-range Mapper call (not a per-layer causal proxy
+    accumulation) is what the actual original repo does, which differs from
+    the "Option 1 refactored" design note's pseudocode -- going with the real
+    original mechanics here per explicit request.
     """
 
     def __init__(self, cfg, clip_model_photo, clip_model_sketch):
@@ -264,8 +283,11 @@ class VisualVisualPromptLearner(nn.Module):
 
         self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
         n_ctx = getattr(cfg, 'n_ctx', 4)
+        cross_layer = getattr(cfg, 'cross_layer', -1)
+        self.cross_layer = self.prompt_depth // 2 if cross_layer < 0 else cross_layer
 
         assert self.prompt_depth >= 1
+        assert 0 <= self.cross_layer <= self.prompt_depth, "cross_layer must be in [0, prompt_depth]"
 
         dtype = clip_model_photo.dtype
         p_dim = clip_model_photo.visual.conv1.weight.shape[0]   # 768
@@ -275,7 +297,7 @@ class VisualVisualPromptLearner(nn.Module):
         self.dtype = dtype
         self.n_ctx = n_ctx
 
-        ######## photo prompt initialization ########
+        ######## photo prompt initialization (base, per layer) ########
         photo_vectors = torch.empty(n_ctx, p_dim, dtype=dtype)
         nn.init.normal_(photo_vectors, std=0.02)
 
@@ -290,7 +312,7 @@ class VisualVisualPromptLearner(nn.Module):
         self.cross_prompts_photo = cross_prompts_photo
         ######## photo prompt initialization end ########
 
-        ######## sketch prompt initialization ########
+        ######## sketch prompt initialization (base, per layer) ########
         sketch_vectors = torch.empty(n_ctx, s_dim, dtype=dtype)
         nn.init.normal_(sketch_vectors, std=0.02)
         cross_prompts_sketch = nn.ParameterList(
@@ -300,19 +322,99 @@ class VisualVisualPromptLearner(nn.Module):
         self.cross_prompts_sketch = cross_prompts_sketch
         ######## sketch prompt initialization end ########
 
+        ######## Knowledge mapper networks (orig: text2visual_net / visual2text_net) ########
+        if self.cross_layer > 0:
+            self.photo2sketch_net = CrossPromptAttention(hidden_size=s_dim, encoder_hidden_size=p_dim, num_attention_heads=8)
+
+            attn_pooling_photo = AttentionPooling(hidden_size=p_dim, num_attention_heads=8)
+            self.attn_pooling_photo_nets = _get_clones(attn_pooling_photo, self.cross_layer)
+
+            photo_proxy_token = torch.randn(1, p_dim, dtype=dtype)
+            self.photo_proxy_token = nn.ParameterList(
+                [nn.Parameter(photo_proxy_token.clone()) for _ in range(self.cross_layer)]
+            )
+
+        n_deep = self.prompt_depth - self.cross_layer
+        if n_deep > 0:
+            self.sketch2photo_net = CrossPromptAttention(hidden_size=p_dim, encoder_hidden_size=s_dim, num_attention_heads=8)
+
+            attn_pooling_sketch = AttentionPooling(hidden_size=s_dim, num_attention_heads=8)
+            self.attn_pooling_sketch_nets = _get_clones(attn_pooling_sketch, n_deep)
+
+            sketch_proxy_token = torch.randn(1, s_dim, dtype=dtype)
+            self.sketch_proxy_token = nn.ParameterList(
+                [nn.Parameter(sketch_proxy_token.clone()) for _ in range(self.cross_layer, self.prompt_depth)]
+            )
+        ######## Knowledge mapper end ########
+
     def forward(self):
-        cross_prompts_photo_deeper = [
-            self.cross_prompts_photo[i] for i in range(1, len(self.cross_prompts_photo))
-        ]
-        cross_prompts_sketch_deeper = [
-            self.cross_prompts_sketch[i] for i in range(1, len(self.cross_prompts_sketch))
-        ]
+        # Local mutable copies -- entries get REPLACED here, never the stored
+        # nn.Parameter itself, so gradients flow correctly into the mapper/LKP
+        # networks (matches the original HiCroPL exactly; see class docstring).
+        current_photo_prompts = list(self.cross_prompts_photo)
+        current_sketch_prompts = list(self.cross_prompts_sketch)
+
+        ######## Photo -> Sketch mapping (shallow layers [0, cross_layer)) ########
+        if self.cross_layer > 0:
+            proxy_photo_tokens = []
+            for i in range(self.cross_layer):
+                photo_proxy_token = self.attn_pooling_photo_nets[i](
+                    token_query=self.photo_proxy_token[i],
+                    sequence_key=current_photo_prompts[i],
+                    sequence_value=current_photo_prompts[i],
+                )
+                proxy_photo_tokens.append(photo_proxy_token)
+            proxy_photo_prompts = torch.cat(proxy_photo_tokens, dim=0)
+
+            sketch_prompts_range = torch.cat(
+                [current_sketch_prompts[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0
+            )
+            sketch_prompts_flat = sketch_prompts_range.view(-1, sketch_prompts_range.shape[-1])
+            proxy_photo_flat = proxy_photo_prompts.view(-1, proxy_photo_prompts.shape[-1])
+
+            updated_sketch_prompts = self.photo2sketch_net(sketch_prompts_flat, proxy_photo_flat, proxy_photo_flat)
+            updated_sketch_prompts = updated_sketch_prompts.view(
+                self.cross_layer, -1, updated_sketch_prompts.shape[-1]
+            )
+            for i in range(self.cross_layer):
+                current_sketch_prompts[i] = updated_sketch_prompts[i]
+        ######## Photo -> Sketch end ########
+
+        ######## Sketch -> Photo mapping (deep layers [cross_layer, prompt_depth)) ########
+        n_deep = self.prompt_depth - self.cross_layer
+        if n_deep > 0:
+            proxy_sketch_tokens = []
+            for i in range(self.cross_layer, self.prompt_depth):
+                sketch_proxy_token = self.attn_pooling_sketch_nets[i - self.cross_layer](
+                    token_query=self.sketch_proxy_token[i - self.cross_layer],
+                    sequence_key=current_sketch_prompts[i],
+                    sequence_value=current_sketch_prompts[i],
+                )
+                proxy_sketch_tokens.append(sketch_proxy_token)
+            proxy_sketch_prompts = torch.cat(proxy_sketch_tokens, dim=0)
+
+            photo_prompts_range = torch.cat(
+                [current_photo_prompts[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0
+            )
+            photo_prompts_flat = photo_prompts_range.view(-1, photo_prompts_range.shape[-1])
+            proxy_sketch_flat = proxy_sketch_prompts.view(-1, proxy_sketch_prompts.shape[-1])
+
+            updated_photo_prompts = self.sketch2photo_net(photo_prompts_flat, proxy_sketch_flat, proxy_sketch_flat)
+            updated_photo_prompts = updated_photo_prompts.view(
+                n_deep, -1, updated_photo_prompts.shape[-1]
+            )
+            for i in range(self.cross_layer, self.prompt_depth):
+                current_photo_prompts[i] = updated_photo_prompts[i - self.cross_layer]
+        ######## Sketch -> Photo end ########
+
+        cross_prompts_photo_deeper = [current_photo_prompts[i] for i in range(1, len(current_photo_prompts))]
+        cross_prompts_sketch_deeper = [current_sketch_prompts[i] for i in range(1, len(current_sketch_prompts))]
 
         return (
-            self.cross_prompts_photo[0],
-            self.cross_prompts_sketch[0],
+            current_photo_prompts[0],
+            current_sketch_prompts[0],
             cross_prompts_photo_deeper,
-            cross_prompts_sketch_deeper
+            cross_prompts_sketch_deeper,
         )
 class SimpleTextPromptLearner(nn.Module):
     """Minimal text-only prompt learner: prepares tokenized prompts and text prompt tensors.

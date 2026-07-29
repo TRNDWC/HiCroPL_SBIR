@@ -44,6 +44,7 @@ parser.add_argument('--n_prompts', type=int, default=3)
 # HiCroPL Params
 parser.add_argument('--n_ctx', type=int, default=4, help='Number of context tokens for prompts')
 parser.add_argument('--prompt_depth', type=int, default=9, help='Depth of deep prompts')
+parser.add_argument('--cross_layer', type=int, default=-1, help='Layer boundary k for the photo<->sketch exchange (shallow=Photo->Sketch, deep=Sketch->Photo); -1 means prompt_depth // 2')
 parser.add_argument('--ctx_init', type=str, default='a photo of a', help='Initial text context for photo prompt learner')
 parser.add_argument('--ctx_init_sketch', type=str, default='a sketch of a', help='Initial text context for sketch prompt learner')
 parser.add_argument('--temperature', type=float, default=0.07, help='Temperature for InfoNCE Loss')
