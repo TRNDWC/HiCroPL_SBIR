@@ -276,10 +276,22 @@ class HiCroPL_SBIR(pl.LightningModule):
         from src.losses_hicropl import loss_fn_hicropl
         features = self.model(batch, self.classnames)
         loss = loss_fn_hicropl(self.args, features)
-        
+
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
         self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False, logger=False)
-        
+
+        # Raw (unweighted by lambda_kg) regularization value -- logged separately
+        # so we can see the actual drift magnitude directly, instead of
+        # inferring it indirectly through the aggregate train_loss (which at
+        # small lambda_kg/drift values hides the signal in the noise floor).
+        # on_step=True mirrors train_loss's config exactly (that one is known
+        # to reliably show up in callback_metrics at validation-epoch-end;
+        # an on_epoch-only variant was tried first and didn't). prog_bar=False
+        # keeps it off the live progress bar -- it's printed once per epoch in
+        # _on_validation_epoch_end_category instead, so no per-step spam.
+        loss_kg_photo_raw = features[-1]
+        self.log('loss_kg_photo_raw', loss_kg_photo_raw, on_step=True, on_epoch=True, prog_bar=False, logger=True)
+
         return loss
 
     def extract_eval_features(self, tensor, modality):
@@ -387,6 +399,12 @@ class HiCroPL_SBIR(pl.LightningModule):
         train_loss = self.trainer.callback_metrics.get("train_loss", None)
         if train_loss is not None:
             self.print(f"Train loss (epoch avg): {train_loss.item():.6f}")
+
+        loss_kg_photo_raw = self.trainer.callback_metrics.get("loss_kg_photo_raw", None)
+        if loss_kg_photo_raw is not None:
+            self.print(f"loss_kg_photo_raw (epoch avg, unweighted by lambda_kg): {loss_kg_photo_raw.item():.6f}")
+        else:
+            self.print(f"[DEBUG] loss_kg_photo_raw not in callback_metrics. Available keys: {list(self.trainer.callback_metrics.keys())}")
 
         self.test_photo_features.clear()
         self.test_sketch_features.clear()

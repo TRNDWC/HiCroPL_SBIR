@@ -111,7 +111,7 @@ if __name__ == '__main__':
     # instead of leaving coverage to chance.
     photo_idx = 0 if opts.eval_mode == 'fine_grained' else 1
     target_total = min(128, len(train_dataset))
-    min_per_category = 3
+    min_per_category = opts.kmeans_min_per_category
 
     category_indices = {}
     for idx, sk_path in enumerate(train_dataset.all_sketches_path):
