@@ -105,18 +105,34 @@ if __name__ == '__main__':
     # Sample real photo images once, used only for k-means-based photo prompt
     # initialization / regularization anchor (see VisualVisualPromptLearner).
     # Photo-only by design -- cheap, done once before training starts.
+    # Stratified by category: plain uniform sampling over 57587 images / 104
+    # categories left ~30 categories with zero representation in expectation
+    # (coupon-collector effect at n=128), so we guarantee >=1 image/category
+    # instead of leaving coverage to chance.
     photo_idx = 0 if opts.eval_mode == 'fine_grained' else 1
-    sample_size = min(128, len(train_dataset))
+    target_total = min(128, len(train_dataset))
+    min_per_category = 3
+
+    category_indices = {}
+    for idx, sk_path in enumerate(train_dataset.all_sketches_path):
+        category = sk_path.split(os.path.sep)[-2]
+        category_indices.setdefault(category, []).append(idx)
+
+    categories = list(category_indices.keys())
+    per_category = max(min_per_category, target_total // len(categories))
+
     sample_photo_list = []
-    tries = 0
-    while len(sample_photo_list) < sample_size and tries < sample_size * 3:
-        item = train_dataset[random.randrange(len(train_dataset))]
-        tries += 1
-        if item is None:
-            continue
-        sample_photo_list.append(item[photo_idx])
+    for category in categories:
+        indices = category_indices[category]
+        chosen = random.sample(indices, min(per_category, len(indices)))
+        for idx in chosen:
+            item = train_dataset[idx]
+            if item is None:
+                continue
+            sample_photo_list.append(item[photo_idx])
     sample_photo_images = torch.stack(sample_photo_list) if sample_photo_list else None
-    print(f"[CONFIG] Sampled {len(sample_photo_list)} real photo images for k-means prompt init")
+    print(f"[CONFIG] Sampled {len(sample_photo_list)} real photo images for k-means prompt init "
+          f"(stratified, {per_category}/category across {len(categories)} categories)")
 
     # 4. Setup Checkpointing and Logger
     logger = TensorBoardLogger('tb_logs', name=opts.exp_name)

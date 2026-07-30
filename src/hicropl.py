@@ -470,10 +470,20 @@ class VisualVisualPromptLearner(nn.Module):
         meaningless while chasing the main losses. Photo-only by design (see
         __init__ note) -- returns 0 if no anchor was computed (no sample
         images were provided at construction time).
+
+        Uses per-token COSINE distance (mean over n_ctx), not raw MSE: KgCoOp
+        itself regularizes normalized CLIP embeddings, not raw high-dim
+        unnormalized vectors. Plain MSE over a [n_ctx, p_dim]=[4,768]=3072-
+        element tensor averages the loss down to a near-zero scale (~1e-7 for
+        realistic drift), making it utterly negligible next to L1/L4 for any
+        practical lambda_kg -- verified empirically: with MSE, lambda_kg
+        swept 0.1 -> 1 -> 2 produced no measurable change in loss or mAP.
+        Cosine distance is bounded in [0, 2] and scale-invariant to prompt
+        dimensionality, so it stays comparable to the other loss terms.
         """
         if not self.has_photo_anchor:
             return torch.zeros((), device=self.cross_prompts_photo[0].device, dtype=self.cross_prompts_photo[0].dtype)
-        return F.mse_loss(self.cross_prompts_photo[0], self.photo_anchor)
+        return (1.0 - F.cosine_similarity(self.cross_prompts_photo[0], self.photo_anchor, dim=-1)).mean()
 
 
 class SimpleTextPromptLearner(nn.Module):
