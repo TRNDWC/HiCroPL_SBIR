@@ -59,7 +59,7 @@ class CustomCLIP(nn.Module):
     Sử dụng HiCroPLFeatureExtractor làm nòng cốt.
     """
 
-    def __init__(self, cfg, clip_model, classnames=None):
+    def __init__(self, cfg, clip_model, classnames=None, sample_photo_images=None):
         super().__init__()
         self.cfg = cfg
 
@@ -87,7 +87,9 @@ class CustomCLIP(nn.Module):
         # -- Prompt Learners --
         # Initialize Visual-Visual learner + simple text learners + adapters
         print("Initializing Visual Prompt Learner (photo + sketch, independent)...")
-        self.visual_visual_learner = VisualVisualPromptLearner(cfg, self.clip, self.clip)
+        self.visual_visual_learner = VisualVisualPromptLearner(
+            cfg, self.clip, self.clip, sample_photo_images=sample_photo_images
+        )
 
         print("Initializing Photo Text Prompt Learner...")
         cfg_photo = copy.copy(cfg)
@@ -149,11 +151,15 @@ class CustomCLIP(nn.Module):
         logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
         logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
 
+        # 7. Photo-only KgCoOp-style regularization (see VisualVisualPromptLearner.regularization_loss)
+        loss_kg_photo = self.visual_visual_learner.regularization_loss()
+
         return (
             photo_feat, logits_photo,
             sketch_feat, logits_sketch,
             neg_feat, label,
             text_feat_photo, text_feat_sketch,
+            loss_kg_photo,
         )
 
 

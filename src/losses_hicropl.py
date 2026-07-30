@@ -38,12 +38,17 @@ def loss_fn_hicropl(args, features):
     Loss Components:
     L1: InfoNCE Loss (sketch - positive_photo) - Cross-modal alignment
     L4: Cross-Entropy Loss (text - photo) + (text - sketch) - Classification
+    L_kg: KgCoOp-style regularization, photo-only (pulls the photo layer-0
+          prompt back toward its k-means real-feature anchor). See
+          VisualVisualPromptLearner.regularization_loss for why this is not
+          applied to sketch (CLIP's frozen conv1 was never trained on sketch).
     """
     (
         photo_feat, logits_photo,
         sketch_feat, logits_sketch,
         neg_feat, label,
         text_feat_photo, text_feat_sketch,
+        loss_kg_photo,
     ) = features
 
     device = logits_photo.device
@@ -53,6 +58,7 @@ def loss_fn_hicropl(args, features):
     temperature = getattr(args, 'temperature', 0.07)
     lambda_cross_modal = getattr(args, 'lambda_cross_modal', 1.0)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
+    lambda_kg = getattr(args, 'lambda_kg', 0.1)
     triplet_margin = getattr(args, 'triplet_margin', 0.3)
     use_triplet_l1 = getattr(args, 'eval_mode', 'category') == 'fine_grained' or getattr(args, 'use_triplet_l1', False)
 
@@ -71,4 +77,4 @@ def loss_fn_hicropl(args, features):
     loss_ce_sketch = F.cross_entropy(logits_sketch, label)
     loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
-    return loss_cross_modal + loss_ce
+    return loss_cross_modal + loss_ce + lambda_kg * loss_kg_photo

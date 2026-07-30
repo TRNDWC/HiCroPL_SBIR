@@ -102,6 +102,22 @@ if __name__ == '__main__':
     # Extract classnames for Context Learner initialization
     classnames = list(train_dataset.all_categories)
 
+    # Sample real photo images once, used only for k-means-based photo prompt
+    # initialization / regularization anchor (see VisualVisualPromptLearner).
+    # Photo-only by design -- cheap, done once before training starts.
+    photo_idx = 0 if opts.eval_mode == 'fine_grained' else 1
+    sample_size = min(128, len(train_dataset))
+    sample_photo_list = []
+    tries = 0
+    while len(sample_photo_list) < sample_size and tries < sample_size * 3:
+        item = train_dataset[random.randrange(len(train_dataset))]
+        tries += 1
+        if item is None:
+            continue
+        sample_photo_list.append(item[photo_idx])
+    sample_photo_images = torch.stack(sample_photo_list) if sample_photo_list else None
+    print(f"[CONFIG] Sampled {len(sample_photo_list)} real photo images for k-means prompt init")
+
     # 4. Setup Checkpointing and Logger
     logger = TensorBoardLogger('tb_logs', name=opts.exp_name)
 
@@ -152,7 +168,7 @@ if __name__ == '__main__':
 
     # 6. Initialize Model
     if ckpt_path is None:
-        custom_clip = CustomCLIP(opts, clip_model, classnames=classnames)
+        custom_clip = CustomCLIP(opts, clip_model, classnames=classnames, sample_photo_images=sample_photo_images)
         if opts.eval_mode == 'fine_grained':
             from src_fg.model_hicropl_fg import HiCroPL_SBIR_FG
             model = HiCroPL_SBIR_FG(cfg=opts, args=opts, classnames=classnames, model=custom_clip)
@@ -162,7 +178,7 @@ if __name__ == '__main__':
         print ('resuming training from %s'%ckpt_path)
         # Note: Depending on Lightning version, PyTorch Lightning may require the architecture 
         # to be instantiated before load_from_checkpoint or handle it directly if args are passed correctly.
-        custom_clip = CustomCLIP(opts, clip_model, classnames=classnames)
+        custom_clip = CustomCLIP(opts, clip_model, classnames=classnames, sample_photo_images=sample_photo_images)
         if opts.eval_mode == 'fine_grained':
             from src_fg.model_hicropl_fg import HiCroPL_SBIR_FG
             model = HiCroPL_SBIR_FG.load_from_checkpoint(ckpt_path, cfg=opts, args=opts, classnames=classnames, model=custom_clip)

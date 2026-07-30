@@ -50,6 +50,7 @@ parser.add_argument('--ctx_init_sketch', type=str, default='a sketch of a', help
 parser.add_argument('--temperature', type=float, default=0.07, help='Temperature for InfoNCE Loss')
 parser.add_argument('--lambda_cross_modal', type=float, default=1.0, help='Weight for sketch-photo InfoNCE alignment')
 parser.add_argument('--lambda_ce', type=float, default=1.0, help='Weight for prompted visual-text classification loss')
+parser.add_argument('--lambda_kg', type=float, default=0.1, help='Weight for photo-only KgCoOp-style regularization toward the k-means real-feature anchor')
 
 # CLIP design_details (CoPrompt-style builder config)
 parser.add_argument('--clip_trainer', type=str, default='HiCroPL', help='Trainer key for CLIP block routing')

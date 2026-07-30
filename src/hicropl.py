@@ -35,6 +35,29 @@ def _get_clones(module, N):
     """Create N deep copies of a module."""
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 
+
+def _kmeans(x, k, n_iters=25):
+    """Minimal Lloyd's-algorithm k-means (pure torch, no new dependency).
+
+    Used for data-driven prompt initialization (SPT / VIPAMIN-style): cluster
+    real patch embeddings instead of drawing the prompt from pure Gaussian
+    noise. x: [N, D]. Returns centroids [k, D].
+    """
+    n = x.shape[0]
+    k = min(k, n)
+    idx = torch.randperm(n, device=x.device)[:k]
+    centroids = x[idx].clone()
+    for _ in range(n_iters):
+        dists = torch.cdist(x, centroids)  # [N, k]
+        assign = dists.argmin(dim=1)  # [N]
+        new_centroids = centroids.clone()
+        for c in range(k):
+            mask = assign == c
+            if mask.any():
+                new_centroids[c] = x[mask].mean(dim=0)
+        centroids = new_centroids
+    return centroids
+
 class TextEncoder(nn.Module):
     # GIỮ NGUYÊN 100% TỪ BẢN GỐC HICROPL
     def __init__(self, clip_model):
@@ -278,7 +301,7 @@ class VisualVisualPromptLearner(nn.Module):
     original mechanics here per explicit request.
     """
 
-    def __init__(self, cfg, clip_model_photo, clip_model_sketch):
+    def __init__(self, cfg, clip_model_photo, clip_model_sketch, sample_photo_images=None):
         super().__init__()
 
         self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
@@ -298,8 +321,32 @@ class VisualVisualPromptLearner(nn.Module):
         self.n_ctx = n_ctx
 
         ######## photo prompt initialization (base, per layer) ########
-        photo_vectors = torch.empty(n_ctx, p_dim, dtype=dtype)
-        nn.init.normal_(photo_vectors, std=0.02)
+        # Data-driven init for layer 0 ONLY (SPT/VIPAMIN-style): k-means over
+        # real photo patch embeddings (conv1 output, frozen, in-distribution
+        # for CLIP's own pretraining). Deeper layers (1..depth-1) stay plain
+        # Gaussian -- doing this for deeper layers would need per-layer
+        # intermediate-activation clustering, out of scope here.
+        #
+        # Deliberately PHOTO-ONLY: CLIP's conv1 was never trained on sketch,
+        # so anchoring sketch to its own frozen response could pull the
+        # sketch prompt toward photo-biased low-level statistics instead of
+        # the shape-abstraction the cross-domain exchange is meant to
+        # preserve. Sketch keeps plain random init below, no anchor.
+        self.has_photo_anchor = sample_photo_images is not None
+        if self.has_photo_anchor:
+            with torch.no_grad():
+                sample_photo_images = sample_photo_images.to(
+                    device=clip_model_photo.visual.conv1.weight.device, dtype=dtype
+                )
+                patches = clip_model_photo.visual.conv1(sample_photo_images)  # [B, p_dim, grid, grid]
+                patches = patches.reshape(patches.shape[0], patches.shape[1], -1)  # [B, p_dim, grid*grid]
+                patches = patches.permute(0, 2, 1).reshape(-1, patches.shape[1])   # [B*grid*grid, p_dim]
+                photo_centroids = _kmeans(patches.float(), n_ctx).to(dtype)
+            photo_vectors = photo_centroids.clone()
+            self.register_buffer("photo_anchor", photo_centroids.clone())
+        else:
+            photo_vectors = torch.empty(n_ctx, p_dim, dtype=dtype)
+            nn.init.normal_(photo_vectors, std=0.02)
 
         self.ctx_photo = nn.Parameter(photo_vectors)
         cross_prompts_photo = nn.ParameterList(
@@ -416,6 +463,19 @@ class VisualVisualPromptLearner(nn.Module):
             cross_prompts_photo_deeper,
             cross_prompts_sketch_deeper,
         )
+
+    def regularization_loss(self):
+        """KgCoOp-style pull-back: keep the photo layer-0 prompt close to its
+        k-means real-feature anchor, so it doesn't drift into something
+        meaningless while chasing the main losses. Photo-only by design (see
+        __init__ note) -- returns 0 if no anchor was computed (no sample
+        images were provided at construction time).
+        """
+        if not self.has_photo_anchor:
+            return torch.zeros((), device=self.cross_prompts_photo[0].device, dtype=self.cross_prompts_photo[0].dtype)
+        return F.mse_loss(self.cross_prompts_photo[0], self.photo_anchor)
+
+
 class SimpleTextPromptLearner(nn.Module):
     """Minimal text-only prompt learner: prepares tokenized prompts and text prompt tensors.
 
