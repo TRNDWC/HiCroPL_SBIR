@@ -301,7 +301,7 @@ class VisualVisualPromptLearner(nn.Module):
     original mechanics here per explicit request.
     """
 
-    def __init__(self, cfg, clip_model_photo, clip_model_sketch, sample_photo_images=None):
+    def __init__(self, cfg, clip_model_photo, clip_model_sketch, sample_photo_images=None, sample_sketch_images=None):
         super().__init__()
 
         self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
@@ -335,11 +335,15 @@ class VisualVisualPromptLearner(nn.Module):
         # intermediate activations -- a deliberate simplification, not a
         # literal per-layer generative-init replication of SPT's method.
         #
-        # Deliberately PHOTO-ONLY: CLIP's conv1 was never trained on sketch,
-        # so anchoring sketch to its own frozen response could pull the
-        # sketch prompt toward photo-biased low-level statistics instead of
-        # the shape-abstraction the cross-domain exchange is meant to
-        # preserve. Sketch keeps plain random init below, no anchor.
+        # The persistent regularization anchor (regularization_loss, below)
+        # stays PHOTO-ONLY: CLIP's conv1 was never trained on sketch, so
+        # pulling the sketch prompt back toward its own frozen response on
+        # every step could bias it toward photo statistics instead of the
+        # shape-abstraction the exchange is meant to preserve. That concern
+        # is about a *persistent* pull throughout training, though -- it
+        # doesn't apply to a one-time init value that gradient is then free
+        # to move away from, so sketch DOES get the same data-driven k-means
+        # init below (from its own conv1), just no anchor/regularization loss.
         self.has_photo_anchor = sample_photo_images is not None
         if self.has_photo_anchor:
             with torch.no_grad():
@@ -369,12 +373,28 @@ class VisualVisualPromptLearner(nn.Module):
         ######## photo prompt initialization end ########
 
         ######## sketch prompt initialization (base, per layer) ########
-        sketch_vectors = torch.empty(n_ctx, s_dim, dtype=dtype)
-        nn.init.normal_(sketch_vectors, std=0.02)
-        cross_prompts_sketch = nn.ParameterList(
-            [nn.Parameter(sketch_vectors.clone())
-             for _ in range(self.prompt_depth)]
-        )
+        # Same technique as photo, own conv1/centroids, no anchor/regularization
+        # (see note above) -- init only, gradient is free to move it afterward.
+        has_sketch_anchor = sample_sketch_images is not None
+        if has_sketch_anchor:
+            with torch.no_grad():
+                sample_sketch_images = sample_sketch_images.to(
+                    device=clip_model_sketch.visual.conv1.weight.device, dtype=dtype
+                )
+                s_patches = clip_model_sketch.visual.conv1(sample_sketch_images)  # [B, s_dim, grid, grid]
+                s_patches = s_patches.reshape(s_patches.shape[0], s_patches.shape[1], -1)
+                s_patches = s_patches.permute(0, 2, 1).reshape(-1, s_patches.shape[1])  # [B*grid*grid, s_dim]
+                sketch_centroids = _kmeans(s_patches.float(), n_ctx).to(dtype)
+            cross_prompts_sketch = nn.ParameterList(
+                [nn.Parameter(sketch_centroids.clone()) for _ in range(self.prompt_depth)]
+            )
+        else:
+            sketch_vectors = torch.empty(n_ctx, s_dim, dtype=dtype)
+            nn.init.normal_(sketch_vectors, std=0.02)
+            cross_prompts_sketch = nn.ParameterList(
+                [nn.Parameter(sketch_vectors.clone())
+                 for _ in range(self.prompt_depth)]
+            )
         self.cross_prompts_sketch = cross_prompts_sketch
         ######## sketch prompt initialization end ########
 
