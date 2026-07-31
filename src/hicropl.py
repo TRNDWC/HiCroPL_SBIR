@@ -321,11 +321,19 @@ class VisualVisualPromptLearner(nn.Module):
         self.n_ctx = n_ctx
 
         ######## photo prompt initialization (base, per layer) ########
-        # Data-driven init for layer 0 ONLY (SPT/VIPAMIN-style): k-means over
-        # real photo patch embeddings (conv1 output, frozen, in-distribution
-        # for CLIP's own pretraining). Deeper layers (1..depth-1) stay plain
-        # Gaussian -- doing this for deeper layers would need per-layer
-        # intermediate-activation clustering, out of scope here.
+        # Data-driven init (SPT/VIPAMIN-style): k-means over real photo patch
+        # embeddings (conv1 output, frozen, in-distribution for CLIP's own
+        # pretraining). Centroids are computed once from layer-0 (conv1, pre-
+        # transformer) patches and REUSED to seed every deeper layer's prompt
+        # too -- validated via ablation (A/B/C/D) that grounding just layer 0
+        # already reverses the regression from adding cross-domain exchange;
+        # deeper layers 1..depth-1 also feed the same Mapper/LKP exchange
+        # (as source or as the Mapper's residual query input, see
+        # VisualVisualPromptLearner.forward), so they were still pure-noise
+        # inputs to that exchange even with layer 0 grounded. This reuses the
+        # SAME centroids rather than clustering separate per-layer
+        # intermediate activations -- a deliberate simplification, not a
+        # literal per-layer generative-init replication of SPT's method.
         #
         # Deliberately PHOTO-ONLY: CLIP's conv1 was never trained on sketch,
         # so anchoring sketch to its own frozen response could pull the
@@ -349,13 +357,14 @@ class VisualVisualPromptLearner(nn.Module):
             nn.init.normal_(photo_vectors, std=0.02)
 
         self.ctx_photo = nn.Parameter(photo_vectors)
-        cross_prompts_photo = nn.ParameterList(
-            [self.ctx_photo] +
-            [nn.Parameter(torch.empty(n_ctx, p_dim, dtype=dtype))
-             for _ in range(self.prompt_depth - 1)]
-        )
-        for single_para in cross_prompts_photo[1:]:
-            nn.init.normal_(single_para, std=0.02)
+        if self.has_photo_anchor:
+            deeper_photo_params = [nn.Parameter(photo_centroids.clone()) for _ in range(self.prompt_depth - 1)]
+        else:
+            deeper_photo_params = [nn.Parameter(torch.empty(n_ctx, p_dim, dtype=dtype))
+                                    for _ in range(self.prompt_depth - 1)]
+            for single_para in deeper_photo_params:
+                nn.init.normal_(single_para, std=0.02)
+        cross_prompts_photo = nn.ParameterList([self.ctx_photo] + deeper_photo_params)
         self.cross_prompts_photo = cross_prompts_photo
         ######## photo prompt initialization end ########
 

@@ -272,6 +272,20 @@ class HiCroPL_SBIR(pl.LightningModule):
         # No weight_decay (matches ducta/baseline's Adam call, which also omits it -> default 0).
         return torch.optim.Adam(param_groups)
 
+    def on_after_backward(self):
+        """Diagnostic: does gradient actually reach ctx_photo (layer-0 photo
+        prompt)? If loss_kg_photo_raw prints ~0.000000 despite training, this
+        tells us whether that's because the parameter never moves (grad ~0 --
+        real graph-disconnection bug) or because it does move but the angular
+        drift relative to its own norm is just small at this lr/step count
+        (grad non-zero, expected -- not a bug).
+        """
+        ctx_photo = self.model.visual_visual_learner.ctx_photo
+        grad_norm = ctx_photo.grad.norm().item() if ctx_photo.grad is not None else 0.0
+        param_norm = ctx_photo.detach().norm().item()
+        self.log('ctx_photo_grad_norm', grad_norm, on_step=True, on_epoch=True, prog_bar=False, logger=True)
+        self.log('ctx_photo_param_norm', param_norm, on_step=True, on_epoch=True, prog_bar=False, logger=True)
+
     def training_step(self, batch, batch_idx):
         from src.losses_hicropl import loss_fn_hicropl
         features = self.model(batch, self.classnames)
@@ -405,6 +419,11 @@ class HiCroPL_SBIR(pl.LightningModule):
             self.print(f"loss_kg_photo_raw (epoch avg, unweighted by lambda_kg): {loss_kg_photo_raw.item():.6f}")
         else:
             self.print(f"[DEBUG] loss_kg_photo_raw not in callback_metrics. Available keys: {list(self.trainer.callback_metrics.keys())}")
+
+        grad_norm = self.trainer.callback_metrics.get("ctx_photo_grad_norm", None)
+        param_norm = self.trainer.callback_metrics.get("ctx_photo_param_norm", None)
+        if grad_norm is not None and param_norm is not None:
+            self.print(f"[DEBUG] ctx_photo grad_norm (epoch avg): {grad_norm.item():.8f}, param_norm: {param_norm.item():.6f}")
 
         self.test_photo_features.clear()
         self.test_sketch_features.clear()
