@@ -301,7 +301,7 @@ class VisualVisualPromptLearner(nn.Module):
     original mechanics here per explicit request.
     """
 
-    def __init__(self, cfg, clip_model_photo, clip_model_sketch, sample_photo_images=None, sample_sketch_images=None):
+    def __init__(self, cfg, clip_model_photo, clip_model_sketch, sample_photo_images=None):
         super().__init__()
 
         self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
@@ -321,29 +321,32 @@ class VisualVisualPromptLearner(nn.Module):
         self.n_ctx = n_ctx
 
         ######## photo prompt initialization (base, per layer) ########
-        # Data-driven init (SPT/VIPAMIN-style): k-means over real photo patch
-        # embeddings (conv1 output, frozen, in-distribution for CLIP's own
-        # pretraining). Centroids are computed once from layer-0 (conv1, pre-
-        # transformer) patches and REUSED to seed every deeper layer's prompt
-        # too -- validated via ablation (A/B/C/D) that grounding just layer 0
-        # already reverses the regression from adding cross-domain exchange;
-        # deeper layers 1..depth-1 also feed the same Mapper/LKP exchange
-        # (as source or as the Mapper's residual query input, see
-        # VisualVisualPromptLearner.forward), so they were still pure-noise
-        # inputs to that exchange even with layer 0 grounded. This reuses the
-        # SAME centroids rather than clustering separate per-layer
-        # intermediate activations -- a deliberate simplification, not a
-        # literal per-layer generative-init replication of SPT's method.
+        # Data-driven init for layer 0 ONLY (SPT/VIPAMIN-style): k-means over
+        # real photo patch embeddings (conv1 output, frozen, in-distribution
+        # for CLIP's own pretraining). Deeper layers (1..depth-1) stay plain
+        # Gaussian.
         #
-        # The persistent regularization anchor (regularization_loss, below)
-        # stays PHOTO-ONLY: CLIP's conv1 was never trained on sketch, so
-        # pulling the sketch prompt back toward its own frozen response on
-        # every step could bias it toward photo statistics instead of the
-        # shape-abstraction the exchange is meant to preserve. That concern
-        # is about a *persistent* pull throughout training, though -- it
-        # doesn't apply to a one-time init value that gradient is then free
-        # to move away from, so sketch DOES get the same data-driven k-means
-        # init below (from its own conv1), just no anchor/regularization loss.
+        # Reverted from a broader "reuse centroids for every layer" variant
+        # (both photo and sketch) after checking MaPLe's own ablation (Table
+        # 8, arXiv:2210.03117): "informed init at ALL layers" scored WORSE
+        # (HM 77.88) than plain random at all layers (HM 78.52), and best was
+        # informed init at layer 0 only, random elsewhere (HM 78.55) -- the
+        # opposite of what extending our k-means init to every layer does.
+        # DA-VPT (arXiv:2505.23694, Sec 5.3.2) independently found the same
+        # pattern: per-layer mean/data-derived init "impedes effectiveness"
+        # due to homogeneous content across layers hurting discriminative
+        # learning. Both ablate on base->novel-class generalization, which is
+        # the same axis ZS-SBIR evaluates on (unseen categories), so the
+        # caution transfers directly. Layer-0-only grounding matches both
+        # papers' best config and is also what our own A/B/C/D ablation
+        # actually validated (mAP 0.7799); the all-layers variant's +0.0024
+        # was 1-2 epoch noise, not a confirmed gain.
+        #
+        # Deliberately PHOTO-ONLY: CLIP's conv1 was never trained on sketch,
+        # so anchoring sketch to its own frozen response could pull the
+        # sketch prompt toward photo-biased low-level statistics instead of
+        # the shape-abstraction the cross-domain exchange is meant to
+        # preserve. Sketch keeps plain random init below, no anchor.
         self.has_photo_anchor = sample_photo_images is not None
         if self.has_photo_anchor:
             with torch.no_grad():
@@ -361,40 +364,23 @@ class VisualVisualPromptLearner(nn.Module):
             nn.init.normal_(photo_vectors, std=0.02)
 
         self.ctx_photo = nn.Parameter(photo_vectors)
-        if self.has_photo_anchor:
-            deeper_photo_params = [nn.Parameter(photo_centroids.clone()) for _ in range(self.prompt_depth - 1)]
-        else:
-            deeper_photo_params = [nn.Parameter(torch.empty(n_ctx, p_dim, dtype=dtype))
-                                    for _ in range(self.prompt_depth - 1)]
-            for single_para in deeper_photo_params:
-                nn.init.normal_(single_para, std=0.02)
-        cross_prompts_photo = nn.ParameterList([self.ctx_photo] + deeper_photo_params)
+        cross_prompts_photo = nn.ParameterList(
+            [self.ctx_photo] +
+            [nn.Parameter(torch.empty(n_ctx, p_dim, dtype=dtype))
+             for _ in range(self.prompt_depth - 1)]
+        )
+        for single_para in cross_prompts_photo[1:]:
+            nn.init.normal_(single_para, std=0.02)
         self.cross_prompts_photo = cross_prompts_photo
         ######## photo prompt initialization end ########
 
         ######## sketch prompt initialization (base, per layer) ########
-        # Same technique as photo, own conv1/centroids, no anchor/regularization
-        # (see note above) -- init only, gradient is free to move it afterward.
-        has_sketch_anchor = sample_sketch_images is not None
-        if has_sketch_anchor:
-            with torch.no_grad():
-                sample_sketch_images = sample_sketch_images.to(
-                    device=clip_model_sketch.visual.conv1.weight.device, dtype=dtype
-                )
-                s_patches = clip_model_sketch.visual.conv1(sample_sketch_images)  # [B, s_dim, grid, grid]
-                s_patches = s_patches.reshape(s_patches.shape[0], s_patches.shape[1], -1)
-                s_patches = s_patches.permute(0, 2, 1).reshape(-1, s_patches.shape[1])  # [B*grid*grid, s_dim]
-                sketch_centroids = _kmeans(s_patches.float(), n_ctx).to(dtype)
-            cross_prompts_sketch = nn.ParameterList(
-                [nn.Parameter(sketch_centroids.clone()) for _ in range(self.prompt_depth)]
-            )
-        else:
-            sketch_vectors = torch.empty(n_ctx, s_dim, dtype=dtype)
-            nn.init.normal_(sketch_vectors, std=0.02)
-            cross_prompts_sketch = nn.ParameterList(
-                [nn.Parameter(sketch_vectors.clone())
-                 for _ in range(self.prompt_depth)]
-            )
+        sketch_vectors = torch.empty(n_ctx, s_dim, dtype=dtype)
+        nn.init.normal_(sketch_vectors, std=0.02)
+        cross_prompts_sketch = nn.ParameterList(
+            [nn.Parameter(sketch_vectors.clone())
+             for _ in range(self.prompt_depth)]
+        )
         self.cross_prompts_sketch = cross_prompts_sketch
         ######## sketch prompt initialization end ########
 
