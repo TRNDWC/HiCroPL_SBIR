@@ -110,6 +110,7 @@ if __name__ == '__main__':
     # (coupon-collector effect at n=128), so we guarantee >=1 image/category
     # instead of leaving coverage to chance.
     photo_idx = 0 if opts.eval_mode == 'fine_grained' else 1
+    sketch_idx = 1 if opts.eval_mode == 'fine_grained' else 0
     target_total = min(128, len(train_dataset))
     min_per_category = opts.kmeans_min_per_category
 
@@ -122,6 +123,7 @@ if __name__ == '__main__':
     per_category = max(min_per_category, target_total // len(categories))
 
     sample_photo_list = []
+    sample_sketch_list = []
     for category in categories:
         indices = category_indices[category]
         chosen = random.sample(indices, min(per_category, len(indices)))
@@ -130,9 +132,11 @@ if __name__ == '__main__':
             if item is None:
                 continue
             sample_photo_list.append(item[photo_idx])
+            sample_sketch_list.append(item[sketch_idx])
     sample_photo_images = torch.stack(sample_photo_list) if sample_photo_list else None
-    print(f"[CONFIG] Sampled {len(sample_photo_list)} real photo images for k-means prompt init "
-          f"(stratified, {per_category}/category across {len(categories)} categories)")
+    sample_sketch_images = torch.stack(sample_sketch_list) if sample_sketch_list else None
+    print(f"[CONFIG] Sampled {len(sample_photo_list)} real photo + {len(sample_sketch_list)} real sketch images "
+          f"for k-means prompt init (stratified, {per_category}/category across {len(categories)} categories)")
 
     # 4. Setup Checkpointing and Logger
     logger = TensorBoardLogger('tb_logs', name=opts.exp_name)
@@ -184,7 +188,7 @@ if __name__ == '__main__':
 
     # 6. Initialize Model
     if ckpt_path is None:
-        custom_clip = CustomCLIP(opts, clip_model, classnames=classnames, sample_photo_images=sample_photo_images)
+        custom_clip = CustomCLIP(opts, clip_model, classnames=classnames, sample_photo_images=sample_photo_images, sample_sketch_images=sample_sketch_images)
         if opts.eval_mode == 'fine_grained':
             from src_fg.model_hicropl_fg import HiCroPL_SBIR_FG
             model = HiCroPL_SBIR_FG(cfg=opts, args=opts, classnames=classnames, model=custom_clip)
@@ -194,7 +198,7 @@ if __name__ == '__main__':
         print ('resuming training from %s'%ckpt_path)
         # Note: Depending on Lightning version, PyTorch Lightning may require the architecture 
         # to be instantiated before load_from_checkpoint or handle it directly if args are passed correctly.
-        custom_clip = CustomCLIP(opts, clip_model, classnames=classnames, sample_photo_images=sample_photo_images)
+        custom_clip = CustomCLIP(opts, clip_model, classnames=classnames, sample_photo_images=sample_photo_images, sample_sketch_images=sample_sketch_images)
         if opts.eval_mode == 'fine_grained':
             from src_fg.model_hicropl_fg import HiCroPL_SBIR_FG
             model = HiCroPL_SBIR_FG.load_from_checkpoint(ckpt_path, cfg=opts, args=opts, classnames=classnames, model=custom_clip)

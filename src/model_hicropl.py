@@ -59,7 +59,7 @@ class CustomCLIP(nn.Module):
     Sử dụng HiCroPLFeatureExtractor làm nòng cốt.
     """
 
-    def __init__(self, cfg, clip_model, classnames=None, sample_photo_images=None):
+    def __init__(self, cfg, clip_model, classnames=None, sample_photo_images=None, sample_sketch_images=None):
         super().__init__()
         self.cfg = cfg
 
@@ -88,7 +88,8 @@ class CustomCLIP(nn.Module):
         # Initialize Visual-Visual learner + simple text learners + adapters
         print("Initializing Visual Prompt Learner (photo + sketch, independent)...")
         self.visual_visual_learner = VisualVisualPromptLearner(
-            cfg, self.clip, self.clip, sample_photo_images=sample_photo_images
+            cfg, self.clip, self.clip,
+            sample_photo_images=sample_photo_images, sample_sketch_images=sample_sketch_images
         )
 
         print("Initializing Photo Text Prompt Learner...")
