@@ -398,27 +398,78 @@ class TestCrossModalPromptLearner(unittest.TestCase):
             self.assertEqual(dv.shape, (n_ctx, 768), f"deeper_vis[{i}] shape mismatch")
 
     def test_bidirectional_flow_modifies_prompts(self):
-        """Verify that bidirectional flow changes visual and text prompt values."""
+        """Bidirectional flow phải đổi GIÁ TRỊ TRẢ VỀ, không mutate nn.Parameter.
+
+        Bản cũ dùng `.data.copy_()` ghi thẳng vào Parameter; test cũ assert đúng
+        hành vi đó nên đã hợp thức hoá bug. Prompt đã map giờ đi ra qua giá trị
+        trả về, còn Parameter gốc chỉ được đổi bởi optimizer.step().
+        """
         learner = self._create_prompt_learner()
 
         # Snapshot prompt values before forward
-        vis_before = [p.data.clone() for p in learner.cross_prompts_visual]
-        text_before = [p.data.clone() for p in learner.cross_prompts_text]
+        vis_before = [p.detach().clone() for p in learner.cross_prompts_visual]
+        text_before = [p.detach().clone() for p in learner.cross_prompts_text]
 
-        _ = learner(["cat", "dog"])
+        _, first_vis, deeper_text, deeper_vis = learner()
 
-        # Early visual prompts (0..cross_layer-1) should be modified by T->V
-        for i in range(learner.cross_layer):
+        # Early visual prompts (0..cross_layer-1) đi qua T->V nên khác param gốc
+        self.assertFalse(
+            torch.equal(first_vis.detach(), vis_before[0]),
+            "Visual prompt 0 was NOT modified by T->V flow",
+        )
+        for i in range(1, learner.cross_layer):
             self.assertFalse(
-                torch.equal(vis_before[i], learner.cross_prompts_visual[i].data),
+                torch.equal(deeper_vis[i - 1].detach(), vis_before[i]),
                 f"Visual prompt {i} was NOT modified by T->V flow",
             )
 
-        # Later text prompts (cross_layer..depth-1) should be modified by V->T
+        # Later text prompts (cross_layer..depth-1) đi qua V->T
         for i in range(learner.cross_layer, learner.prompt_depth):
             self.assertFalse(
-                torch.equal(text_before[i], learner.cross_prompts_text[i].data),
+                torch.equal(deeper_text[i - 1].detach(), text_before[i]),
                 f"Text prompt {i} was NOT modified by V->T flow",
+            )
+
+        # Regression: forward KHÔNG được mutate Parameter tại chỗ
+        for i, before in enumerate(vis_before):
+            self.assertTrue(
+                torch.equal(before, learner.cross_prompts_visual[i].detach()),
+                f"cross_prompts_visual[{i}] bị mutate in-place trong forward",
+            )
+        for i, before in enumerate(text_before):
+            self.assertTrue(
+                torch.equal(before, learner.cross_prompts_text[i].detach()),
+                f"cross_prompts_text[{i}] bị mutate in-place trong forward",
+            )
+
+    def test_knowledge_mapper_receives_gradient(self):
+        """Mapper network + LKP phải nhận gradient (bản .data.copy_ thì không)."""
+        learner = self._create_prompt_learner()
+
+        _, first_vis, deeper_text, _ = learner()
+        loss = first_vis.sum() + sum(t.sum() for t in deeper_text)
+        loss.backward()
+
+        must_have_grad = [
+            ("text2visual_net", learner.text2visual_net),
+            ("visual2text_net", learner.visual2text_net),
+            ("attn_pooling_text_nets", learner.attn_pooling_text_nets),
+            ("attn_pooling_visual_nets", learner.attn_pooling_visual_nets),
+        ]
+        for name, module in must_have_grad:
+            grads = [p.grad for p in module.parameters()]
+            self.assertTrue(
+                any(g is not None and torch.any(g != 0) for g in grads),
+                f"{name} không nhận gradient - knowledge flow bị cắt khỏi graph",
+            )
+
+        for name, plist in (
+            ("text_proxy_tokens", learner.text_proxy_tokens),
+            ("visual_proxy_tokens", learner.visual_proxy_tokens),
+        ):
+            self.assertTrue(
+                any(p.grad is not None for p in plist),
+                f"{name} không nhận gradient",
             )
 
     def test_parameter_count(self):

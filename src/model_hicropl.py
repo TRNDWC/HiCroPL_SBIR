@@ -24,8 +24,17 @@ def freeze_model(m):
 
 def freeze_all_but_bn(m):
     """
-    Sets requires_grad=False for all parameters except LayerNorm.
-    This is usually used with model.apply(freeze_all_but_bn).
+    DEPRECATED - KHÔNG DÙNG. Giữ lại chỉ để tương thích ngược.
+
+    Hàm này KHÔNG đóng băng hết: `model.apply()` duyệt theo module và ở đây chỉ
+    đụng tới `m.weight` / `m.bias`, nên mọi `nn.Parameter` khai báo trực tiếp vẫn
+    còn requires_grad=True, cụ thể với CLIP ViT-B/32:
+      - nn.MultiheadAttention.in_proj_weight / in_proj_bias (24 layer, ~30.7M params)
+      - CLIP.text_projection, CLIP.positional_embedding, CLIP.logit_scale
+      - visual.proj, visual.class_embedding, visual.positional_embedding
+    Tổng cộng ~31.4M param leak mỗi bản CLIP, so với ~65K LayerNorm thực sự cần train.
+
+    Dùng `freeze_model(m)` + `m.apply(unfreeze_ln)` thay thế.
     """
     if not isinstance(m, torch.nn.LayerNorm):
         if hasattr(m, "weight") and m.weight is not None:
@@ -126,10 +135,29 @@ class CustomCLIP(nn.Module):
         # Backward-compatible alias for older code paths
         self.clip_distill = self.clip_distill_photo
 
-        self.clip_sketch.apply(freeze_all_but_bn)
-        self.clip_photo.apply(freeze_all_but_bn)
-        self.clip_distill_photo.apply(freeze_all_but_bn)  
-        self.clip_distill_sketch.apply(freeze_all_but_bn) 
+        # -- Freeze policy --
+        # Student: đóng băng toàn bộ rồi mở lại ĐÚNG LayerNorm.
+        # `freeze_model` duyệt `.parameters()` (đệ quy, gồm cả bare nn.Parameter như
+        # in_proj_weight / text_projection / proj / logit_scale) nên không sót gì,
+        # khác với `freeze_all_but_bn` chỉ đụng `m.weight` / `m.bias`.
+        for branch in (self.clip_photo, self.clip_sketch):
+            freeze_model(branch)
+            branch.apply(unfreeze_ln)
+
+        # Teacher/distill: đóng băng HOÀN TOÀN, không chừa LayerNorm.
+        # Nếu teacher còn trainable thì mục tiêu distill trôi theo student và các
+        # loss dạng `1 - cos(feat + feat_distill, feat)` bị tối ưu bằng cách kéo
+        # teacher về phía student -> collapse, loss giảm nhưng không học được gì.
+        for teacher in (self.clip_distill_photo, self.clip_distill_sketch):
+            freeze_model(teacher)
+            teacher.eval()
+
+        # Nếu muốn học logit_scale, bật lại tường minh ở đây và nhớ clamp <= log(100)
+        # trong forward. Mặc định giữ đóng băng cho đúng tinh thần prompt tuning.
+        self.learn_logit_scale = bool(getattr(cfg, 'learn_logit_scale', False))
+        if self.learn_logit_scale:
+            self.clip_photo.logit_scale.requires_grad_(True)
+            self.clip_sketch.logit_scale.requires_grad_(True)
 
         # Print trainable param counts per branch for verification
         def _count_trainable(m):
@@ -149,7 +177,7 @@ class CustomCLIP(nn.Module):
         ):
             tot, tr = _count_trainable(module)
             print(f"{name}: trainable {tr:,} / total {tot:,} params")
-        
+
         # 3. Logit scales (unique to each prompted model)
         self.logit_scale_photo = self.clip_photo.logit_scale
         self.logit_scale_sketch = self.clip_sketch.logit_scale
@@ -187,9 +215,52 @@ class CustomCLIP(nn.Module):
 
         # -- Extractors removed: logic will be inlined in forward() --
 
+    def train(self, mode=True):
+        """Giữ 2 nhánh distill luôn ở eval mode.
+
+        Lightning gọi `model.train()` trên toàn LightningModule mỗi epoch, ghi đè
+        `clip_model_frozen.eval()` đã set ở script train. Override ở đây để teacher
+        không bao giờ bị bật lại train mode.
+        """
+        super().train(mode)
+        self.clip_distill_photo.eval()
+        self.clip_distill_sketch.eval()
+        return self
+
     def normalize_features(self, feat_prenorm):
         """L2-normalize feature tensors."""
         return feat_prenorm / feat_prenorm.norm(dim=-1, keepdim=True)
+
+    def _exp_logit_scale(self, logit_scale_param):
+        """exp(logit_scale) có clamp, theo đúng CLIP gốc (max = 100).
+
+        Chỉ có tác dụng khi `learn_logit_scale=True`; mặc định logit_scale bị
+        freeze nên clamp là no-op, nhưng giữ ở đây để nếu bật học thì scale
+        không thể phân kỳ.
+        """
+        return logit_scale_param.clamp(max=float(np.log(100.0))).exp()
+
+    def _encode_gpt_distill(self):
+        """Encode GPT prompts của teacher, cache lại theo device.
+
+        Teacher đã freeze hoàn toàn và tokenized_gpt_* là hằng số theo classname,
+        nên feature không đổi giữa các step -> encode 1 lần thay vì 2 full
+        text-encoder pass mỗi batch. Luôn chạy dưới no_grad.
+        """
+        cache = getattr(self, '_gpt_distill_cache', None)
+        device = self.tokenized_gpt_photo.device
+        if cache is not None and cache[0].device == device:
+            return cache
+
+        with torch.no_grad():
+            text_distill_photo = self.clip_distill_photo.encode_text(self.tokenized_gpt_photo)
+            text_distill_photo = text_distill_photo / text_distill_photo.norm(dim=-1, keepdim=True)
+
+            text_distill_sketch = self.clip_distill_sketch.encode_text(self.tokenized_gpt_sketch)
+            text_distill_sketch = text_distill_sketch / text_distill_sketch.norm(dim=-1, keepdim=True)
+
+        self._gpt_distill_cache = (text_distill_photo, text_distill_sketch)
+        return self._gpt_distill_cache
 
     def forward(self, x, classnames):
         """
@@ -216,7 +287,7 @@ class CustomCLIP(nn.Module):
             "image_features": image_features_photo,
             "text_features": text_features_all_photo,
             "text_features_all": text_features_all_photo,
-            "logit_scale": self.logit_scale_photo.exp()
+            "logit_scale": self._exp_logit_scale(self.logit_scale_photo)
         }
         
         # 3. Sketch branch: text learner + visual routing (vis1)
@@ -228,7 +299,7 @@ class CustomCLIP(nn.Module):
             "image_features": image_features_sketch,
             "text_features": text_features_all_sketch,
             "text_features_all": text_features_all_sketch,
-            "logit_scale": self.logit_scale_sketch.exp()
+            "logit_scale": self._exp_logit_scale(self.logit_scale_sketch)
         }
         
         # 4. Negative branch (uses photo encoder + photo visual prompts)
@@ -237,26 +308,29 @@ class CustomCLIP(nn.Module):
             "image_features": image_features_neg,
             "text_features": text_features_all_photo,
             "text_features_all": text_features_all_photo,
-            "logit_scale": self.logit_scale_photo.exp()
+            "logit_scale": self._exp_logit_scale(self.logit_scale_photo)
         }
         
-        # 2. Distill Visual Features (Open LN branches) - RUN ONCE
-        if photo_aug_tensor is not None and sk_aug_tensor is not None:
-            photo_aug_feat_fixed = self.clip_distill_photo.visual(photo_aug_tensor.type(self.dtype))
-            photo_aug_feat_fixed = photo_aug_feat_fixed / photo_aug_feat_fixed.norm(dim=-1, keepdim=True)
-            
-            sketch_aug_feat_fixed = self.clip_distill_sketch.visual(sk_aug_tensor.type(self.dtype))
-            sketch_aug_feat_fixed = sketch_aug_feat_fixed / sketch_aug_feat_fixed.norm(dim=-1, keepdim=True)
-        else:
-            photo_aug_feat_fixed = None
-            sketch_aug_feat_fixed = None
+        # 2. Distill Visual Features (teacher đã freeze hoàn toàn) - RUN ONCE
+        # Bọc no_grad: teacher chỉ là nguồn target, không được nhận gradient từ
+        # residual mix (photo_feat_prenorm) hay từ L2 consistency loss.
+        with torch.no_grad():
+            if photo_aug_tensor is not None and sk_aug_tensor is not None:
+                photo_aug_feat_fixed = self.clip_distill_photo.visual(photo_aug_tensor.type(self.dtype))
+                photo_aug_feat_fixed = photo_aug_feat_fixed / photo_aug_feat_fixed.norm(dim=-1, keepdim=True)
 
-        # Distill Visual Features for Original (for residual mix)
-        photo_feat_fixed = self.clip_distill_photo.visual(photo_tensor.type(self.dtype))
-        photo_feat_fixed = photo_feat_fixed / photo_feat_fixed.norm(dim=-1, keepdim=True)
-        
-        sketch_feat_fixed = self.clip_distill_sketch.visual(sk_tensor.type(self.dtype))
-        sketch_feat_fixed = sketch_feat_fixed / sketch_feat_fixed.norm(dim=-1, keepdim=True)
+                sketch_aug_feat_fixed = self.clip_distill_sketch.visual(sk_aug_tensor.type(self.dtype))
+                sketch_aug_feat_fixed = sketch_aug_feat_fixed / sketch_aug_feat_fixed.norm(dim=-1, keepdim=True)
+            else:
+                photo_aug_feat_fixed = None
+                sketch_aug_feat_fixed = None
+
+            # Distill Visual Features for Original (for residual mix)
+            photo_feat_fixed = self.clip_distill_photo.visual(photo_tensor.type(self.dtype))
+            photo_feat_fixed = photo_feat_fixed / photo_feat_fixed.norm(dim=-1, keepdim=True)
+
+            sketch_feat_fixed = self.clip_distill_sketch.visual(sk_tensor.type(self.dtype))
+            sketch_feat_fixed = sketch_feat_fixed / sketch_feat_fixed.norm(dim=-1, keepdim=True)
 
         # 3. Residual Mix & Final Normalization
         # Image
@@ -280,11 +354,7 @@ class CustomCLIP(nn.Module):
         text_feat_sketch = text_feat_sketch_prompted / text_feat_sketch_prompted.norm(dim=-1, keepdim=True)
 
         # Encode GPT distill features for all classes (loss will select batch entries)
-        text_distill_photo = self.clip_distill_photo.encode_text(self.tokenized_gpt_photo)
-        text_distill_photo = text_distill_photo / text_distill_photo.norm(dim=-1, keepdim=True)
-
-        text_distill_sketch = self.clip_distill_sketch.encode_text(self.tokenized_gpt_sketch)
-        text_distill_sketch = text_distill_sketch / text_distill_sketch.norm(dim=-1, keepdim=True)
+        text_distill_photo, text_distill_sketch = self._encode_gpt_distill()
 
         # 5. Compute Logits
         logit_scale = out_p["logit_scale"]
@@ -361,6 +431,8 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         # Log to Lightning logger and print for immediate visibility
         self.print(f"Learnable tokens - visual/photo: {tokens_visual_photo}, visual/sketch: {tokens_visual_sketch}, text/photo: {tokens_text_photo}, text/sketch: {tokens_text_sketch}")
+
+        self._assert_no_param_leak()
         # Use self.log so TensorBoard/other loggers capture these scalars
         # Use rank_zero_only to avoid duplicate logs in distributed runs
         try:
@@ -371,6 +443,61 @@ class HiCroPL_SBIR(pl.LightningModule):
         except Exception:
             # Fallback to print-only if logger not ready
             pass
+
+    def _assert_no_param_leak(self):
+        """Fail sớm nếu freeze policy bị rò rỉ, chạy ở `on_fit_start`.
+
+        Hai bất biến:
+          1. Không param nào của teacher (clip_distill_*) được trainable.
+          2. Trong backbone student, nguồn trainable hợp lệ DUY NHẤT là LayerNorm
+             (cộng logit_scale nếu bật `learn_logit_scale`). Mọi thứ khác -
+             in_proj_weight, text_projection, visual.proj, positional_embedding,
+             class_embedding - đều là dấu hiệu freeze policy bị thủng.
+
+        Param của prompt learner được loại trừ theo tên: chúng có
+        nn.MultiheadAttention riêng và đúng là phải trainable.
+        """
+        model = self.model
+        learner_prefixes = ('visual_visual_learner', 'text_prompt_photo', 'text_prompt_sketch')
+        distill_prefixes = ('clip_distill_photo', 'clip_distill_sketch', 'clip_distill')
+
+        ln_ids = {
+            id(p)
+            for _, m in model.named_modules() if isinstance(m, torch.nn.LayerNorm)
+            for p in m.parameters(recurse=False)
+        }
+        allowed_ids = set()
+        if getattr(model, 'learn_logit_scale', False):
+            allowed_ids = {id(model.clip_photo.logit_scale), id(model.clip_sketch.logit_scale)}
+
+        trainable = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+        self.print(
+            f"TRAINABLE: {len(trainable)} tensors, "
+            f"{sum(p.numel() for _, p in trainable):,} params"
+        )
+
+        problems = []
+
+        distill = [n for n, _ in trainable if n.startswith(distill_prefixes)]
+        if distill:
+            problems.append(
+                f"teacher chưa freeze ({len(distill)} tensors): {distill[:5]}"
+            )
+
+        backbone = [
+            n for n, p in trainable
+            if not n.startswith(learner_prefixes)
+            and not n.startswith(distill_prefixes)
+            and id(p) not in ln_ids
+            and id(p) not in allowed_ids
+        ]
+        if backbone:
+            problems.append(
+                f"param backbone ngoài LayerNorm vẫn trainable ({len(backbone)} tensors): {backbone[:10]}"
+            )
+
+        if problems:
+            raise RuntimeError("Phát hiện leak parameters:\n  - " + "\n  - ".join(problems))
 
     def configure_optimizers(self):
         def add_unique_params(candidates, out_list, seen_ids):
@@ -393,19 +520,41 @@ class HiCroPL_SBIR(pl.LightningModule):
         learner_modules = {
             'visual_visual_learner', 'text_prompt_photo', 'text_prompt_sketch'
         }
+        # Teacher/distill phải nằm ngoài optimizer hoàn toàn. Filter cũ chỉ loại
+        # learner module nên LayerNorm của clip_distill_* vẫn lọt vào param group.
+        distill_prefixes = ('clip_distill_photo', 'clip_distill_sketch', 'clip_distill')
         for name, module in self.model.named_modules():
-            if isinstance(module, torch.nn.LayerNorm):
-                # Skip if inside a learner module (already included with learner params)
-                if not any(learner_name in name for learner_name in learner_modules):
-                    add_unique_params(module.parameters(recurse=False), ln_params, seen_ids)
+            if not isinstance(module, torch.nn.LayerNorm):
+                continue
+            if name.startswith(distill_prefixes):
+                continue
+            # Skip if inside a learner module (already included with learner params)
+            if any(learner_name in name for learner_name in learner_modules):
+                continue
+            add_unique_params(module.parameters(recurse=False), ln_params, seen_ids)
 
-        extra_trainable_params = []
-        for _, p in self.model.named_parameters():
-            if p.requires_grad and id(p) not in seen_ids:
-                seen_ids.add(id(p))
-                extra_trainable_params.append(p)
+        # logit_scale chỉ vào optimizer khi được bật tường minh (cfg.learn_logit_scale)
+        if getattr(self.model, 'learn_logit_scale', False):
+            add_unique_params(
+                [self.model.clip_photo.logit_scale, self.model.clip_sketch.logit_scale],
+                ln_params, seen_ids,
+            )
 
-        non_prompt_params = ln_params + extra_trainable_params
+        # KHÔNG dùng catch-all "gom mọi param requires_grad còn sót" nữa: đó chính là
+        # chỗ biến leak của freeze policy thành leak thật trong optimizer. Thay bằng
+        # kiểm tra - nếu còn param trainable nào không thuộc whitelist thì fail sớm.
+        leaked = [
+            n for n, p in self.model.named_parameters()
+            if p.requires_grad and id(p) not in seen_ids
+        ]
+        if leaked:
+            raise RuntimeError(
+                f"{len(leaked)} param trainable nằm ngoài whitelist (prompt learners + LayerNorm "
+                f"của student). Kiểm tra lại freeze policy trong CustomCLIP.__init__. "
+                f"Ví dụ: {leaked[:10]}"
+            )
+
+        non_prompt_params = ln_params
 
         self.print(f"Number of trainable prompt params: {sum(p.numel() for p in prompt_params):,}")
         self.print(f"Number of trainable non-prompt params: {sum(p.numel() for p in non_prompt_params):,}")

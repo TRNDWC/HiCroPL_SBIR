@@ -122,11 +122,13 @@ class CrossModalPromptLearner(nn.Module):
         self.n_cls = n_cls
         self.n_ctx = n_ctx
         self.dtype = dtype
-        self.token_embedding = clip_model.token_embedding
-        self.clip_model = clip_model 
-        
-        # Store distill model for zero-shot image encoder
-        self.clip_model_distill = clip_model_distill if clip_model_distill is not None else clip_model
+
+        # NOTE: giữ CLIP backbone qua list wrapper để nn.Module KHÔNG đăng ký chúng
+        # thành submodule. Nếu gán thẳng (`self.clip_model = clip_model`), thì
+        # `prompt_learner.parameters()` trong configure_optimizers() sẽ kéo nguyên
+        # backbone + teacher vào param group `prompt_lr` — leak toàn bộ CLIP.
+        self._clip_model = [clip_model]
+        self._clip_model_distill = [clip_model_distill if clip_model_distill is not None else clip_model]
 
         ######## cross-modal text token initialization ########
         if ctx_init and (n_ctx) <= 4:
@@ -176,7 +178,9 @@ class CrossModalPromptLearner(nn.Module):
             self.attn_pooling_text_nets, self.attn_pooling_visual_nets = self.attn_pooling_text_nets.half(), self.attn_pooling_visual_nets.half()
 
         ######## Distillation Image Encoder ########
-        self.ZS_image_encoder = self.clip_model_distill.visual
+        # Cũng bọc trong list: teacher visual tower KHÔNG được đăng ký làm submodule
+        # của prompt learner, nếu không nó sẽ đi thẳng vào optimizer với prompt_lr.
+        self._ZS_image_encoder = [self._clip_model_distill[0].visual]
 
         ######## Initialize prompts for all classes ########
         classnames = [name.replace("_", " ") for name in classnames]
@@ -193,6 +197,18 @@ class CrossModalPromptLearner(nn.Module):
         self.register_buffer("token_suffix", embedding[:, 1 + n_ctx:, :])
         self.register_buffer("tokenized_prompts", tokenized_prompts)
 
+    @property
+    def clip_model(self):
+        return self._clip_model[0]
+
+    @property
+    def clip_model_distill(self):
+        return self._clip_model_distill[0]
+
+    @property
+    def ZS_image_encoder(self):
+        return self._ZS_image_encoder[0]
+
     def construct_prompts(self, ctx, prefix, suffix, label=None):
         if label is not None:
             prefix = prefix[label]
@@ -200,7 +216,6 @@ class CrossModalPromptLearner(nn.Module):
         return torch.cat([prefix, ctx, suffix], dim=1)
 
     def forward(self):
-        device = self.cross_prompts_text[0].device
         ctx = self.cross_prompts_text[0]
         if ctx.dim() == 2:
             ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1)
@@ -208,48 +223,53 @@ class CrossModalPromptLearner(nn.Module):
         # Construct text input prompts
         text_input = self.construct_prompts(ctx, self.token_prefix, self.token_suffix)
 
+        # Luồng functional: KHÔNG ghi đè `.data` của nn.Parameter.
+        # Ghi bằng `.data.copy_()` sẽ (a) cắt graph nên knowledge mapper + LKP không
+        # bao giờ nhận gradient, và (b) mutate param ngoài optimizer.step() khiến
+        # trạng thái Adam lệch khỏi giá trị param thật.
+        text_out = list(self.cross_prompts_text)
+        visual_out = list(self.cross_prompts_visual)
+
         ######## T->I mapping ########
-        visual_prompts = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)  
-        text_prompts = torch.cat([self.cross_prompts_text[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)  
+        visual_prompts = torch.cat([visual_out[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0)
         proxy_text_tokens = []
         for i in range(self.cross_layer):
             text_proxy_token = self.attn_pooling_text_nets[i](
-                token_query=self.text_proxy_tokens[i],  
-                sequence_key=self.cross_prompts_text[i],  
-                sequence_value=self.cross_prompts_text[i]  
+                token_query=self.text_proxy_tokens[i],
+                sequence_key=text_out[i],
+                sequence_value=text_out[i]
             )
             proxy_text_tokens.append(text_proxy_token)
-        proxy_text_prompts = torch.cat(proxy_text_tokens, dim=0)  
-        visual_prompts = visual_prompts.view(-1, visual_prompts.shape[-1])  
-        proxy_text_prompts = proxy_text_prompts.view(-1, proxy_text_prompts.shape[-1])  
-        updated_visual_prompts = self.text2visual_net(visual_prompts, proxy_text_prompts, proxy_text_prompts)  
-        updated_visual_prompts = updated_visual_prompts.view(self.cross_layer, -1, updated_visual_prompts.shape[-1])  
+        proxy_text_prompts = torch.cat(proxy_text_tokens, dim=0)
+        visual_prompts = visual_prompts.view(-1, visual_prompts.shape[-1])
+        proxy_text_prompts = proxy_text_prompts.view(-1, proxy_text_prompts.shape[-1])
+        updated_visual_prompts = self.text2visual_net(visual_prompts, proxy_text_prompts, proxy_text_prompts)
+        updated_visual_prompts = updated_visual_prompts.view(self.cross_layer, -1, updated_visual_prompts.shape[-1])
         for i in range(self.cross_layer):
-            self.cross_prompts_visual[i].data.copy_(updated_visual_prompts[i])
+            visual_out[i] = updated_visual_prompts[i]
 
         ######## I->T mapping ########
-        text_prompts = torch.cat([self.cross_prompts_text[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)  
-        visual_prompts = torch.cat([self.cross_prompts_visual[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)  
+        text_prompts = torch.cat([text_out[i].unsqueeze(0) for i in range(self.cross_layer, self.prompt_depth)], dim=0)
         proxy_visual_tokens = []
         for i in range(self.cross_layer, self.prompt_depth):
             visual_proxy_token = self.attn_pooling_visual_nets[i - self.cross_layer](
-                token_query=self.visual_proxy_tokens[i - self.cross_layer],  
-                sequence_key=self.cross_prompts_visual[i],  
-                sequence_value=self.cross_prompts_visual[i]  
+                token_query=self.visual_proxy_tokens[i - self.cross_layer],
+                sequence_key=visual_out[i],
+                sequence_value=visual_out[i]
             )
             proxy_visual_tokens.append(visual_proxy_token)
-            proxy_visual_prompts = torch.cat(proxy_visual_tokens, dim=0)  
-        text_prompts = text_prompts.view(-1, text_prompts.shape[-1])  
-        proxy_visual_prompts = proxy_visual_prompts.view(-1, proxy_visual_prompts.shape[-1])  
-        updated_text_prompts = self.visual2text_net(text_prompts, proxy_visual_prompts, proxy_visual_prompts)  
-        updated_text_prompts = updated_text_prompts.view(self.prompt_depth - self.cross_layer, -1, updated_text_prompts.shape[-1])  
+        proxy_visual_prompts = torch.cat(proxy_visual_tokens, dim=0)
+        text_prompts = text_prompts.view(-1, text_prompts.shape[-1])
+        proxy_visual_prompts = proxy_visual_prompts.view(-1, proxy_visual_prompts.shape[-1])
+        updated_text_prompts = self.visual2text_net(text_prompts, proxy_visual_prompts, proxy_visual_prompts)
+        updated_text_prompts = updated_text_prompts.view(self.prompt_depth - self.cross_layer, -1, updated_text_prompts.shape[-1])
         for i in range(self.cross_layer, self.prompt_depth):
-            self.cross_prompts_text[i].data.copy_(updated_text_prompts[i - self.cross_layer])
+            text_out[i] = updated_text_prompts[i - self.cross_layer]
 
-        cross_prompts_text_deeper = [self.cross_prompts_text[i] for i in range(1, len(self.cross_prompts_text))]
-        cross_prompts_visual_deeper = [self.cross_prompts_visual[i] for i in range(1, len(self.cross_prompts_visual))]
-        
-        return text_input, self.cross_prompts_visual[0], cross_prompts_text_deeper, cross_prompts_visual_deeper
+        cross_prompts_text_deeper = text_out[1:]
+        cross_prompts_visual_deeper = visual_out[1:]
+
+        return text_input, visual_out[0], cross_prompts_text_deeper, cross_prompts_visual_deeper
 
 
 class VisualVisualPromptLearner(nn.Module):
@@ -347,19 +367,30 @@ class VisualVisualPromptLearner(nn.Module):
         ######## knowledge mapper end ########
 
     def forward(self):
+        # Luồng functional: prompt sau khi map được trả về dưới dạng tensor mới,
+        # KHÔNG ghi đè `.data` của nn.Parameter. Ghi đè `.data` sẽ:
+        #   (a) cắt đứt graph -> photo2sketch_net / sketch2photo_net / attn_pooling_*
+        #       / *_proxy_tokens không bao giờ nhận gradient (grad = None vĩnh viễn),
+        #   (b) mutate param ngoài optimizer.step() -> Adam momentum áp lên giá trị
+        #       đã bị thay, update của step trước bị xoá ở forward kế tiếp,
+        #   (c) mutate cả trong validation (extract_eval_features gọi hàm này mỗi
+        #       batch) -> weights trôi trong lúc eval và checkpoint lưu giá trị bẩn.
+        photo_out = list(self.cross_prompts_photo)
+        sketch_out = list(self.cross_prompts_sketch)
+
         if not self.disable_cross_exchange:
             ######## P->S mapping (analog: T->I mapping) ########
             # Photo guides sketch ở shallow layers [0..cross_layer]
             sketch_prompts = torch.cat(
-                [self.cross_prompts_sketch[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0
+                [sketch_out[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0
             )
             # LKP: compress photo prompts thành proxy
             proxy_photo_tokens = []
             for i in range(self.cross_layer):
                 photo_proxy = self.attn_pooling_photo_nets[i](
                     token_query=self.photo_proxy_tokens[i],
-                    sequence_key=self.cross_prompts_photo[i],
-                    sequence_value=self.cross_prompts_photo[i]
+                    sequence_key=photo_out[i],
+                    sequence_value=photo_out[i]
                 )
                 proxy_photo_tokens.append(photo_proxy)
             proxy_photo_prompts = torch.cat(proxy_photo_tokens, dim=0)
@@ -374,13 +405,16 @@ class VisualVisualPromptLearner(nn.Module):
                 self.cross_layer, -1, updated_sketch_prompts.shape[-1]
             )
             for i in range(self.cross_layer):
-                self.cross_prompts_sketch[i].data.copy_(updated_sketch_prompts[i])
+                sketch_out[i] = updated_sketch_prompts[i]
             ######## P->S mapping end ########
 
             ######## S->P mapping (analog: I->T mapping) ########
             # Sketch guides photo ở deep layers [cross_layer..prompt_depth]
+            # Hai stage không giao index (P->S chạm [0, cross_layer), S->P chạm
+            # [cross_layer, prompt_depth)) nên đọc từ list cho kết quả số học
+            # y hệt bản cũ, chỉ khác là graph được giữ nguyên.
             photo_prompts = torch.cat(
-                [self.cross_prompts_photo[i].unsqueeze(0) 
+                [photo_out[i].unsqueeze(0)
                  for i in range(self.cross_layer, self.prompt_depth)], dim=0
             )
             # LKP: compress sketch prompts thành proxy
@@ -388,8 +422,8 @@ class VisualVisualPromptLearner(nn.Module):
             for i in range(self.cross_layer, self.prompt_depth):
                 sketch_proxy = self.attn_pooling_sketch_nets[i - self.cross_layer](
                     token_query=self.sketch_proxy_tokens[i - self.cross_layer],
-                    sequence_key=self.cross_prompts_sketch[i],
-                    sequence_value=self.cross_prompts_sketch[i]
+                    sequence_key=sketch_out[i],
+                    sequence_value=sketch_out[i]
                 )
                 proxy_sketch_tokens.append(sketch_proxy)
             proxy_sketch_prompts = torch.cat(proxy_sketch_tokens, dim=0)
@@ -404,25 +438,17 @@ class VisualVisualPromptLearner(nn.Module):
                 self.prompt_depth - self.cross_layer, -1, updated_photo_prompts.shape[-1]
             )
             for i in range(self.cross_layer, self.prompt_depth):
-                self.cross_prompts_photo[i].data.copy_(updated_photo_prompts[i - self.cross_layer])
+                photo_out[i] = updated_photo_prompts[i - self.cross_layer]
             ######## S->P mapping end ########
-
-        # Extract deeper prompts (analog: cross_prompts_text_deeper, cross_prompts_visual_deeper)
-        cross_prompts_photo_deeper = [
-            self.cross_prompts_photo[i] for i in range(1, len(self.cross_prompts_photo))
-        ]
-        cross_prompts_sketch_deeper = [
-            self.cross_prompts_sketch[i] for i in range(1, len(self.cross_prompts_sketch))
-        ]
 
         # Returns analog: (text_input, visual_ctx[0], text_deeper, visual_deeper)
         # Ở đây không có text_input vì đây là visual-visual
         # photo[0] = shallow photo prompt, sketch[0] = shallow sketch prompt
         return (
-            self.cross_prompts_photo[0],   # analog: visual_ctx (first layer prompt)
-            self.cross_prompts_sketch[0],  # analog: visual_ctx cho branch kia
-            cross_prompts_photo_deeper,    # analog: cross_prompts_text_deeper
-            cross_prompts_sketch_deeper    # analog: cross_prompts_visual_deeper
+            photo_out[0],    # analog: visual_ctx (first layer prompt)
+            sketch_out[0],   # analog: visual_ctx cho branch kia
+            photo_out[1:],   # analog: cross_prompts_text_deeper
+            sketch_out[1:],  # analog: cross_prompts_visual_deeper
         )
 class SimpleTextPromptLearner(nn.Module):
     """Minimal text-only prompt learner: prepares tokenized prompts and text prompt tensors.
