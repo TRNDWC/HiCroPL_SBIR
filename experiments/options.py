@@ -3,6 +3,9 @@ import argparse
 parser = argparse.ArgumentParser(description='Sketch-based OD')
 
 parser.add_argument('--exp_name', type=str, default='LN_prompt')
+parser.add_argument('--seed', type=int, default=42,
+                    help='Seed cho Python/NumPy/PyTorch/CUDA và DataLoader worker. '
+                         'Đổi seed để ước lượng dao động giữa các lần chạy')
 
 # --------------------
 # DataLoader Options
@@ -102,6 +105,13 @@ parser.add_argument('--run_id', type=str, default='',
 # ----------------------
 parser.add_argument('--learn_logit_scale', action='store_true',
                     help='Cho phép học logit_scale (clamp <= log(100)). Mặc định đóng băng theo tinh thần prompt tuning')
+
+# ----------------------
+# Chẩn đoán
+# ----------------------
+parser.add_argument('--eval_frozen_only', action='store_true',
+                    help='Bỏ hoàn toàn nhánh prompted khi eval, chỉ dùng đặc trưng CLIP '
+                         'đóng băng. Đo trần dưới: prompt thực sự đóng góp bao nhiêu điểm')
 
 # ----------------------
 # Evaluation Mode

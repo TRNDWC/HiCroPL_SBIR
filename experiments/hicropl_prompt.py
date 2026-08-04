@@ -18,9 +18,10 @@ from experiments.options import opts
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 if __name__ == '__main__':
-    SEED = 42
+    SEED = opts.seed
     # Set seed for reproducibility — bao gồm Python, NumPy, PyTorch, CUDA
     pl.seed_everything(SEED, workers=True)
+    print(f'[CONFIG] seed={SEED}')
 
     # Force a single backbone across all branches for stable comparisons.
     if opts.backbone != 'ViT-B/32':
@@ -133,6 +134,7 @@ if __name__ == '__main__':
     # Mỗi lần chạy một thư mục riêng -> chạy lại cùng exp_name không đè log cũ
     run_dir, run_id = make_run_dir(opts.log_dir, opts.exp_name, opts.run_id or None)
     opts.run_id = run_id
+    opts.run_dir = run_dir
 
     run_logger = setup_run_logger(run_dir, opts.exp_name)
     run_logger.info('Checkpoint dir : %s', os.path.abspath(ckpt_dir))

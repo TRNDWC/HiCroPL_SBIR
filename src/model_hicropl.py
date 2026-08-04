@@ -595,9 +595,17 @@ class HiCroPL_SBIR(pl.LightningModule):
 
     def extract_eval_features(self, tensor, modality):
         """Extract visual features: Prompted + Distill Fixed (Residual Mix)"""
+        # Chẩn đoán: bỏ hẳn nhánh prompted, chỉ dùng CLIP đóng băng. Cho biết
+        # prompt thực sự đóng góp bao nhiêu điểm so với zero-shot thuần.
+        if getattr(self.cfg, 'eval_frozen_only', False):
+            distill = (self.model.clip_distill_photo if modality == 'photo'
+                       else self.model.clip_distill_sketch).visual
+            fixed = distill(tensor.type(self.model.dtype))
+            return fixed / fixed.norm(dim=-1, keepdim=True)
+
         # Call visual learner once, cache outputs
         vis1_shallow, vis2_shallow, vis1_deeper, vis2_deeper = self.model.visual_visual_learner()
-        
+
         if modality == 'photo':
             visual_encoder = self.model.visual_encoder_photo
             distill_encoder = self.model.clip_distill_photo.visual
@@ -696,12 +704,18 @@ class HiCroPL_SBIR(pl.LightningModule):
             self.log("val_map_all", mAP, on_step=False, on_epoch=True)
         self.log(f"val_p_{p_k}", mean_precision, on_step=False, on_epoch=True)
 
+        is_new_best = False
         if self.global_step > 0:
-            self.best_metric = self.best_metric if (self.best_metric > mAP.item()) else mAP.item()
+            if mAP.item() > self.best_metric:
+                self.best_metric = mAP.item()
+                is_new_best = True
 
         # Log SAU khi cập nhật: thứ tự cũ ghi giá trị của epoch trước nên biểu đồ
         # TensorBoard luôn trễ một epoch.
         self.log("best_mAP", self.best_metric, on_step=False, on_epoch=True, prog_bar=False)
+
+        if is_new_best:
+            self._save_ap_vector(ap, precision, all_sketch_category, map_k, p_k)
 
         if map_k != 0:
             self.print('mAP@{}: {:.4f}, P@{}: {:.4f}, Best mAP: {:.4f}'.format(
@@ -718,6 +732,35 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.test_sketch_features.clear()
         self.test_photo_labels.clear()
         self.test_sketch_labels.clear()
+
+    def _save_ap_vector(self, ap, precision, sketch_labels, map_k, p_k):
+        """Lưu AP từng query ở epoch tốt nhất, để kiểm cặp giữa hai run.
+
+        So hai giá trị mAP trung bình rất kém nhạy: sai số chuẩn trên 12,694
+        query cỡ 0.2 pp. Nhưng hai model được đánh giá trên CÙNG tập query theo
+        cùng thứ tự (val loader shuffle=False), nên so theo cặp từng query khử
+        được phần lớn phương sai và phát hiện được chênh lệch nhỏ hơn nhiều.
+
+        `sketch_labels` được lưu kèm để scripts/paired_test.py xác nhận hai run
+        thực sự cùng thứ tự query trước khi so.
+        """
+        run_dir = getattr(self.cfg, 'run_dir', None)
+        if not run_dir:
+            return
+        try:
+            out = Path(run_dir) / 'ap_best.npz'
+            np.savez(
+                out,
+                ap=ap.detach().cpu().numpy(),
+                precision=precision.detach().cpu().numpy(),
+                sketch_labels=sketch_labels.detach().cpu().numpy(),
+                epoch=np.array(self.current_epoch),
+                best_map=np.array(self.best_metric),
+                map_k=np.array(map_k),
+                p_k=np.array(p_k),
+            )
+        except Exception as e:
+            self.print(f'Không lưu được ap_best.npz: {type(e).__name__}: {e}')
 
     def test_step(self, batch, batch_idx, dataloader_idx=0):
         return self.validation_step(batch, batch_idx, dataloader_idx)
