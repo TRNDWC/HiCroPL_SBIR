@@ -124,20 +124,30 @@ def collect_metrics(trainer):
 # Callback
 # --------------------------------------------------------------------------
 
+_FALLBACK_LOG = logging.getLogger('hicropl.run_logging')
+
+
 def _never_fail(fn):
     """Lỗi trong callback logging không được giết một run training 10 tiếng.
 
     Ghi lại lỗi rồi đi tiếp. Chỉ dùng cho hook - các hàm CSV bên dưới vẫn raise
     bình thường để test bắt được.
+
+    Handler KHÔNG được đụng tới attribute của instance: nếu chính attribute đó
+    là nguyên nhân lỗi thì handler cũng nổ và một warning biến thành chuỗi crash.
     """
     def wrapper(self, *a, **kw):
         try:
             return fn(self, *a, **kw)
         except Exception as e:
-            self.log.warning('RunCSVLogger.%s lỗi (bỏ qua): %s: %s',
-                             fn.__name__, type(e).__name__, e)
+            log = getattr(self, '_logger', None)
+            if not isinstance(log, logging.Logger):
+                log = _FALLBACK_LOG
+            log.warning('RunCSVLogger.%s lỗi (bỏ qua): %s: %s',
+                        fn.__name__, type(e).__name__, e, exc_info=True)
             return None
     wrapper.__name__ = fn.__name__
+    wrapper.__doc__ = fn.__doc__
     return wrapper
 
 
@@ -170,7 +180,10 @@ class RunCSVLogger(Callback):
         self.run_dir = os.path.join(log_dir, exp_name)
         self.epoch_csv = os.path.join(self.run_dir, 'metrics_epoch.csv')
         self.summary_csv = summary_csv
-        self.log = logger or logging.getLogger(f'hicropl.{exp_name}')
+        # KHÔNG đặt tên `self.log`: PyTorch Lightning gán
+        # `callback.log = lightning_module.log` cho mọi callback trước khi
+        # chạy hook, nên attribute đó sẽ bị ghi đè bằng hàm log metric của PL.
+        self._logger = logger or logging.getLogger(f'hicropl.{exp_name}')
 
         if monitor is None:
             monitor = 'top1' if getattr(cfg, 'eval_mode', 'category') == 'fine_grained' else 'mAP'
@@ -189,12 +202,12 @@ class RunCSVLogger(Callback):
         self._t_start = time.time()
         os.makedirs(self.run_dir, exist_ok=True)
 
-        self.log.info('run_id=%s | checkpoint=%s', self.run_id,
+        self._logger.info('run_id=%s | checkpoint=%s', self.run_id,
                       os.path.abspath(getattr(self.cfg, 'save_dir', 'saved_models')))
-        self.log.info('Config: %s', {k: getattr(self.cfg, k, None) for k in self.TRACKED_OPTS})
+        self._logger.info('Config: %s', {k: getattr(self.cfg, k, None) for k in self.TRACKED_OPTS})
 
         counts = self._param_counts(pl_module)
-        self.log.info(
+        self._logger.info(
             'Params: trainable=%s / total=%s (%.3f%%) | prompt=%s | layernorm=%s',
             f"{counts['trainable']:,}", f"{counts['total']:,}",
             100.0 * counts['trainable'] / max(counts['total'], 1),
@@ -226,7 +239,7 @@ class RunCSVLogger(Callback):
         # Ghi lại toàn bộ file mỗi epoch: schema tự mở rộng, crash vẫn còn dữ liệu
         write_csv(self.epoch_csv, self.rows)
 
-        self.log.info('epoch %d | %s', trainer.current_epoch, self._fmt_row(row))
+        self._logger.info('epoch %d | %s', trainer.current_epoch, self._fmt_row(row))
 
     @_never_fail
     def on_fit_end(self, trainer, pl_module):
@@ -234,7 +247,7 @@ class RunCSVLogger(Callback):
 
     @_never_fail
     def on_exception(self, trainer, pl_module, exception):
-        self.log.error('Run hỏng: %s: %s', type(exception).__name__, exception)
+        self._logger.error('Run hỏng: %s: %s', type(exception).__name__, exception)
         self._write_summary(trainer, pl_module, status=f'failed:{type(exception).__name__}')
 
     # -- internals ---------------------------------------------------------
@@ -277,11 +290,11 @@ class RunCSVLogger(Callback):
 
         append_csv_row(self.summary_csv, summary)
 
-        self.log.info('%s | best %s=%s @epoch %s | %s phút',
+        self._logger.info('%s | best %s=%s @epoch %s | %s phút',
                       status, self.monitor, summary['best_value'],
                       summary['best_epoch'], duration_min)
-        self.log.info('Per-epoch CSV : %s', os.path.abspath(self.epoch_csv))
-        self.log.info('Summary CSV   : %s', os.path.abspath(self.summary_csv))
+        self._logger.info('Per-epoch CSV : %s', os.path.abspath(self.epoch_csv))
+        self._logger.info('Summary CSV   : %s', os.path.abspath(self.summary_csv))
 
     def _best_row(self):
         """Epoch có monitor cao nhất (mọi metric ở đây đều là higher-is-better)."""

@@ -36,10 +36,17 @@ try:
 except ImportError:  # cho phép `--list` chạy trong môi trường chưa cài torch
     torch = None
 
-# Ngưỡng cho check `trainable_budget`. LayerNorm của 2 student ~131K, prompt
-# tokens ~55K, 4 mạng CrossPromptAttention + các AttentionPooling ~7M.
-# Trước khi sửa freeze policy, con số này là ~126M.
-MAX_TRAINABLE_PARAMS = 20_000_000
+# Ngưỡng cho check `trainable_budget`, tính cho config mặc định
+# (prompt_depth=9, cross_layer=4, n_ctx=4, ViT-B/32):
+#   LayerNorm 2 student            131,072
+#   prompt tokens (visual + text)   92,160
+#   photo2sketch + sketch2photo   17,719,296
+#   attn_pooling (4 + 5 clone)    21,288,960
+#   proxy tokens                       6,912
+#   -> ~39.2M
+# Backbone leak trước khi sửa freeze policy là ~126M nữa (~165M tổng), nên
+# ngưỡng 60M tách bạch hai trạng thái mà vẫn dư chỗ cho prompt_depth lớn hơn.
+MAX_TRAINABLE_PARAMS = 60_000_000
 
 # Tên các bare nn.Parameter của CLIP mà `freeze_all_but_bn` không chạm tới được.
 CLIP_BARE_PARAMS = ('text_projection', 'positional_embedding', 'proj',

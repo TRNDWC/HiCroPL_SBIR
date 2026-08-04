@@ -5,6 +5,7 @@ Phần callback cần torch để đếm param, sẽ tự skip nếu thiếu.
 """
 
 import csv
+import logging
 import os
 import shutil
 import sys
@@ -175,6 +176,32 @@ class TestSummaryLogic(unittest.TestCase):
                          'metric khác của epoch tốt nhất cũng phải được chụp')
         self.assertEqual(rows[0]['trainable_params'], '10')
         self.assertEqual(rows[0]['cfg_dataset'], 'sketchy')
+
+    def test_pl_overwrites_log_attribute(self):
+        """PL gán `callback.log = lightning_module.log` cho mọi callback.
+
+        Nếu logger nội bộ đặt tên `self.log` thì nó bị ghi đè bằng một function
+        và mọi hook chết với AttributeError. Logger phải nằm ở tên khác.
+        """
+        self.assertIsInstance(self.cb._logger, logging.Logger)
+
+        def fake_pl_log(*a, **kw):  # đúng thứ PL gán vào
+            pass
+
+        self.cb.log = fake_pl_log  # PL làm việc này trước on_fit_start
+        self.assertIsInstance(self.cb._logger, logging.Logger,
+                              'logger nội bộ không được dùng chung tên với PL')
+
+        # Hook vẫn phải chạy bình thường sau khi PL ghi đè .log
+        self.cb.rows = [{'epoch': 0, 'mAP': 0.5}]
+        self.cb._write_summary(None, None, status='completed')
+        self.assertEqual(len(read_csv(self.summary)), 1)
+
+    def test_never_fail_survives_broken_logger(self):
+        """Handler lỗi không được dựa vào attribute có thể chính là nguyên nhân."""
+        self.cb._logger = 'not-a-logger'
+        self.cb.run_dir = '\x00invalid'
+        self.cb.on_fit_start(FakeTrainer({}), None)  # không được raise
 
     def test_two_runs_share_summary_file(self):
         self.cb.rows = [{'epoch': 0, 'mAP': 0.4}]
