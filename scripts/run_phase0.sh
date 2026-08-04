@@ -11,12 +11,14 @@
 #   bash scripts/run_phase0.sh
 #   DRY=1 bash scripts/run_phase0.sh     # chỉ in lệnh, không chạy
 #   SEEDS="1 2 3 4 5" bash scripts/run_phase0.sh
+#   KEEP_CKPT=1 bash scripts/run_phase0.sh   # giữ lại checkpoint (mặc định: xóa)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SEEDS=${SEEDS:-"1 2 3"}
 EPOCHS=${EPOCHS:-60}
 TAG=${TAG:-p0}
+KEEP_CKPT=${KEEP_CKPT:-0}
 
 # Base dùng --disable_cross_exchange: cross exchange đã được chứng minh là trung
 # tính về hiệu năng nhưng tốn 46.1M tham số và làm chậm mỗi vòng lặp. Dùng nó
@@ -47,6 +49,20 @@ run() {
   [ "${DRY:-0}" = "1" ] || python -u -m experiments.hicropl_prompt "$@"
 }
 
+# Checkpoint 637M params nặng ~2.5GB/run. Giai đoạn 0 KHÔNG cần chúng: 0.3 chỉ
+# đọc tb_logs/*/ap_best.npz và runs_summary.csv. Không xóa thì 3 seed = 7.5GB
+# nằm lại trong quota home cho tới hết đời.
+prune() {   # prune <exp_name>
+  [ "$KEEP_CKPT" = "1" ] && { echo "# KEEP_CKPT=1 -> giữ saved_models/$1"; return 0; }
+  [ -n "$1" ] || { echo "!! prune: exp_name rỗng, bỏ qua"; return 0; }
+  if [ "${DRY:-0}" = "1" ]; then
+    echo "+ rm -rf saved_models/$1"
+  else
+    rm -rf "saved_models/$1"
+    echo "# đã xóa saved_models/$1 (dùng KEEP_CKPT=1 để giữ)"
+  fi
+}
+
 echo "############ 0.4 — Kiểm bất biến của vòng huấn luyện ############"
 if [ "${DRY:-0}" = "1" ]; then
   echo "+ python scripts/verify_training.py --all"
@@ -69,6 +85,7 @@ echo "############ 0.2 — Thanh sai số: ${SEEDS} ############"
 for s in $SEEDS; do
   run "${COMMON[@]}" \
     --exp_name="${TAG}_base_s${s}" --seed="$s" --epochs="$EPOCHS" --save_top_k=1
+  prune "${TAG}_base_s${s}"
 done
 
 echo

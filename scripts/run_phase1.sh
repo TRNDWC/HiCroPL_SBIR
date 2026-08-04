@@ -13,6 +13,7 @@
 #   bash scripts/run_phase1.sh                    # sàng lọc
 #   BEST="8 16" bash scripts/run_phase1.sh        # xác nhận 3 seed
 #   DRY=1 bash scripts/run_phase1.sh
+#   KEEP_CKPT=1 ...                               # giữ checkpoint (mặc định: xóa)
 #
 # EPOCHS: nếu Giai đoạn 0.3 báo Spearman >= 0.9 thì đặt EPOCHS=20 cho bước sàng
 # lọc, tiết kiệm 2/3 thời gian. Nếu không, giữ nguyên 60.
@@ -25,6 +26,7 @@ CONFIRM_EPOCHS=${CONFIRM_EPOCHS:-60}
 SEEDS=${SEEDS:-"1 2 3"}
 BEST=${BEST:-""}
 TAG=${TAG:-p1}
+KEEP_CKPT=${KEEP_CKPT:-0}
 
 COMMON=(
   --dataset=sketchy_ext
@@ -48,6 +50,19 @@ COMMON=(
 run() {
   echo; echo "+ python -u -m experiments.hicropl_prompt $*"; echo
   [ "${DRY:-0}" = "1" ] || python -u -m experiments.hicropl_prompt "$@"
+}
+
+# Xem chú thích trong run_phase0.sh. 1b = 2 n_ctx x 3 seed = 6 x 2.5GB = 15GB.
+# Bảng ablation đọc từ tb_logs, không đọc saved_models.
+prune() {   # prune <exp_name>
+  [ "$KEEP_CKPT" = "1" ] && { echo "# KEEP_CKPT=1 -> giữ saved_models/$1"; return 0; }
+  [ -n "$1" ] || { echo "!! prune: exp_name rỗng, bỏ qua"; return 0; }
+  if [ "${DRY:-0}" = "1" ]; then
+    echo "+ rm -rf saved_models/$1"
+  else
+    rm -rf "saved_models/$1"
+    echo "# đã xóa saved_models/$1 (dùng KEEP_CKPT=1 để giữ)"
+  fi
 }
 
 if [ -z "$BEST" ]; then
@@ -85,6 +100,7 @@ for n in $BEST; do
     run "${COMMON[@]}" \
       --exp_name="${TAG}_nctx${n}_s${s}" --seed="$s" --n_ctx="$n" \
       --epochs="$CONFIRM_EPOCHS" --save_top_k=1
+    prune "${TAG}_nctx${n}_s${s}"
   done
 done
 
