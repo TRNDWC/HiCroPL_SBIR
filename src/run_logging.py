@@ -233,6 +233,7 @@ class RunCSVLogger(Callback):
         self._t_epoch = None
         self._summary_written = False
         self._n_step_rows = 0
+        self._warned_no_monitor = False
 
     # -- hooks -------------------------------------------------------------
 
@@ -293,7 +294,16 @@ class RunCSVLogger(Callback):
         self._n_step_rows += 1
 
     @_never_fail
-    def on_validation_epoch_end(self, trainer, pl_module):
+    def on_validation_end(self, trainer, pl_module):
+        """Chốt một dòng metric cho epoch vừa validate.
+
+        DÙNG `on_validation_end`, KHÔNG dùng `on_validation_epoch_end`:
+        Lightning gọi callback TRƯỚC LightningModule cho hook epoch_end
+        (evaluation_loop._on_evaluation_epoch_end), nên ở đó mAP/P@k của epoch
+        hiện tại còn chưa được `self.log()` -> callback_metrics rỗng hoặc là giá
+        trị epoch trước. `on_validation_end` chạy sau, và chính là hook mà
+        ModelCheckpoint của PL dùng để đọc metric monitor.
+        """
         if trainer.sanity_checking:
             return
 
@@ -306,8 +316,18 @@ class RunCSVLogger(Callback):
             'epoch_time_s': round(time.time() - self._t_epoch, 1) if self._t_epoch else '',
         }
         row.update(self._learning_rates(trainer))
-        row.update(collect_metrics(trainer))
+        metrics = collect_metrics(trainer)
+        row.update(metrics)
         self.rows.append(row)
+
+        # Thiếu metric monitor gần như luôn có nghĩa là hook chạy sai thời điểm.
+        # Báo một lần thay vì lặng lẽ sinh ra CSV không có mAP.
+        if self.monitor not in metrics and not self._warned_no_monitor:
+            self._warned_no_monitor = True
+            self._logger.warning(
+                "Không tìm thấy metric '%s' trong callback_metrics ở on_validation_end. "
+                "CSV sẽ thiếu cột đó. Các key đang có: %s",
+                self.monitor, sorted(metrics)[:15])
 
         # Ghi lại toàn bộ file mỗi epoch: schema tự mở rộng, crash vẫn còn dữ liệu
         write_csv(self.epoch_csv, self.rows)

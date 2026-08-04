@@ -282,7 +282,40 @@ class TestRunCSVLogger(unittest.TestCase):
 
     def _epoch(self, trainer):
         self.cb.on_train_epoch_start(trainer, self.module)
-        self.cb.on_validation_epoch_end(trainer, self.module)
+        self.cb.on_validation_end(trainer, self.module)
+
+    def test_uses_on_validation_end_hook(self):
+        """Phải chốt metric ở on_validation_end, KHÔNG ở on_validation_epoch_end.
+
+        Lightning gọi callback trước LightningModule cho hook epoch_end, nên ở
+        đó mAP/P@k của epoch hiện tại chưa được log -> CSV mất cột metric.
+        """
+        self.assertTrue(hasattr(self.cb, 'on_validation_end'))
+        self.assertFalse(
+            hasattr(type(self.cb), 'on_validation_epoch_end')
+            and 'on_validation_epoch_end' in type(self.cb).__dict__,
+            'on_validation_epoch_end chạy trước khi module log mAP - đừng dùng',
+        )
+
+    def test_eval_metrics_captured(self):
+        """mAP / P@k phải có mặt trong metrics_epoch.csv."""
+        self.cb.on_fit_start(FakeTrainer({}), self.module)
+        self._epoch(FakeTrainer(
+            {'mAP': 0.6335, 'P@200': 0.6371, 'val_map_200': 0.6335, 'train_loss': 5.7},
+            epoch=0))
+
+        rows = read_csv(self.cb.epoch_csv)
+        self.assertEqual(rows[0]['mAP'], '0.6335')
+        self.assertEqual(rows[0]['P@200'], '0.6371')
+        self.assertEqual(rows[0]['val_map_200'], '0.6335')
+        self.assertFalse(self.cb._warned_no_monitor)
+
+    def test_warns_when_monitor_missing(self):
+        self.cb.on_fit_start(FakeTrainer({}), self.module)
+        with self.assertLogs(self.cb._logger, level='WARNING') as cm:
+            self._epoch(FakeTrainer({'train_loss': 5.7}, epoch=0))
+        self.assertTrue(any('mAP' in m for m in cm.output))
+        self.assertTrue(self.cb._warned_no_monitor)
 
     def test_epoch_csv_and_summary(self):
         opt = FakeOptimizer([1e-5, 2e-5])
@@ -350,7 +383,7 @@ class TestRunCSVLogger(unittest.TestCase):
         cb2.on_fit_start(FakeTrainer({}), self.module)
         cb2._epoch = self._epoch
         cb2.on_train_epoch_start(FakeTrainer({}), self.module)
-        cb2.on_validation_epoch_end(FakeTrainer({'mAP': 0.99}, epoch=0), self.module)
+        cb2.on_validation_end(FakeTrainer({'mAP': 0.99}, epoch=0), self.module)
 
         self.assertNotEqual(self.cb.epoch_csv, cb2.epoch_csv)
         self.assertEqual(read_csv(self.cb.epoch_csv)[0]['mAP'], '0.11',
