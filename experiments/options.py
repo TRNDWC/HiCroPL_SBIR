@@ -73,6 +73,26 @@ parser.add_argument('--vision_ctx', type=int, default=-1, help='Visual prompt to
 parser.add_argument('--language_ctx', type=int, default=-1, help='Text prompt token count; -1 means use n_ctx')
 
 # ----------------------
+# Checkpoint & Logging
+# ----------------------
+parser.add_argument('--save_dir', type=str, default='saved_models',
+                    help='Thư mục gốc chứa checkpoint. Checkpoint đi vào <save_dir>/<exp_name>/')
+parser.add_argument('--log_dir', type=str, default='tb_logs',
+                    help='Thư mục gốc cho TensorBoard logs. Logs đi vào <log_dir>/<exp_name>/')
+parser.add_argument('--save_top_k', type=int, default=1,
+                    help='Số checkpoint tốt nhất giữ lại theo metric monitor. -1 = giữ tất cả, 0 = không lưu')
+parser.add_argument('--save_last', action='store_true',
+                    help='Lưu thêm last.ckpt sau mỗi epoch. BẮT BUỘC bật nếu muốn auto-resume')
+parser.add_argument('--no_resume', action='store_true',
+                    help='Bỏ qua last.ckpt có sẵn, luôn train từ đầu')
+
+# ----------------------
+# Verification
+# ----------------------
+parser.add_argument('--learn_logit_scale', action='store_true',
+                    help='Cho phép học logit_scale (clamp <= log(100)). Mặc định đóng băng theo tinh thần prompt tuning')
+
+# ----------------------
 # Evaluation Mode
 # ----------------------
 parser.add_argument('--eval_mode', type=str, default='category', 

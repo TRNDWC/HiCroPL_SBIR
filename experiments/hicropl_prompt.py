@@ -107,7 +107,7 @@ if __name__ == '__main__':
     classnames = list(train_dataset.all_categories)
 
     # 4. Setup Checkpointing and Logger
-    logger = TensorBoardLogger('tb_logs', name=opts.exp_name)
+    logger = TensorBoardLogger(opts.log_dir, name=opts.exp_name)
 
     # Log hyperparameters to TensorBoard's HParams and Text tabs
     opts_dict = vars(opts)
@@ -126,18 +126,29 @@ if __name__ == '__main__':
         checkpoint_monitor = 'val_map_200' if opts.dataset == 'sketchy_ext' else 'val_map_all'
         checkpoint_filename = '{epoch:02d}-{val_map_200:.4f}' if opts.dataset == 'sketchy_ext' else '{epoch:02d}-{val_map_all:.4f}'
 
+    ckpt_dir = os.path.join(opts.save_dir, opts.exp_name)
+    os.makedirs(ckpt_dir, exist_ok=True)
+    print(f"[CONFIG] Checkpoint dir: {os.path.abspath(ckpt_dir)}")
+    print(f"[CONFIG] TensorBoard dir: {os.path.abspath(os.path.join(opts.log_dir, opts.exp_name))}")
+
     checkpoint_callback = ModelCheckpoint(
         monitor=checkpoint_monitor,
-        dirpath='saved_models/%s' % opts.exp_name,
+        dirpath=ckpt_dir,
         filename=checkpoint_filename,
         mode='max',
-        save_last=False)
+        save_top_k=opts.save_top_k,
+        save_last=opts.save_last)
 
-    ckpt_path = os.path.join('saved_models/%s'%opts.exp_name, 'last.ckpt')
-    if not os.path.exists(ckpt_path):
+    ckpt_path = os.path.join(ckpt_dir, 'last.ckpt')
+    if opts.no_resume or not os.path.exists(ckpt_path):
+        if opts.no_resume and os.path.exists(ckpt_path):
+            print(f'[CONFIG] --no_resume: bỏ qua {ckpt_path}, train từ đầu')
+        elif not opts.save_last:
+            # Auto-resume dựa vào last.ckpt, mà last.ckpt chỉ được ghi khi save_last=True.
+            print('[CONFIG] --save_last chưa bật -> sẽ không có last.ckpt để auto-resume')
         ckpt_path = None
     else:
-        print ('resuming training from %s'%ckpt_path)
+        print('resuming training from %s' % ckpt_path)
 
     # 5. Initialize Trainer
     rich_progress_bar = RichProgressBar(
@@ -163,8 +174,7 @@ if __name__ == '__main__':
         else:
             model = HiCroPL_SBIR(cfg=opts, args=opts, classnames=classnames, model=custom_clip)
     else:
-        print ('resuming training from %s'%ckpt_path)
-        # Note: Depending on Lightning version, PyTorch Lightning may require the architecture 
+        # Note: Depending on Lightning version, PyTorch Lightning may require the architecture
         # to be instantiated before load_from_checkpoint or handle it directly if args are passed correctly.
         custom_clip = CustomCLIP(opts, clip_model, clip_model_frozen, classnames=classnames)
         if opts.eval_mode == 'fine_grained':
