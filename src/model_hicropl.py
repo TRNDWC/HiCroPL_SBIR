@@ -366,14 +366,19 @@ class CustomCLIP(nn.Module):
         text_distill_photo, text_distill_sketch = self._encode_gpt_distill()
 
         # 5. Compute Logits
-        logit_scale = out_p["logit_scale"]
-        logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
-        logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
-        
+        # Mỗi nhánh dùng logit_scale CỦA CHÍNH NÓ. Bản cũ lấy `out_p["logit_scale"]`
+        # cho cả hai, nên `logit_scale_sketch` được tính rồi vứt: nó không nằm
+        # trong đồ thị, grad=None, và khi bật --learn_logit_scale thì optimizer
+        # nhận một param không bao giờ được cập nhật.
+        scale_photo = out_p["logit_scale"]
+        scale_sketch = out_s["logit_scale"]
+        logits_photo = scale_photo * photo_feat @ text_feat_photo.t()
+        logits_sketch = scale_sketch * sketch_feat @ text_feat_sketch.t()
+
         # Logits for Augmented Images
         if photo_aug_feat_fixed is not None and sketch_aug_feat_fixed is not None:
-            logits_photo_aug = logit_scale * photo_aug_feat_fixed @ text_feat_photo.t()
-            logits_sketch_aug = logit_scale * sketch_aug_feat_fixed @ text_feat_sketch.t()
+            logits_photo_aug = scale_photo * photo_aug_feat_fixed @ text_feat_photo.t()
+            logits_sketch_aug = scale_sketch * sketch_aug_feat_fixed @ text_feat_sketch.t()
         else:
             logits_photo_aug = None
             logits_sketch_aug = None
