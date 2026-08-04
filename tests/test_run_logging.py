@@ -30,7 +30,8 @@ except ImportError:
     HAS_TORCH = False
 
 from src.run_logging import (  # noqa: E402
-    RunCSVLogger, append_csv_row, collect_metrics, write_csv, _to_scalar,
+    RunCSVLogger, append_csv_row, collect_metrics, make_run_dir,
+    save_config_snapshot, write_csv, _to_scalar,
 )
 
 
@@ -99,6 +100,34 @@ class TestCSVHelpers(unittest.TestCase):
         self.assertEqual(_to_scalar(2), 2.0)
         self.assertEqual(_to_scalar('n/a'), 'n/a')
 
+    def test_make_run_dir_isolates_runs(self):
+        """Chạy lại cùng exp_name phải ra thư mục khác, không đè log cũ."""
+        log_dir = os.path.join(self.tmp, 'logs')
+        d1, id1 = make_run_dir(log_dir, 'exp', 'run-a')
+        d2, id2 = make_run_dir(log_dir, 'exp', 'run-b')
+        self.assertNotEqual(d1, d2)
+        self.assertEqual((id1, id2), ('run-a', 'run-b'))
+        self.assertTrue(os.path.isdir(d1) and os.path.isdir(d2))
+        # cùng exp_name -> chung thư mục cha
+        self.assertEqual(os.path.dirname(d1), os.path.dirname(d2))
+
+    def test_make_run_dir_default_id_is_timestamp(self):
+        d, rid = make_run_dir(os.path.join(self.tmp, 'logs'), 'exp')
+        self.assertRegex(rid, r'^\d{8}-\d{6}$')
+        self.assertTrue(d.endswith(rid))
+
+    def test_config_snapshot_handles_unserialisable(self):
+        cfg = types.SimpleNamespace(lr=1e-3, name='x', weird=object(), flag=True)
+        d, _ = make_run_dir(os.path.join(self.tmp, 'logs'), 'exp', 'r1')
+        path = save_config_snapshot(d, cfg)
+
+        import json
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        self.assertEqual(data['lr'], 1e-3)
+        self.assertEqual(data['flag'], True)
+        self.assertIsInstance(data['weird'], str, 'giá trị không serialise được phải thành str')
+
 
 class FakeTrainer:
     def __init__(self, metrics, epoch=0, step=0, sanity=False, optimizers=()):
@@ -126,7 +155,8 @@ class TestSummaryLogic(unittest.TestCase):
         self.summary = os.path.join(self.tmp, 'runs_summary.csv')
         cfg = types.SimpleNamespace(eval_mode='category', dataset='sketchy',
                                     save_dir=os.path.join(self.tmp, 'ckpt'))
-        self.cb = RunCSVLogger(cfg, os.path.join(self.tmp, 'logs'), 'exp1', self.summary)
+        self.run_dir, _ = make_run_dir(os.path.join(self.tmp, 'logs'), 'exp1', 'r-test')
+        self.cb = RunCSVLogger(cfg, self.run_dir, 'exp1', self.summary)
         self.cb._counts = {'total': 100, 'trainable': 10, 'prompt': 6, 'layernorm': 4}
 
     def tearDown(self):
@@ -160,7 +190,7 @@ class TestSummaryLogic(unittest.TestCase):
     def test_monitor_defaults_by_eval_mode(self):
         self.assertEqual(self.cb.monitor, 'mAP')
         fg_cfg = types.SimpleNamespace(eval_mode='fine_grained')
-        fg = RunCSVLogger(fg_cfg, self.tmp, 'e', self.summary)
+        fg = RunCSVLogger(fg_cfg, self.tmp, 'e', self.summary)  # run_dir bat ky
         self.assertEqual(fg.monitor, 'top1')
 
     def test_summary_row_content(self):
@@ -207,7 +237,8 @@ class TestSummaryLogic(unittest.TestCase):
         self.cb.rows = [{'epoch': 0, 'mAP': 0.4}]
         self.cb._write_summary(None, None, status='completed')
 
-        cb2 = RunCSVLogger(self.cb.cfg, os.path.join(self.tmp, 'logs'), 'exp2', self.summary)
+        cb2_dir, _ = make_run_dir(os.path.join(self.tmp, 'logs'), 'exp2')
+        cb2 = RunCSVLogger(self.cb.cfg, cb2_dir, 'exp2', self.summary)
         cb2._counts = self.cb._counts
         cb2.rows = [{'epoch': 0, 'mAP': 0.8}]
         cb2._write_summary(None, None, status='completed')
@@ -242,8 +273,9 @@ class TestRunCSVLogger(unittest.TestCase):
 
         self.module = Wrapper()
         self.summary = os.path.join(self.tmp, 'runs_summary.csv')
-        self.cb = RunCSVLogger(self.cfg, os.path.join(self.tmp, 'logs'),
-                               'exp1', self.summary)
+        self.run_dir, self.run_id = make_run_dir(os.path.join(self.tmp, 'logs'), 'exp1')
+        self.cb = RunCSVLogger(self.cfg, self.run_dir, 'exp1', self.summary,
+                               run_id=self.run_id, log_every_n_steps=2)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -274,6 +306,56 @@ class TestRunCSVLogger(unittest.TestCase):
         self.assertEqual(summary[0]['best_epoch'], '1', 'phải chọn epoch tốt nhất, không phải cuối')
         self.assertEqual(summary[0]['epochs_done'], '3')
         self.assertEqual(summary[0]['cfg_dataset'], 'sketchy')
+
+    def test_train_steps_csv_respects_interval(self):
+        """log_every_n_steps=2 -> chỉ ghi ở step 0, 2, 4."""
+        self.cb.on_fit_start(FakeTrainer({}), self.module)
+        for step in range(6):
+            self.cb.on_train_batch_end(
+                FakeTrainer({'train_loss_step': 1.0 / (step + 1)}, epoch=0, step=step),
+                self.module, None, None, step)
+
+        rows = read_csv(self.cb.step_csv)
+        self.assertEqual([r['global_step'] for r in rows], ['0', '2', '4'])
+        self.assertEqual(self.cb._n_step_rows, 3)
+        # hậu tố _step bị lược bỏ để tên cột khớp với metrics_epoch.csv
+        self.assertIn('train_loss', rows[0])
+        self.assertNotIn('train_loss_step', rows[0])
+
+    def test_train_steps_disabled(self):
+        self.cb.log_every_n_steps = 0
+        self.cb.on_fit_start(FakeTrainer({}), self.module)
+        self.cb.on_train_batch_end(FakeTrainer({'train_loss_step': 1.0}), self.module, None, None, 0)
+        self.assertFalse(os.path.exists(self.cb.step_csv))
+
+    def test_run_dir_contains_all_artifacts(self):
+        self.cb.on_fit_start(FakeTrainer({}), self.module)
+        self.cb.on_train_batch_end(FakeTrainer({'train_loss_step': 1.0}), self.module, None, None, 0)
+        self._epoch(FakeTrainer({'mAP': 0.5}, epoch=0))
+        self.cb.on_fit_end(FakeTrainer({}), self.module)
+
+        for name in ('config.json', 'train_steps.csv', 'metrics_epoch.csv'):
+            self.assertTrue(os.path.exists(os.path.join(self.run_dir, name)), name)
+        # summary nằm NGOÀI run_dir
+        self.assertFalse(self.summary.startswith(self.run_dir))
+        self.assertTrue(os.path.exists(self.summary))
+
+    def test_rerun_same_exp_does_not_overwrite(self):
+        """Hai run cùng exp_name phải có metrics_epoch.csv riêng."""
+        self.cb.on_fit_start(FakeTrainer({}), self.module)
+        self._epoch(FakeTrainer({'mAP': 0.11}, epoch=0))
+
+        dir2, id2 = make_run_dir(os.path.join(self.tmp, 'logs'), 'exp1', 'run-2')
+        cb2 = RunCSVLogger(self.cfg, dir2, 'exp1', self.summary, run_id=id2)
+        cb2.on_fit_start(FakeTrainer({}), self.module)
+        cb2._epoch = self._epoch
+        cb2.on_train_epoch_start(FakeTrainer({}), self.module)
+        cb2.on_validation_epoch_end(FakeTrainer({'mAP': 0.99}, epoch=0), self.module)
+
+        self.assertNotEqual(self.cb.epoch_csv, cb2.epoch_csv)
+        self.assertEqual(read_csv(self.cb.epoch_csv)[0]['mAP'], '0.11',
+                         'run đầu bị run sau ghi đè')
+        self.assertEqual(read_csv(cb2.epoch_csv)[0]['mAP'], '0.99')
 
     def test_sanity_check_epoch_skipped(self):
         self.cb.on_fit_start(FakeTrainer({}), self.module)

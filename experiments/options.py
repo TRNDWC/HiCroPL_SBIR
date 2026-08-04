@@ -22,6 +22,10 @@ parser.add_argument('--data_split', type=float, default=-1.0)
 # ----------------------
 
 parser.add_argument('--clip_lr', type=float, default=1e-4)
+# Mặc định 1e-4 = đúng giá trị fallback mà configure_optimizers vẫn dùng trước
+# khi có option này, nên thêm vào không đổi hành vi của bất kỳ run nào.
+parser.add_argument('--weight_decay', type=float, default=1e-4,
+                    help='Weight decay của Adam, áp cho cả nhóm prompt lẫn nhóm LayerNorm')
 parser.add_argument('--clip_LN_lr', type=float, default=1e-5)
 parser.add_argument('--prompt_lr', type=float, default=1e-5)
 parser.add_argument('--linear_lr', type=float, default=1e-4)
@@ -87,6 +91,11 @@ parser.add_argument('--no_resume', action='store_true',
                     help='Bỏ qua last.ckpt có sẵn, luôn train từ đầu')
 parser.add_argument('--summary_csv', type=str, default='runs_summary.csv',
                     help='CSV tổng hợp 1 dòng/run, NẰM NGOÀI log_dir để so sánh các run')
+parser.add_argument('--log_every_n_steps', type=int, default=50,
+                    help='Ghi một dòng train_steps.csv mỗi N step. 0 = tắt log theo step')
+parser.add_argument('--run_id', type=str, default='',
+                    help='Định danh run (mặc định là timestamp). Quyết định thư mục '
+                         '<log_dir>/<exp_name>/<run_id>/ chứa log riêng của lần chạy này')
 
 # ----------------------
 # Verification

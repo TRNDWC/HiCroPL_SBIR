@@ -423,6 +423,29 @@ def check_step_updates_prompts_only(ctx):
     return True, f'{len(changed)} param trainable được cập nhật, 0 param frozen bị đụng'
 
 
+@check('neg_branch_matches_loss', 'Nhánh negative chỉ chạy khi loss dùng tới')
+def check_neg_branch_matches_loss(ctx):
+    """`neg_feat` phải None đúng khi và chỉ khi loss không dùng triplet.
+
+    Nếu forward bỏ nhánh neg mà loss lại cần nó, triplet loss sẽ nổ với TypeError;
+    nếu forward vẫn chạy mà loss không cần, đó là một lượt ViT forward+backward
+    bị vứt đi mỗi step.
+    """
+    from src.losses_hicropl import uses_triplet
+
+    expected_needed = uses_triplet(ctx.cfg)
+    with torch.no_grad():
+        features = ctx.model(ctx.batch, ctx.classnames)
+    neg_feat = features[4]
+
+    if expected_needed and neg_feat is None:
+        return False, 'loss cần neg_feat nhưng forward trả None'
+    if not expected_needed and neg_feat is not None:
+        return False, f'loss không dùng neg_feat nhưng forward vẫn tính (shape {tuple(neg_feat.shape)})'
+    return True, ('có tính (triplet bật)' if expected_needed
+                  else 'bỏ qua đúng (category mode)')
+
+
 @check('logit_scale_clamped', 'logit_scale được clamp <= 100')
 def check_logit_scale_clamped(ctx):
     with torch.no_grad():

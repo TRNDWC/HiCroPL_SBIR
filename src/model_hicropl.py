@@ -14,7 +14,7 @@ from src.hicropl import (
     VisualVisualPromptLearner,
     SimpleTextPromptLearner,
 )
-from src.losses_hicropl import loss_fn_hicropl
+from src.losses_hicropl import loss_fn_hicropl, uses_triplet
 
 def freeze_model(m):
     """Freeze all parameters of the given module."""
@@ -151,6 +151,12 @@ class CustomCLIP(nn.Module):
         for teacher in (self.clip_distill_photo, self.clip_distill_sketch):
             freeze_model(teacher)
             teacher.eval()
+
+        # Ảnh negative chỉ cần khi loss dùng triplet. Lấy vị từ từ losses_hicropl
+        # để forward và loss không thể bất đồng về điều kiện này.
+        self.needs_neg = uses_triplet(cfg)
+        if not self.needs_neg:
+            print("eval_mode=category: bỏ qua forward nhánh negative (không loss nào dùng)")
 
         # Nếu muốn học logit_scale, bật lại tường minh ở đây và nhớ clamp <= log(100)
         # trong forward. Mặc định giữ đóng băng cho đúng tinh thần prompt tuning.
@@ -303,14 +309,18 @@ class CustomCLIP(nn.Module):
         }
         
         # 4. Negative branch (uses photo encoder + photo visual prompts)
-        image_features_neg = self.visual_encoder_photo(neg_tensor.type(self.dtype), vis2_shallow, vis2_deeper)
-        out_neg = {
-            "image_features": image_features_neg,
-            "text_features": text_features_all_photo,
-            "text_features_all": text_features_all_photo,
-            "logit_scale": self._exp_logit_scale(self.logit_scale_photo)
-        }
-        
+        # Chỉ chạy khi loss thật sự dùng tới: `neg_feat` chỉ vào L1 dạng triplet.
+        # Ở eval_mode=category đây là một lượt forward+backward ViT đầy đủ hoàn
+        # toàn bị vứt đi (~20-25% thời gian mỗi step).
+        # KHÔNG bỏ neg_tensor khỏi dataset: dataloader tiêu RNG, bỏ đi sẽ đổi
+        # chuỗi ngẫu nhiên và làm kết quả không so được với các run cũ. CLIP
+        # không có dropout nên bỏ riêng forward pass cho kết quả giống hệt.
+        if self.needs_neg:
+            image_features_neg = self.visual_encoder_photo(neg_tensor.type(self.dtype), vis2_shallow, vis2_deeper)
+            neg_feat = image_features_neg / image_features_neg.norm(dim=-1, keepdim=True)
+        else:
+            neg_feat = None
+
         # 2. Distill Visual Features (teacher đã freeze hoàn toàn) - RUN ONCE
         # Bọc no_grad: teacher chỉ là nguồn target, không được nhận gradient từ
         # residual mix (photo_feat_prenorm) hay từ L2 consistency loss.
@@ -344,8 +354,7 @@ class CustomCLIP(nn.Module):
         sketch_feat_prenorm = sketch_feat_prompted_norm + sketch_feat_fixed
         sketch_feat = sketch_feat_prenorm / sketch_feat_prenorm.norm(dim=-1, keepdim=True)
         
-        neg_feat_prompted = out_neg["image_features"]
-        neg_feat = neg_feat_prompted / neg_feat_prompted.norm(dim=-1, keepdim=True)
+        # neg_feat đã được chuẩn hoá ở bước 4 (hoặc là None nếu loss không dùng)
 
         text_feat_photo_prompted = out_p["text_features"]
         text_feat_photo = text_feat_photo_prompted / text_feat_photo_prompted.norm(dim=-1, keepdim=True)
@@ -590,18 +599,18 @@ class HiCroPL_SBIR(pl.LightningModule):
         vis1_shallow, vis2_shallow, vis1_deeper, vis2_deeper = self.model.visual_visual_learner()
         
         if modality == 'photo':
-            text_learner = self.model.text_prompt_photo
             visual_encoder = self.model.visual_encoder_photo
             distill_encoder = self.model.clip_distill_photo.visual
             vis_shallow, vis_deeper = vis2_shallow, vis2_deeper
         else:
-            text_learner = self.model.text_prompt_sketch
             visual_encoder = self.model.visual_encoder_sketch
             distill_encoder = self.model.clip_distill_sketch.visual
             vis_shallow, vis_deeper = vis1_shallow, vis1_deeper
-        
-        # Get text prompts and compute image features
-        _, cross_prompts_text_deeper = text_learner(label=None)
+
+        # Retrieval theo ảnh nên không cần text feature ở đây. Lời gọi
+        # `text_learner(label=None)` cũ bị vứt kết quả nhưng vẫn cấp phát
+        # [n_cls, 77, 512] mỗi val batch. Prompt learner đã thuần hoá (không còn
+        # `.data.copy_()`) nên bỏ nó đi không đổi trạng thái model.
         prompted_feat = visual_encoder(tensor.type(self.model.dtype), vis_shallow, vis_deeper)
         prompted_feat_norm = prompted_feat / prompted_feat.norm(dim=-1, keepdim=True)
         
@@ -680,7 +689,6 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.log(f"P@{p_k}", mean_precision, on_step=False, on_epoch=True)
         self.log("val_mAP", mAP, on_step=False, on_epoch=True, prog_bar=False)
         self.log(f"val_P@{p_k}", mean_precision, on_step=False, on_epoch=True)
-        self.log("best_mAP", self.best_metric, on_step=False, on_epoch=True, prog_bar=False)
 
         if map_k != 0:
             self.log(f"val_map_{map_k}", mAP, on_step=False, on_epoch=True)
@@ -690,6 +698,10 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         if self.global_step > 0:
             self.best_metric = self.best_metric if (self.best_metric > mAP.item()) else mAP.item()
+
+        # Log SAU khi cập nhật: thứ tự cũ ghi giá trị của epoch trước nên biểu đồ
+        # TensorBoard luôn trễ một epoch.
+        self.log("best_mAP", self.best_metric, on_step=False, on_epoch=True, prog_bar=False)
 
         if map_k != 0:
             self.print('mAP@{}: {:.4f}, P@{}: {:.4f}, Best mAP: {:.4f}'.format(

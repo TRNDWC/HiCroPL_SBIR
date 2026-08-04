@@ -1,17 +1,22 @@
 """Ghi kết quả train ra CSV + text log để theo dõi và đối chiếu giữa các run.
 
-Ba nơi ghi:
-  <log_dir>/<exp_name>/metrics_epoch.csv  - chi tiết từng epoch của run này
-  <log_dir>/<exp_name>/run.log            - text log: config, param count, tiến độ
-  <summary_csv>                           - 1 dòng/run, NẰM NGOÀI log_dir để so
-                                            sánh các run với nhau
+MỖI LẦN CHẠY một thư mục riêng, khoá theo run_id (mặc định là timestamp):
 
-CSV per-epoch được ghi lại toàn bộ sau mỗi epoch (không append) nên schema tự
-mở rộng khi có metric mới, và crash giữa chừng vẫn còn dữ liệu các epoch trước.
-Summary CSV thì append, có xử lý trường hợp file cũ thiếu cột.
+  <log_dir>/<exp_name>/<run_id>/config.json        - snapshot toàn bộ opts
+  <log_dir>/<exp_name>/<run_id>/run.log            - text log: config, param, tiến độ
+  <log_dir>/<exp_name>/<run_id>/train_steps.csv    - loss theo step (mỗi N step)
+  <log_dir>/<exp_name>/<run_id>/metrics_epoch.csv  - metric từng epoch
+  <summary_csv>                                    - 1 dòng/run, NẰM NGOÀI log_dir
+
+Chạy lại cùng exp_name sẽ tạo run_id mới nên không ghi đè dữ liệu lần trước.
+
+metrics_epoch.csv được ghi lại toàn bộ sau mỗi epoch (không append) nên schema
+tự mở rộng khi có metric mới, và crash giữa chừng vẫn còn dữ liệu epoch trước.
+train_steps.csv và summary CSV thì append, có xử lý file cũ thiếu cột.
 """
 
 import csv
+import json
 import logging
 import os
 import time
@@ -21,12 +26,39 @@ from pytorch_lightning import Callback
 
 
 # --------------------------------------------------------------------------
-# Text log
+# Thư mục & text log của một run
 # --------------------------------------------------------------------------
 
-def setup_run_logger(log_dir, exp_name, filename='run.log'):
-    """Logger ghi đồng thời ra console và <log_dir>/<exp_name>/run.log."""
-    run_dir = os.path.join(log_dir, exp_name)
+def make_run_dir(log_dir, exp_name, run_id=None):
+    """Tạo <log_dir>/<exp_name>/<run_id>/ và trả (run_dir, run_id).
+
+    run_id mặc định là timestamp, nên hai lần chạy cùng exp_name không đè lên
+    nhau. Thư mục này nằm cạnh các version_N của TensorBoardLogger, không đụng.
+    """
+    run_id = run_id or datetime.now().strftime('%Y%m%d-%H%M%S')
+    run_dir = os.path.join(log_dir, exp_name, run_id)
+    os.makedirs(run_dir, exist_ok=True)
+    return run_dir, run_id
+
+
+def save_config_snapshot(run_dir, cfg, filename='config.json'):
+    """Chụp toàn bộ opts ra JSON để tái lập chính xác run này về sau."""
+    raw = vars(cfg) if hasattr(cfg, '__dict__') else dict(cfg)
+    safe = {}
+    for k, v in raw.items():
+        try:
+            json.dumps(v)
+            safe[k] = v
+        except (TypeError, ValueError):
+            safe[k] = str(v)
+    path = os.path.join(run_dir, filename)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(safe, f, indent=2, ensure_ascii=False, sort_keys=True)
+    return path
+
+
+def setup_run_logger(run_dir, exp_name, filename='run.log'):
+    """Logger ghi đồng thời ra console và <run_dir>/run.log."""
     os.makedirs(run_dir, exist_ok=True)
     path = os.path.join(run_dir, filename)
 
@@ -156,10 +188,13 @@ class RunCSVLogger(Callback):
 
     Args:
         cfg: opts namespace (để chụp lại hyperparameter vào dòng summary)
-        log_dir, exp_name: xác định <log_dir>/<exp_name>/
+        run_dir: thư mục riêng của run này, từ make_run_dir()
+        exp_name: tên thí nghiệm
         summary_csv: đường dẫn CSV chung, NGOÀI log_dir
+        run_id: định danh run, dùng chung với run_dir
         logger: logging.Logger từ setup_run_logger()
         monitor: tên metric để chọn epoch tốt nhất. None = tự đoán theo eval_mode
+        log_every_n_steps: ghi train_steps.csv mỗi N step. 0 = tắt
     """
 
     # Hyperparameter được chụp vào dòng summary để so sánh giữa các run
@@ -173,13 +208,16 @@ class RunCSVLogger(Callback):
         'lambda_text_consistency', 'lambda_visual_cross',
     )
 
-    def __init__(self, cfg, log_dir, exp_name, summary_csv, logger=None, monitor=None):
+    def __init__(self, cfg, run_dir, exp_name, summary_csv, run_id=None,
+                 logger=None, monitor=None, log_every_n_steps=50):
         super().__init__()
         self.cfg = cfg
         self.exp_name = exp_name
-        self.run_dir = os.path.join(log_dir, exp_name)
-        self.epoch_csv = os.path.join(self.run_dir, 'metrics_epoch.csv')
+        self.run_dir = run_dir
+        self.epoch_csv = os.path.join(run_dir, 'metrics_epoch.csv')
+        self.step_csv = os.path.join(run_dir, 'train_steps.csv')
         self.summary_csv = summary_csv
+        self.log_every_n_steps = int(log_every_n_steps or 0)
         # KHÔNG đặt tên `self.log`: PyTorch Lightning gán
         # `callback.log = lightning_module.log` cho mọi callback trước khi
         # chạy hook, nên attribute đó sẽ bị ghi đè bằng hàm log metric của PL.
@@ -190,10 +228,11 @@ class RunCSVLogger(Callback):
         self.monitor = monitor
 
         self.rows = []
-        self.run_id = datetime.now().strftime('%Y%m%d-%H%M%S')
+        self.run_id = run_id or os.path.basename(os.path.normpath(run_dir))
         self._t_start = None
         self._t_epoch = None
         self._summary_written = False
+        self._n_step_rows = 0
 
     # -- hooks -------------------------------------------------------------
 
@@ -201,9 +240,11 @@ class RunCSVLogger(Callback):
     def on_fit_start(self, trainer, pl_module):
         self._t_start = time.time()
         os.makedirs(self.run_dir, exist_ok=True)
+        save_config_snapshot(self.run_dir, self.cfg)
 
-        self._logger.info('run_id=%s | checkpoint=%s', self.run_id,
-                      os.path.abspath(getattr(self.cfg, 'save_dir', 'saved_models')))
+        self._logger.info('run_id=%s | run_dir=%s', self.run_id, os.path.abspath(self.run_dir))
+        self._logger.info('checkpoint=%s',
+                          os.path.abspath(getattr(self.cfg, 'save_dir', 'saved_models')))
         self._logger.info('Config: %s', {k: getattr(self.cfg, k, None) for k in self.TRACKED_OPTS})
 
         counts = self._param_counts(pl_module)
@@ -218,6 +259,38 @@ class RunCSVLogger(Callback):
     @_never_fail
     def on_train_epoch_start(self, trainer, pl_module):
         self._t_epoch = time.time()
+
+    @_never_fail
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        """Ghi tiến trình trong lúc train, mỗi log_every_n_steps step.
+
+        Append từng dòng thay vì ghi lại cả file: với 450 step/epoch x 60 epoch
+        thì rewrite mỗi lần sẽ là O(n^2). append_csv_row chỉ đọc dòng header khi
+        schema không đổi nên chi phí gần như hằng số.
+        """
+        if self.log_every_n_steps <= 0:
+            return
+        step = trainer.global_step
+        if step % self.log_every_n_steps != 0:
+            return
+
+        row = {
+            'run_id': self.run_id,
+            'timestamp': datetime.now().isoformat(timespec='seconds'),
+            'epoch': trainer.current_epoch,
+            'global_step': step,
+            'batch_idx': batch_idx,
+            'elapsed_s': round(time.time() - self._t_start, 1) if self._t_start else '',
+        }
+        # Ở đây giữ lại bản `*_step` (bản epoch chưa có nghĩa giữa chừng epoch)
+        for k, v in trainer.callback_metrics.items():
+            if k.endswith('_epoch'):
+                continue
+            row[k.replace('_step', '')] = _to_scalar(v)
+        row.update(self._learning_rates(trainer))
+
+        append_csv_row(self.step_csv, row)
+        self._n_step_rows += 1
 
     @_never_fail
     def on_validation_epoch_end(self, trainer, pl_module):
@@ -286,14 +359,16 @@ class RunCSVLogger(Callback):
             summary[f'cfg_{k}'] = getattr(self.cfg, k, '')
         summary['ckpt_dir'] = os.path.abspath(
             os.path.join(getattr(self.cfg, 'save_dir', 'saved_models'), self.exp_name))
-        summary['epoch_csv'] = os.path.abspath(self.epoch_csv)
+        summary['run_dir'] = os.path.abspath(self.run_dir)
+        summary['step_rows'] = self._n_step_rows
 
         append_csv_row(self.summary_csv, summary)
 
         self._logger.info('%s | best %s=%s @epoch %s | %s phút',
                       status, self.monitor, summary['best_value'],
                       summary['best_epoch'], duration_min)
-        self._logger.info('Per-epoch CSV : %s', os.path.abspath(self.epoch_csv))
+        self._logger.info('Run dir       : %s', os.path.abspath(self.run_dir))
+        self._logger.info('  config.json / run.log / train_steps.csv / metrics_epoch.csv')
         self._logger.info('Summary CSV   : %s', os.path.abspath(self.summary_csv))
 
     def _best_row(self):

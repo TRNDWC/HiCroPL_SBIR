@@ -31,6 +31,18 @@ def cross_loss(feature_1, feature_2, temperature):
 
     return F.cross_entropy(logits, labels_target)
 
+def uses_triplet(args):
+    """Điều kiện DUY NHẤT quyết định `neg_feat` có được dùng hay không.
+
+    Đặt ở đây để `CustomCLIP.forward` (nơi quyết định có chạy encoder cho ảnh
+    negative hay không) và `loss_fn_hicropl` không thể lệch nhau. Nếu hai nơi
+    tự viết lại điều kiện, một ngày nào đó chúng sẽ khác nhau và loss sẽ nhận
+    `neg_feat=None` mà không có lỗi rõ ràng.
+    """
+    return (getattr(args, 'eval_mode', 'category') == 'fine_grained'
+            or getattr(args, 'use_triplet_l1', False))
+
+
 def loss_fn_hicropl(args, features):
     """
     Combined Loss Function for HiCroPL-SBIR.
@@ -62,7 +74,7 @@ def loss_fn_hicropl(args, features):
     lambda_text_consistency = getattr(args, 'lambda_text_consistency', lambda_consistency)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
     triplet_margin = getattr(args, 'triplet_margin', 0.3)
-    use_triplet_l1 = getattr(args, 'eval_mode', 'category') == 'fine_grained' or getattr(args, 'use_triplet_l1', False)
+    use_triplet_l1 = uses_triplet(args)
 
     # --- L1: cross-modal alignment ---
     # Category mode keeps the original InfoNCE objective.
