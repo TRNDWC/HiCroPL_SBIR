@@ -12,6 +12,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, RichProgressBar
 from src.clip import clip
 from src.model_hicropl import CustomCLIP, HiCroPL_SBIR
 from src.dataset_retrieval import Sketchy, ValidDataset
+from src.run_logging import RunCSVLogger, setup_run_logger
 from experiments.options import opts
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -128,8 +129,23 @@ if __name__ == '__main__':
 
     ckpt_dir = os.path.join(opts.save_dir, opts.exp_name)
     os.makedirs(ckpt_dir, exist_ok=True)
-    print(f"[CONFIG] Checkpoint dir: {os.path.abspath(ckpt_dir)}")
-    print(f"[CONFIG] TensorBoard dir: {os.path.abspath(os.path.join(opts.log_dir, opts.exp_name))}")
+
+    run_logger = setup_run_logger(opts.log_dir, opts.exp_name)
+    run_logger.info('Checkpoint dir : %s', os.path.abspath(ckpt_dir))
+    run_logger.info('TensorBoard dir: %s', os.path.abspath(os.path.join(opts.log_dir, opts.exp_name)))
+    run_logger.info('Summary CSV    : %s', os.path.abspath(opts.summary_csv))
+    run_logger.info('Train %d samples, %d categories | val sketch/photo: %s',
+                    len(train_dataset), len(train_dataset.all_categories),
+                    len(val_dataset) if opts.eval_mode == 'fine_grained'
+                    else f'{len(val_sketch)}/{len(val_photo)}')
+
+    csv_logger = RunCSVLogger(
+        cfg=opts,
+        log_dir=opts.log_dir,
+        exp_name=opts.exp_name,
+        summary_csv=opts.summary_csv,
+        logger=run_logger,
+    )
 
     checkpoint_callback = ModelCheckpoint(
         monitor=checkpoint_monitor,
@@ -162,7 +178,7 @@ if __name__ == '__main__':
         logger=logger,
         check_val_every_n_epoch=1,
         enable_progress_bar=True,
-        callbacks=[checkpoint_callback, rich_progress_bar]
+        callbacks=[checkpoint_callback, rich_progress_bar, csv_logger]
     )
 
     # 6. Initialize Model

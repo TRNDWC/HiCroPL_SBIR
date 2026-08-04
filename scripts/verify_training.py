@@ -487,6 +487,32 @@ def run_config(label, cfg_overrides, device, classnames, verbose):
     return results
 
 
+def write_results_csv(path, results, device):
+    """Append kết quả, 1 dòng/check. Nhiều lần chạy tích luỹ để so sánh theo thời gian."""
+    import csv
+    from datetime import datetime
+
+    run_id = datetime.now().strftime('%Y%m%d-%H%M%S')
+    fields = ['run_id', 'timestamp', 'device', 'config', 'check', 'status', 'detail']
+    exists = os.path.exists(path) and os.path.getsize(path) > 0
+
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or '.', exist_ok=True)
+    with open(path, 'a', newline='', encoding='utf-8') as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        if not exists:
+            w.writeheader()
+        for label, name, ok, detail in results:
+            w.writerow({
+                'run_id': run_id,
+                'timestamp': datetime.now().isoformat(timespec='seconds'),
+                'device': device,
+                'config': label,
+                'check': name,
+                'status': 'PASS' if ok else 'FAIL',
+                'detail': detail,
+            })
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -496,6 +522,8 @@ def main():
     ap.add_argument('--nclass', type=int, default=4, help='Số classname giả lập')
     ap.add_argument('--list', action='store_true', help='In danh sách check rồi thoát')
     ap.add_argument('-v', '--verbose', action='store_true', help='In traceback đầy đủ')
+    ap.add_argument('--csv', default='verify_results.csv',
+                    help='Ghi kết quả ra CSV (append, 1 dòng/check). Chuỗi rỗng = tắt')
     args = ap.parse_args()
 
     if args.list:
@@ -524,6 +552,10 @@ def main():
     all_results = []
     for label, overrides in configs:
         all_results += run_config(label, overrides, args.device, classnames, args.verbose)
+
+    if args.csv:
+        write_results_csv(args.csv, all_results, args.device)
+        print(f'\nKết quả đã ghi: {os.path.abspath(args.csv)}')
 
     failed = [r for r in all_results if not r[2]]
     print(f'\n{"=" * 78}')

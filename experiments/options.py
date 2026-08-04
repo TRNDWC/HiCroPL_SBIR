@@ -85,6 +85,8 @@ parser.add_argument('--save_last', action='store_true',
                     help='Lưu thêm last.ckpt sau mỗi epoch. BẮT BUỘC bật nếu muốn auto-resume')
 parser.add_argument('--no_resume', action='store_true',
                     help='Bỏ qua last.ckpt có sẵn, luôn train từ đầu')
+parser.add_argument('--summary_csv', type=str, default='runs_summary.csv',
+                    help='CSV tổng hợp 1 dòng/run, NẰM NGOÀI log_dir để so sánh các run')
 
 # ----------------------
 # Verification

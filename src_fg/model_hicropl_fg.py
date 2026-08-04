@@ -25,12 +25,15 @@ class HiCroPL_SBIR_FG(HiCroPL_SBIR):
         reordered = (batch[1], batch[0], batch[4], batch[3], batch[2], batch[5])
 
         features = self.model(reordered, self.classnames)
-        loss = loss_fn_hicropl(self.args, features)
+        # loss_fn_hicropl trả (total_loss, loss_dict); gán thẳng vào 1 biến sẽ
+        # đưa nguyên tuple vào self.log và làm hỏng bước train.
+        total_loss, loss_dict = loss_fn_hicropl(self.args, features)
 
-        total_loss = loss
-
-        self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False)
+        self.log('loss', total_loss, on_step=False, on_epoch=True, prog_bar=False)
         self.log('train_loss', total_loss, on_step=False, on_epoch=True, prog_bar=False)
+        for k, v in loss_dict.items():
+            if isinstance(v, torch.Tensor) or v > 0:
+                self.log(k, v, on_step=False, on_epoch=True, prog_bar=False)
 
         self.train_loss_epoch.append(total_loss.detach())
 
