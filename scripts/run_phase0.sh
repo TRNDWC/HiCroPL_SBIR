@@ -97,14 +97,21 @@ else
   python scripts/summarize_runs.py --filter "${TAG}_base" --epochs
 
   echo
-  echo "=== δ_min: chia 3 seed thành 2 nhóm và kiểm cặp ==="
-  echo "Hai nhóm CÙNG cấu hình nên khác biệt thật bằng 0."
-  echo "Khoảng tin cậy trả về chính là δ_min — ngưỡng mà dưới đó bạn không kết luận được."
-  set -- $SEEDS
-  python scripts/paired_test.py \
-    --a "tb_logs/${TAG}_base_s$1/*/ap_best.npz" \
-    --b "tb_logs/${TAG}_base_s$2/*/ap_best.npz" \
-    --name-a "seed$1" --name-b "seed$2" || true
+  echo "=== δ_min: kiểm cặp giữa MỌI cặp seed ==="
+  echo "Hai seed cùng cấu hình nên khác biệt thật bằng 0. Nửa độ rộng KTC lớn"
+  echo "nhất qua các cặp chính là δ_min — ngưỡng mà dưới đó bạn không kết luận được."
+  echo "Dùng --from-summary thay vì glob: run bị ngắt giữa chừng vẫn kịp ghi"
+  echo "ap_best.npz nhưng không có dòng summary, glob sẽ nhặt nhầm chúng."
+  for a in $SEEDS; do
+    for b in $SEEDS; do
+      [ "$a" -lt "$b" ] || continue
+      echo; echo "--- seed$a vs seed$b ---"
+      python scripts/paired_test.py \
+        --from-summary "${SUMMARY:-runs_summary.csv}" \
+        --a "${TAG}_base_s${a}" --b "${TAG}_base_s${b}" \
+        --name-a "seed$a" --name-b "seed$b" || true
+    done
+  done
 fi
 
 cat <<'EOF'

@@ -124,6 +124,18 @@ def epoch_analysis(rows, screen_epoch):
               'không dùng epoch cuối.')
 
     # Screening ngắn có xếp hạng đúng không?
+    # Phép này chỉ có nghĩa khi so các CẤU HÌNH KHÁC NHAU. Nếu mọi run chỉ khác
+    # seed thì "xếp hạng" là xếp hạng nhiễu, và nếu screen_epoch đã bao trùm
+    # best epoch thì rho = 1.0 theo định nghĩa - vô nghĩa hoàn toàn.
+    max_epoch = max(p[-1][0] for _, _, p in curves)
+    if screen_epoch >= max_epoch:
+        print(f'\n=== Screening: BỎ QUA ===')
+        print(f'  screen_epoch={screen_epoch} >= epoch lớn nhất đã chạy ({max_epoch}).')
+        print('  Cửa sổ screening bao trùm cả best epoch nên rho = 1.0 theo định nghĩa.')
+        print(f'  Chạy lại với --screen-epoch nhỏ hơn best epoch median '
+              f'({statistics.median(bests):.0f}) mới có thông tin.')
+        return
+
     usable = [(exp, dict(pts)) for _, exp, pts in curves]
     early, final = [], []
     for exp, d in usable:
@@ -173,13 +185,25 @@ def main():
     print(f'{len(rows)} run trong {args.summary}')
 
     group_cols = args.group_by or varying_cfg_cols(rows)
-    if not group_cols:
+    same_config = not group_cols
+    if same_config:
         group_cols = ['exp_name']
-        print('(Mọi cfg_* giống nhau — gộp theo exp_name)')
+        print('(Mọi cfg_* giống nhau — đây là các run CHỈ KHÁC SEED, không phải ablation.')
+        print(' Bảng dưới đo dao động giữa các seed, không so sánh phương pháp.)')
     else:
         print(f'Trục ablation: {", ".join(c[4:] for c in group_cols)}')
 
     ablation_table(rows, group_cols, args.metric)
+
+    if same_config:
+        vals = [to_float(r.get(args.metric)) for r in rows]
+        vals = [v for v in vals if v is not None]
+        if len(vals) > 1:
+            sd = statistics.stdev(vals)
+            print(f'\n=== Dao động giữa seed ===')
+            print(f'  n={len(vals)}, mean {100 * statistics.fmean(vals):.2f}, '
+                  f'std {100 * sd:.2f} pp, khoảng {100 * (max(vals) - min(vals)):.2f} pp')
+            print(f'  → Mọi chênh lệch nhỏ hơn ~{100 * 2 * sd:.2f} pp là nhiễu seed.')
 
     if args.epochs:
         epoch_analysis(rows, args.screen_epoch)

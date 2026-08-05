@@ -113,6 +113,32 @@ def expand(patterns):
     return out
 
 
+def from_summary(summary_csv, name_filter):
+    """Lấy ap_best.npz của các run ĐÃ HOÀN THÀNH, theo runs_summary.csv.
+
+    An toàn hơn glob: run bị ngắt giữa chừng vẫn kịp ghi ap_best.npz (ghi trong
+    validation) nhưng KHÔNG ghi dòng summary (ghi ở on_fit_end). Glob theo thư
+    mục sẽ nhặt cả những file mồ côi đó và trộn chúng vào phép so.
+    """
+    import csv
+    with open(summary_csv, encoding='utf-8') as f:
+        rows = list(csv.DictReader(f))
+
+    picked, skipped = [], 0
+    for r in rows:
+        if r.get('status') != 'completed':
+            skipped += 1
+            continue
+        if name_filter not in r.get('exp_name', ''):
+            continue
+        p = os.path.join(r.get('run_dir', ''), 'ap_best.npz')
+        if os.path.exists(p):
+            picked.append(p)
+    if skipped:
+        print(f'  (bỏ qua {skipped} run chưa completed trong {summary_csv})')
+    return sorted(picked)
+
+
 def main():
     ap_ = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -122,9 +148,19 @@ def main():
     ap_.add_argument('--name-a', default='A')
     ap_.add_argument('--name-b', default='B')
     ap_.add_argument('--n-boot', type=int, default=10000)
+    ap_.add_argument('--from-summary', metavar='CSV', default=None,
+                     help='Lấy run từ runs_summary.csv thay vì glob — chỉ nhận run '
+                          'đã completed, tránh nhặt phải ap_best.npz mồ côi của run bị ngắt')
     args = ap_.parse_args()
 
-    if args.a and args.b:
+    if args.from_summary:
+        if not (args.a and args.b):
+            ap_.error('--from-summary cần --a/--b là chuỗi lọc theo exp_name')
+        pa = from_summary(args.from_summary, args.a[0])
+        pb = from_summary(args.from_summary, args.b[0])
+        args.name_a = args.name_a if args.name_a != 'A' else args.a[0]
+        args.name_b = args.name_b if args.name_b != 'B' else args.b[0]
+    elif args.a and args.b:
         pa, pb = expand(args.a), expand(args.b)
     elif len(args.pos) == 2:
         pa, pb = expand([args.pos[0]]), expand([args.pos[1]])
