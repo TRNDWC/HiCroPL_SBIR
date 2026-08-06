@@ -35,6 +35,7 @@ Cross-category FG-ZS-SBIR. A common (photo-sketch) learnable visual prompt share
  - `experiments` folder holds the executable wrapper for the model with particular specifications.
  - `scripts/verify_training.py` kiểm 17 bất biến của vòng huấn luyện trên CLIP thật (`--list` để xem danh sách).
  - `docs/` chứa tài liệu kỹ thuật:
+   - [`docs/findings-and-directions.md`](docs/findings-and-directions.md) — tổng kết thực nghiệm, chẩn đoán, và các hướng cải thiện kèm cơ sở cho từng hướng.
    - [`docs/param-leak-fix.md`](docs/param-leak-fix.md) — năm chỗ rò rỉ tham số trong vòng huấn luyện, nguyên nhân, cách sửa và cách tự kiểm chứng.
 
 An example command to run the code is given below:
