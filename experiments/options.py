@@ -105,6 +105,14 @@ parser.add_argument('--run_id', type=str, default='',
 # ----------------------
 parser.add_argument('--learn_logit_scale', action='store_true',
                     help='Cho phép học logit_scale (clamp <= log(100)). Mặc định đóng băng theo tinh thần prompt tuning')
+parser.add_argument('--learn_mix_alpha', action='store_true',
+                    help='Học trọng số trộn residual RIÊNG cho từng modality: '
+                         'feat = norm(a*prompted + (1-a)*frozen), a = sigmoid(theta). '
+                         'Khởi tạo a=0.5 nên tái lập ĐÚNG hành vi hiện tại. CLIP mạnh trên '
+                         'ảnh, yếu trên sketch, nên hai nhánh không có lý do dùng chung tỉ lệ')
+parser.add_argument('--mix_alpha_lr', type=float, default=1e-3,
+                    help='LR riêng cho theta của mix alpha. Adam bước ~lr mỗi step, nên 1e-3 '
+                         'trong 8 epoch cho theta chạy được cả khoảng sigmoid có nghĩa')
 
 # ----------------------
 # Chẩn đoán

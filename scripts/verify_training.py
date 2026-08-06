@@ -84,6 +84,8 @@ def build_cfg(**overrides):
         disable_cross_exchange=False,
         enhance_text=False,
         learn_logit_scale=False,
+        learn_mix_alpha=False,
+        mix_alpha_lr=1e-3,
         eval_mode='category',
         temperature=0.07,
         lambda_cross_modal=1.0,
@@ -194,9 +196,8 @@ def check_teacher_frozen(ctx):
 @check('backbone_only_ln', 'Backbone student chỉ trainable ở LayerNorm')
 def check_backbone_only_ln(ctx):
     ln_ids = layernorm_param_ids(ctx.model)
-    allowed = set()
-    if getattr(ctx.model, 'learn_logit_scale', False):
-        allowed = {id(ctx.model.clip_photo.logit_scale), id(ctx.model.clip_sketch.logit_scale)}
+    # Dùng chung nguồn sự thật với model thay vì liệt kê lại ở đây.
+    allowed = {id(p) for p in ctx.model.extra_trainable_params()}
 
     bad = [
         n for n, p in ctx.model.named_parameters()
@@ -446,6 +447,34 @@ def check_neg_branch_matches_loss(ctx):
                   else 'bỏ qua đúng (category mode)')
 
 
+@check('mix_alpha_neutral_at_init', 'mix_alpha khởi tạo trung tính (a=0.5)')
+def check_mix_alpha_neutral_at_init(ctx):
+    """theta=0 -> a=0.5 -> norm(0.5u + 0.5f) == norm(u + f).
+
+    Bất biến này là điều khiến --learn_mix_alpha an toàn: bật cờ lên mà chưa
+    train thì kết quả phải trùng bản cũ, nên mọi khác biệt quan sát được về sau
+    đều do alpha HỌC ra chứ không do đổi công thức.
+    """
+    if not getattr(ctx.model, 'learn_mix_alpha', False):
+        return True, 'skipped (learn_mix_alpha=False)'
+
+    for m in ('photo', 'sketch'):
+        a = ctx.model.mix_alpha(m)
+        if abs(a.item() - 0.5) > 1e-6:
+            return False, f'alpha_{m} = {a.item():.6f}, đáng lẽ 0.5'
+
+    u = torch.randn(4, 512, device=ctx.device)
+    f = torch.randn(4, 512, device=ctx.device)
+    u = u / u.norm(dim=-1, keepdim=True)
+    f = f / f.norm(dim=-1, keepdim=True)
+    with torch.no_grad():
+        mixed = ctx.model.residual_mix(u, f, 'photo')
+    ref = (u + f) / (u + f).norm(dim=-1, keepdim=True)
+    if not torch.allclose(mixed, ref, atol=1e-6):
+        return False, f'lệch so với u+f, max diff {(mixed - ref).abs().max().item():.2e}'
+    return True, 'a=0.5 cho cả hai nhánh, trùng khớp u+f'
+
+
 @check('logit_scale_clamped', 'logit_scale được clamp <= 100')
 def check_logit_scale_clamped(ctx):
     with torch.no_grad():
@@ -575,6 +604,7 @@ def main():
             ('disable_cross_exchange', {'disable_cross_exchange': True}),
             ('enhance_text', {'enhance_text': True}),
             ('learn_logit_scale', {'learn_logit_scale': True}),
+            ('learn_mix_alpha', {'learn_mix_alpha': True}),
             ('no_augmentation', {'_no_aug': True}),
             ('shallow_prompt', {'prompt_depth': 3, 'cross_layer': 1}),
         ]

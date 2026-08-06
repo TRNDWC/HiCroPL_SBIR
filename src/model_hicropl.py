@@ -165,6 +165,17 @@ class CustomCLIP(nn.Module):
             self.clip_photo.logit_scale.requires_grad_(True)
             self.clip_sketch.logit_scale.requires_grad_(True)
 
+        # Trọng số trộn residual, học riêng cho từng modality.
+        # theta=0 -> sigmoid=0.5 -> norm(0.5*u + 0.5*f) == norm(u + f), tức khởi
+        # tạo tái lập ĐÚNG hành vi cũ; mọi khác biệt về sau là do học ra.
+        # Động lực: CLIP đóng băng mạnh trên ảnh (đúng phân phối huấn luyện) và
+        # yếu trên sketch (dưới đại diện), nên ép hai nhánh dùng chung tỉ lệ 1:1
+        # là neo nhánh sketch vào chính phần đặc trưng kém chất lượng nhất.
+        self.learn_mix_alpha = bool(getattr(cfg, 'learn_mix_alpha', False))
+        if self.learn_mix_alpha:
+            self.mix_alpha_photo = nn.Parameter(torch.zeros(()))
+            self.mix_alpha_sketch = nn.Parameter(torch.zeros(()))
+
         # Print trainable param counts per branch for verification
         def _count_trainable(m):
             total = 0
@@ -236,6 +247,41 @@ class CustomCLIP(nn.Module):
     def normalize_features(self, feat_prenorm):
         """L2-normalize feature tensors."""
         return feat_prenorm / feat_prenorm.norm(dim=-1, keepdim=True)
+
+    def extra_trainable_params(self):
+        """Param trainable hợp lệ nằm NGOÀI prompt learner và LayerNorm.
+
+        Nguồn sự thật duy nhất, dùng chung bởi configure_optimizers(),
+        _assert_no_param_leak() và scripts/verify_training.py — nếu không, thêm
+        một param kiểu này sẽ làm mọi chỗ kiểm tra báo leak giả.
+        """
+        out = []
+        if self.learn_logit_scale:
+            out += [self.clip_photo.logit_scale, self.clip_sketch.logit_scale]
+        if self.learn_mix_alpha:
+            out += [self.mix_alpha_photo, self.mix_alpha_sketch]
+        return out
+
+    def mix_alpha(self, modality):
+        """Tỉ lệ tin nhánh prompted, trong [0, 1]. 0.5 = hành vi cũ."""
+        if not self.learn_mix_alpha:
+            return None
+        theta = self.mix_alpha_photo if modality == 'photo' else self.mix_alpha_sketch
+        return torch.sigmoid(theta)
+
+    def residual_mix(self, prompted_norm, fixed_norm, modality):
+        """norm(a * prompted + (1-a) * frozen).
+
+        Khi không học alpha thì giữ NGUYÊN biểu thức cũ `u + f` thay vì
+        `0.5*u + 0.5*f` — hai cái tương đương sau chuẩn hoá, nhưng viết y hệt
+        bản cũ đảm bảo kết quả giống đến từng bit cho mọi run đã có.
+        """
+        if not self.learn_mix_alpha:
+            prenorm = prompted_norm + fixed_norm
+        else:
+            a = self.mix_alpha(modality)
+            prenorm = a * prompted_norm + (1.0 - a) * fixed_norm
+        return prenorm / prenorm.norm(dim=-1, keepdim=True)
 
     def _exp_logit_scale(self, logit_scale_param):
         """exp(logit_scale) có clamp, theo đúng CLIP gốc (max = 100).
@@ -346,13 +392,11 @@ class CustomCLIP(nn.Module):
         # Image
         photo_feat_prompted = out_p["image_features"]
         photo_feat_prompted_norm = photo_feat_prompted / photo_feat_prompted.norm(dim=-1, keepdim=True)
-        photo_feat_prenorm = photo_feat_prompted_norm + photo_feat_fixed
-        photo_feat = photo_feat_prenorm / photo_feat_prenorm.norm(dim=-1, keepdim=True)
+        photo_feat = self.residual_mix(photo_feat_prompted_norm, photo_feat_fixed, 'photo')
 
         sketch_feat_prompted = out_s["image_features"]
         sketch_feat_prompted_norm = sketch_feat_prompted / sketch_feat_prompted.norm(dim=-1, keepdim=True)
-        sketch_feat_prenorm = sketch_feat_prompted_norm + sketch_feat_fixed
-        sketch_feat = sketch_feat_prenorm / sketch_feat_prenorm.norm(dim=-1, keepdim=True)
+        sketch_feat = self.residual_mix(sketch_feat_prompted_norm, sketch_feat_fixed, 'sketch')
         
         # neg_feat đã được chuẩn hoá ở bước 4 (hoặc là None nếu loss không dùng)
 
@@ -480,9 +524,7 @@ class HiCroPL_SBIR(pl.LightningModule):
             for _, m in model.named_modules() if isinstance(m, torch.nn.LayerNorm)
             for p in m.parameters(recurse=False)
         }
-        allowed_ids = set()
-        if getattr(model, 'learn_logit_scale', False):
-            allowed_ids = {id(model.clip_photo.logit_scale), id(model.clip_sketch.logit_scale)}
+        allowed_ids = {id(p) for p in model.extra_trainable_params()}
 
         trainable = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
         self.print(
@@ -547,7 +589,15 @@ class HiCroPL_SBIR(pl.LightningModule):
                 continue
             add_unique_params(module.parameters(recurse=False), ln_params, seen_ids)
 
-        # logit_scale chỉ vào optimizer khi được bật tường minh (cfg.learn_logit_scale)
+        # Param trainable ngoài prompt learner / LayerNorm, bật tường minh qua cfg.
+        # mix_alpha đi nhóm riêng: nó là scalar trong không gian logit, LR của
+        # LayerNorm (1e-6) sẽ khiến nó gần như không nhúc nhích trong 8 epoch.
+        alpha_params = []
+        if getattr(self.model, 'learn_mix_alpha', False):
+            add_unique_params(
+                [self.model.mix_alpha_photo, self.model.mix_alpha_sketch],
+                alpha_params, seen_ids,
+            )
         if getattr(self.model, 'learn_logit_scale', False):
             add_unique_params(
                 [self.model.clip_photo.logit_scale, self.model.clip_sketch.logit_scale],
@@ -580,6 +630,10 @@ class HiCroPL_SBIR(pl.LightningModule):
         param_groups = [{'params': prompt_params, 'lr': prompt_lr}]
         if non_prompt_params:
             param_groups.append({'params': non_prompt_params, 'lr': clip_ln_lr})
+        if alpha_params:
+            alpha_lr = getattr(self.cfg, 'mix_alpha_lr', 1e-3)
+            self.print(f"mix_alpha: {len(alpha_params)} param, lr={alpha_lr}")
+            param_groups.append({'params': alpha_params, 'lr': alpha_lr})
 
         return torch.optim.Adam(param_groups, weight_decay=weight_decay)
 
@@ -595,7 +649,15 @@ class HiCroPL_SBIR(pl.LightningModule):
         for k, v in loss_dict.items():
             if isinstance(v, torch.Tensor) or v > 0:
                 self.log(k, v, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-                
+
+        # alpha đi vào callback_metrics -> RunCSVLogger tự đưa vào metrics_epoch.csv,
+        # nên xem được quỹ đạo của nó theo epoch mà không cần thêm hạ tầng gì.
+        if getattr(self.model, 'learn_mix_alpha', False):
+            self.log('alpha_photo', self.model.mix_alpha('photo'),
+                     on_step=False, on_epoch=True, prog_bar=True)
+            self.log('alpha_sketch', self.model.mix_alpha('sketch'),
+                     on_step=False, on_epoch=True, prog_bar=True)
+
         return loss
 
     def extract_eval_features(self, tensor, modality):
@@ -629,9 +691,10 @@ class HiCroPL_SBIR(pl.LightningModule):
         
         fixed_feat = distill_encoder(tensor.type(self.model.dtype))
         fixed_feat_norm = fixed_feat / fixed_feat.norm(dim=-1, keepdim=True)
-        
-        combined_prenorm = prompted_feat_norm + fixed_feat_norm
-        return combined_prenorm / combined_prenorm.norm(dim=-1, keepdim=True)
+
+        # Dùng chung `residual_mix` với forward: nếu train và eval trộn khác tỉ lệ
+        # thì mọi con số đánh giá đều đo sai mô hình.
+        return self.model.residual_mix(prompted_feat_norm, fixed_feat_norm, modality)
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         return self._validation_step_category(batch, batch_idx, dataloader_idx)
