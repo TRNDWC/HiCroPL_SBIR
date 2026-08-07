@@ -64,21 +64,39 @@ def ablation_table(rows, group_cols, metric):
         raise SystemExit(f'Không dòng nào có cột {metric!r} là số. '
                          'Các run trước bản vá hook on_validation_end sẽ trống cột này.')
 
+    def n_seeds(items):
+        """Số seed PHÂN BIỆT, không phải số dòng.
+
+        Chạy lại cùng seed cho kết quả giống hệt (huấn luyện tất định), nên đếm
+        số dòng sẽ thổi phồng cỡ mẫu và làm std trông nhỏ hơn thực tế.
+        """
+        keys = {r.get('cfg_seed') or r.get('exp_name', '') for _, r in items}
+        return len(keys)
+
     print(f'\n| Cấu hình | n seed | {metric} (mean ± std) | min | max | params |')
     print('|---|---:|---:|---:|---:|---:|')
     out = []
+    dupes = 0
     for key, items in sorted(groups.items(), key=lambda kv: -statistics.fmean(v for v, _ in kv[1])):
+        dupes += len(items) - n_seeds(items)
         vals = [v for v, _ in items]
         mean = statistics.fmean(vals)
         sd = statistics.stdev(vals) if len(vals) > 1 else 0.0
         params = items[0][1].get('trainable_params', '')
         params_s = f'{int(params):,}' if params.isdigit() else params
         sd_s = f' ± {100 * sd:.2f}' if len(vals) > 1 else ' ± —'
-        print(f'| {fmt_group(key, group_cols)} | {len(vals)} | '
+        ns = n_seeds(items)
+        print(f'| {fmt_group(key, group_cols)} | {ns} | '
               f'{100 * mean:.2f}{sd_s} | {100 * min(vals):.2f} | {100 * max(vals):.2f} | {params_s} |')
-        out.append((key, vals))
+        out.append((key, vals, ns))
 
-    singles = [k for k, v in out if len(v) < 3]
+    if dupes:
+        print(f'\n  ⓘ {dupes} dòng là chạy lại cùng seed. Huấn luyện tất định nên chúng '
+              'trùng giá trị;\n    cột "n seed" đếm seed phân biệt, nhưng mean/std vẫn tính '
+              'trên mọi dòng (không đổi mean,\n    nhưng làm std nhỏ đi giả tạo). Lọc bớt bản '
+              'trùng nếu cần std chính xác.')
+
+    singles = [k for k, v, ns in out if ns < 3]
     if singles:
         print(f'\n  ⚠ {len(singles)} cấu hình có < 3 seed — chưa ước lượng được dao động.')
     print('\n  Chênh lệch nhỏ hơn ~2×std là không kết luận được.')

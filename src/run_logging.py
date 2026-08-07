@@ -199,6 +199,7 @@ class RunCSVLogger(Callback):
 
     # Hyperparameter được chụp vào dòng summary để so sánh giữa các run
     TRACKED_OPTS = (
+        'seed',
         'dataset', 'backbone', 'eval_mode', 'epochs', 'batch_size',
         'prompt_lr', 'clip_LN_lr', 'weight_decay',
         'n_ctx', 'prompt_depth', 'cross_layer',
