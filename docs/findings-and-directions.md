@@ -370,7 +370,17 @@ và rằng một **cổng α phụ thuộc nội dung** là khả thi về nguy�
 quyết định (nhánh prompted có đáng tin cho đầu vào này không) có cấu trúc, không
 phải ngẫu nhiên.
 
-**[ĐO] Dư địa: oracle α-theo-lớp = 81.368 so với α toàn cục 78.500 → +2.868 pp.**
+**[ĐO] Dư địa của α thích ứng, ba mức:**
+
+| Mức | mAP@200 | so với α toàn cục | |
+|---|---:|---:|---|
+| α toàn cục tốt nhất (0.5) | 78.500 | — | đạt được |
+| oracle theo **lớp** | 81.368 | **+2.868** | cần nhãn |
+| oracle theo **từng query** | 83.818 | **+5.318** | trần tuyệt đối |
+
+**[SUY]** Nhãn lớp giải thích **54%** dư địa; **46% còn lại nằm trong nội bộ từng
+lớp**. Nghĩa là một cổng theo query, nếu tín hiệu đủ tốt, **có thể vượt** oracle
+theo lớp — không bị nó chặn trên.
 
 Con số này **lớn hơn mọi hiệu ứng đã đo được trong toàn bộ dự án** (mọi thí nghiệm
 khác đều nằm trong ±0.8 pp). Đây là lần đầu có một dư địa đáng kể được xác định.
