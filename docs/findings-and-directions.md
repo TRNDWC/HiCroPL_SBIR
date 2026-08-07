@@ -874,9 +874,48 @@ Cột giữ lại (79.315) rất sát cột oracle (79.597) → **cấu trúc c�
 thật**, không phải overfit. Đỉnh ở `k=42`, tức **gấp đôi số lớp thật (21)** — khớp
 với §3.6c rằng 46% dư địa nằm trong nội bộ lớp.
 
-**Còn thiếu để triển khai:** cách chọn α cho mỗi cụm **không dùng nhãn**. §3.6c cho
-thấy tín hiệu theo từng query chỉ với tới 3%, nhưng trung bình theo cụm gộp ~300
-query nên nhiễu giảm ~17 lần — tín hiệu có thể lộ ra ở mức cụm. **Chưa kiểm.**
+### H″ — chọn α không dùng nhãn: **thất bại, đóng hướng α thích ứng**
+
+**[ĐO]** Tương quan giữa thống kê cụm (tính hoàn toàn từ đặc trưng) và α* của cụm,
+tại `k=42`:
+
+| tín hiệu | r |
+|---|---:|
+| `agree` (`u·f`) | +0.060 |
+| `margin_prompted` | −0.166 |
+| `top1_prompted` | +0.137 |
+| `margin_diff` | −0.031 |
+
+| quy tắc | mAP (nửa B) | Δ |
+|---|---:|---:|
+| nền α=0.5 | 78.346 | — |
+| α∈[0.3,0.7] theo hạng — **0 tham số** | 76.890 | **−1.456** |
+| α∈[0.5,0.7] — 2 tham số fit trên A | 78.585 | +0.240 |
+| α theo cụm bằng **nhãn** (H′) | 79.315 | +0.970 |
+
+**[SUY]** Giả thuyết "nhiễu che mất tín hiệu, trung bình theo cụm sẽ lộ ra" **bị
+bác bỏ**. Gộp ~300 query mỗi cụm giảm nhiễu ~17 lần mà tương quan vẫn ≤ 0.17 —
+nghĩa là **không có tín hiệu ở đó ngay từ đầu**, chứ không phải bị nhiễu che.
+
+**[SUY]** Quy tắc 0 tham số **làm hại** (−1.456 pp) trong khi quy tắc 2 tham số
+"giúp" (+0.240 pp, dưới δ_min). Chênh lệch đó chính là dấu hiệu +0.240 là **khớp
+nhiễu**: hai tham số chọn từ 15 tổ hợp trên 41 cụm.
+
+**Dự đoán đã đăng ký trước khi chạy** (mô phỏng, §9): với r≈0.20 thì quy tắc thu
+được ~+0.08 pp. Quan sát được +0.240 với r=0.166 — cùng bậc độ lớn, dự đoán đúng.
+
+> **Kết luận: toàn bộ hướng α thích ứng theo nội dung đã đóng.** Dư địa +0.970 pp
+> là thật nhưng **chỉ truy cập được bằng nhãn tập test**, nên không phải phương
+> pháp. H (query), H′ (cụm, có nhãn), H″ (cụm, không nhãn) — cả ba đã đo xong.
+
+### Kết hợp αQE + α theo cụm: giẫm chân nhau
+
+**[ĐO]** Tại `k=42`, chấm trên nửa B: αQE một mình +3.263, α theo cụm một mình
++0.755, cả hai +3.530. Phần cộng thêm chỉ **+0.267** thay vì +0.755 — hai cải tiến
+khai thác **một phần cùng nguồn tín hiệu** (cấu trúc láng giềng trong gallery).
+
+Vì α theo cụm cần nhãn, điểm này chỉ có ý nghĩa học thuật. **αQE một mình
+(+3.256 pp) là kết quả triển khai được.**
 
 ---
 
