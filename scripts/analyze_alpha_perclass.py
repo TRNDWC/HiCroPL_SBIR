@@ -174,7 +174,42 @@ def main():
     print(f'  oracle theo LỚP                : {100 * oracle:.3f}   '
           f'({100 * (oracle - gm):+.3f} pp — cần nhãn)')
     print(f'  oracle theo TỪNG QUERY         : {100 * per_query_oracle:.3f}   '
-          f'({100 * (per_query_oracle - gm):+.3f} pp — trần tuyệt đối)')
+          f'({100 * (per_query_oracle - gm):+.3f} pp — PHẦN LỚN LÀ ẢO, xem dưới)')
+
+    # Oracle theo query chọn max trên MỘT mẫu duy nhất cho mỗi query, nên nó ăn
+    # trọn thiên lệch chọn-trên-nhiễu: với AP hoàn toàn không có cấu trúc theo α
+    # mà chỉ nhiễu std 0.05, max của 10 giá trị đã cho "+7 pp". Con số đó KHÔNG
+    # phải trần đạt được.
+    #
+    # Kiểm chứng đúng: chọn α trên nửa A, đánh giá trên nửa B. Cấu trúc thật sẽ
+    # tổng quát hoá; chọn-trên-nhiễu thì không.
+    rs = np.random.default_rng(0)
+    half = rs.random(n_tot) < 0.5
+    A, B = half, ~half
+
+    def held_out(group_of):
+        """group_of: mảng nhóm cho từng query. Chọn α trên A, chấm trên B."""
+        tot = 0.0
+        gid = group_of
+        for k in np.unique(gid):
+            ma, mb = (gid == k) & A, (gid == k) & B
+            if ma.sum() == 0 or mb.sum() == 0:
+                continue
+            a_k = max(alphas, key=lambda a: sweep[a][ma].mean())
+            tot += sweep[a_k][mb].sum()
+        return tot / B.sum()
+
+    a_glob_A = max(alphas, key=lambda a: sweep[a][A].mean())
+    base_B = sweep[a_glob_A][B].mean()
+    cls_B = held_out(labels)
+
+    print(f'\n  --- Kiểm chứng chia đôi: chọn α trên nửa A, chấm trên nửa B ---')
+    print(f'  α toàn cục (chọn trên A)       : {100 * base_B:.3f}')
+    print(f'  α theo LỚP  (chọn trên A)      : {100 * cls_B:.3f}   '
+          f'({100 * (cls_B - base_B):+.3f} pp)  <- dư địa THẬT ở mức lớp')
+    print('  α theo QUERY: KHÔNG kiểm chứng được — mỗi query chỉ xuất hiện một lần,')
+    print('    nên không có mẫu giữ lại để chấm. Chính điều đó cho thấy con số oracle')
+    print('    theo query ở trên là thiên lệch chọn-trên-nhiễu, không phải trần đạt được.')
 
     # ---- Phần trần với tới được bằng tín hiệu quan sát được ----
     # Oracle theo lớp là TRẦN nhưng cần nhãn. Ở đây hỏi câu khác: nếu chỉ dùng một
