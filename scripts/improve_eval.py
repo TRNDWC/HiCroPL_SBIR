@@ -141,6 +141,7 @@ def main():
     print(f'{"#cụm":>6} {"oracle":>9} {"giữ lại":>9} {"so với nền":>11}')
     print('-' * 40)
     rs = np.random.default_rng(0)
+    best_cluster = (0, -1.0)
     half = torch.from_numpy(rs.random(len(lq)) < 0.5).to(dev)
     ap_by_alpha = {a: score(mix(uq, fq, a), mix(ug, fg, a))[1] for a in args.alphas}
 
@@ -165,6 +166,8 @@ def main():
         print(f'{k:>6} {100 * orc:>9.3f} {100 * held:>9.3f} {100 * (held - base_B):>+11.3f}')
         rows.append({'method': 'H′ cluster-α (giữ lại)', 'param': f'k={k}',
                      'mAP': held, 'delta': held - base_B})
+        if held > best_cluster[1]:
+            best_cluster = (k, held)
 
     # ---------------- F : hậu xử lý ----------------
     print('\n### F — hậu xử lý (αQE trên truy vấn, DBA trên gallery)')
@@ -192,8 +195,8 @@ def main():
     # Hai cải tiến tác động lên hai trục khác nhau (α đổi đặc trưng, QE đổi truy
     # vấn), nên câu hỏi là chúng có CỘNG DỒN hay giẫm chân nhau. Chấm trên nửa B
     # với α chọn từ nửa A, để con số so được với cột "giữ lại" của H′.
-    if best[1] > 0 and args.clusters:
-        kbest = max(args.clusters)
+    if best[1] > 0 and best_cluster[0] > 0:
+        kbest = best_cluster[0]   # k tốt nhất theo cột giữ lại, KHÔNG phải k lớn nhất
         cent = kmeans(g0, kbest, seed=0)
         assign = (q0 @ cent.t()).argmax(1)
         qmix = q0.clone()

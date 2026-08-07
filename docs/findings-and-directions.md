@@ -825,6 +825,61 @@ mà dữ liệu hiện có cho phép.
 
 ---
 
+## 8b. KẾT QUẢ DƯƠNG ĐẦU TIÊN: hậu xử lý retrieval (+3.256 pp)
+
+**[ĐO]** Trên cùng checkpoint, không train lại gì:
+
+| Phương pháp | mAP@200 | Δ | Cần nhãn lúc test? |
+|---|---:|---:|---|
+| Nền (α=0.5) | 78.500 | — | — |
+| **+ αQE (`qe_k=20`)** | **81.756** | **+3.256** | **Không** |
+| + α theo cụm (`k=42`) | 79.315* | +0.970* | Có |
+| + cả hai | 82.071* | +3.725* | Có |
+
+<sub>* chấm trên nửa query giữ lại, so với nền cũng trên nửa đó (78.346).</sub>
+
+**Đây là cải thiện lớn nhất toàn dự án** — gấp 10 lần δ_min = 0.31 pp, và lớn hơn
+mọi hiệu ứng ở §3.2–3.6 cộng lại.
+
+**[ĐO] αQE đạt đỉnh tại `qe_k=20`** (5→20 tăng, 40→120 giảm dần), nên đây là cực
+đại thật chứ không phải biên dải quét. **DBA luôn có hại** — `dba_k>0` với `qe_k=0`
+cho âm ở mọi mức, và mọi tổ hợp có DBA đều kém hơn αQE thuần.
+
+**[SUY] Vì sao hướng này thành công trong khi bảy hướng trước thất bại:** nó
+**không đụng gì tới quá trình thích nghi**. Mọi can thiệp trước đều dịch chuyển
+điểm cân bằng thích nghi ↔ tổng quát, mà §4 cho thấy điểm đó đã tối ưu. αQE tác
+động lên một trục hoàn toàn khác — dùng cấu trúc của gallery, thứ chưa ai khai
+thác.
+
+### Phân biệt bắt buộc khi báo cáo
+
+| | Dùng gì lúc test | Xếp loại |
+|---|---|---|
+| αQE | chỉ gallery (dữ liệu bài toán đã cho) | **transductive, không nhãn** — triển khai được |
+| α theo cụm | gallery **+ nhãn** để chọn α mỗi cụm | chưa triển khai được |
+
+Bảng trong bài báo phải tách dòng:
+
+```
+Ours (inductive)             78.5
+Ours + αQE (transductive)    81.8
+```
+
+Phần lớn công trình SBIR không dùng hậu xử lý, nên gộp chung là so sánh không
+công bằng.
+
+### α theo cụm: dư địa thật, nhưng chưa dùng được
+
+Cột giữ lại (79.315) rất sát cột oracle (79.597) → **cấu trúc cụm tổng quát hoá
+thật**, không phải overfit. Đỉnh ở `k=42`, tức **gấp đôi số lớp thật (21)** — khớp
+với §3.6c rằng 46% dư địa nằm trong nội bộ lớp.
+
+**Còn thiếu để triển khai:** cách chọn α cho mỗi cụm **không dùng nhãn**. §3.6c cho
+thấy tín hiệu theo từng query chỉ với tới 3%, nhưng trung bình theo cụm gộp ~300
+query nên nhiễu giảm ~17 lần — tín hiệu có thể lộ ra ở mức cụm. **Chưa kiểm.**
+
+---
+
 ## 9. Kế hoạch: từ bảy kết quả âm đến một bài báo
 
 ### 9.1 Đọc đúng tình hình
