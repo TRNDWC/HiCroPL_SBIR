@@ -56,8 +56,12 @@ else
     --exp_name="$EXP" --seed="$SEED" --epochs="$EPOCHS" --save_top_k=1
 fi
 
-# run_dir mới nhất của experiment vừa chạy
-RUN_DIR=$(ls -d tb_logs/"$EXP"/*/ 2>/dev/null | sort | tail -1 || true)
+# run_dir mới nhất của experiment vừa chạy.
+# KHÔNG dùng `ls | sort | tail -1`: TensorBoardLogger tạo tb_logs/<exp>/version_N/
+# nằm cạnh thư mục run, và 'v' (0x76) > '2' (0x32) nên version_0 luôn thắng khi
+# sắp xếp. Lọc theo config.json — chỉ thư mục run mới có file đó.
+RUN_DIR=$(find "tb_logs/$EXP" -mindepth 2 -maxdepth 2 -name config.json 2>/dev/null \
+          | xargs -r -n1 dirname | sort | tail -1 || true)
 if [ "${DRY:-0}" = "1" ]; then
   echo; echo "+ python scripts/sweep_alpha.py --run_dir <run_dir> --alphas $ALPHAS --save_ap"
   exit 0

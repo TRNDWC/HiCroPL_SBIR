@@ -545,6 +545,17 @@ Chưa có thí nghiệm nào cô lập L1.
 §3.6 chỉ đo được α ≥ 0.5 (vì α học được luôn tăng). Nửa còn lại của đường cong
 hoàn toàn chưa biết, và `α = 0` chính là §7.1. Đây là lý do hướng A gộp cả hai.
 
+**[ĐO] Mốc tự kiểm tra cho `scripts/sweep_alpha.py`.** Cấu hình base (seed 1) đã
+tái lập `best mAP = 0.785003 @epoch 3` ở **năm** lần chạy độc lập, trải qua các
+giai đoạn 0, 2, 3, 4 dưới các `exp_name` khác nhau. Do đó:
+
+> Khi quét α, giá trị tại **α = 0.5 phải bằng 78.5003**. Lệch đáng kể nghĩa là
+> nạp sai checkpoint hoặc khác dữ liệu — **không** phải phát hiện khoa học.
+
+**[SUY]** Năm lần tái lập chính xác cũng củng cố §2.1: huấn luyện tất định hoàn
+toàn theo seed, nên **δ_min = 0.31 pp là dao động seed thuần tuý**, không lẫn
+nhiễu chạy lại. Hệ quả thực tế: không bao giờ cần lặp lại một run cùng seed.
+
 ---
 
 ## 8. Thứ tự đề xuất
@@ -556,6 +567,10 @@ hoàn toàn chưa biết, và `α = 0` chính là §7.1. Đây là lý do hướ
 | 3 | **Hướng B′** — `L_rel` bổ sung | ~4 giờ | Có bảo toàn tổng quát được không |
 | 4 | **D, E, F** | rẻ | Cải tiến đi kèm, không phụ thuộc nhánh |
 | — | ~~B~~, C | — | Hoãn: chống chỉ định / rủi ro cao sau §3.6 |
+
+**Chạy song song được với bước 1:** hướng F (re-ranking) dùng đúng ma trận tương
+đồng mà `sweep_alpha.py` đã tính, không cần train lại và không phụ thuộc kết quả
+α. Đây là việc duy nhất trong danh sách không bị chặn bởi bất cứ thứ gì.
 
 **Rẽ nhánh sau bước 1:**
 

@@ -47,7 +47,16 @@ def load_cfg(run_dir, overrides):
     """Đọc config.json mà RunCSVLogger đã chụp lại — đảm bảo dựng đúng model."""
     path = os.path.join(run_dir, 'config.json')
     if not os.path.exists(path):
-        raise SystemExit(f'Không thấy {path}. Cần run_dir của một lần chạy đã hoàn thành.')
+        # Nhầm lẫn thường gặp: trỏ vào tb_logs/<exp>/version_N/ của
+        # TensorBoardLogger thay vì tb_logs/<exp>/<run_id>/ của RunCSVLogger.
+        siblings = sorted(
+            os.path.dirname(p) for p in
+            glob.glob(os.path.join(os.path.dirname(run_dir.rstrip('/\\')), '*', 'config.json')))
+        hint = ''
+        if siblings:
+            hint = '\n\nCó vẻ bạn muốn một trong các thư mục sau:\n  ' + '\n  '.join(siblings)
+        raise SystemExit(f'Không thấy {path}. Cần run_dir của một lần chạy đã hoàn '
+                         f'thành (thư mục có config.json, không phải version_N/).{hint}')
     with open(path, encoding='utf-8') as f:
         cfg = SimpleNamespace(**json.load(f))
     for k, v in overrides.items():
