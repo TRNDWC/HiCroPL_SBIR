@@ -232,6 +232,84 @@ def main():
                      'mAP': v_comb, 'delta': v_comb - base_B})
         del gA, simc
 
+    # ---------------- H″ : α theo cụm KHÔNG dùng nhãn ----------------
+    # H′ chứng minh dư địa theo cụm là thật, nhưng nó chọn α mỗi cụm bằng NHÃN —
+    # không triển khai được. Ở đây thử suy ra α từ thống kê của cụm, tính được
+    # hoàn toàn từ đặc trưng.
+    #
+    # Cơ sở: §3.6c đo corr(chất lượng nhánh prompted, α*) = +0.42 ở mức lớp. Tín
+    # hiệu theo TỪNG query chỉ với tới 3% dư địa vì quá nhiễu, nhưng trung bình
+    # trên ~300 query mỗi cụm giảm nhiễu khoảng 17 lần.
+    if best_cluster[0] > 0:
+        k = best_cluster[0]
+        cent = kmeans(g0, k, seed=0)
+        assign = (q0 @ cent.t()).argmax(1)
+
+        with torch.no_grad():
+            agree = (uq * fq).sum(-1)
+            topP = (mix(uq, fq, 1.0) @ mix(ug, fg, 1.0).t()).topk(10, -1).values
+            topF = (mix(uq, fq, 0.0) @ mix(ug, fg, 0.0).t()).topk(10, -1).values
+        qsig = {
+            'agree': agree,
+            'margin_prompted': topP[:, 0] - topP[:, -1],
+            'top1_prompted': topP[:, 0],
+            'margin_diff': (topP[:, 0] - topP[:, -1]) - (topF[:, 0] - topF[:, -1]),
+        }
+        del topP, topF
+
+        cl_mask = [assign == j for j in range(k)]
+        cl_mask = [m for m in cl_mask if m.any()]
+        astar = np.array([max(args.alphas, key=lambda a: ap_by_alpha[a][m].mean().item())
+                          for m in cl_mask])
+
+        print(f'\n### H″ — α theo cụm KHÔNG dùng nhãn (k={k}, {len(cl_mask)} cụm)')
+        print('  Tương quan giữa thống kê cụm (tính được từ đặc trưng) và α* của cụm:')
+        best_name, best_r = None, 0.0
+        cl_sig = {}
+        for nm, s in qsig.items():
+            v = np.array([s[m].mean().item() for m in cl_mask])
+            cl_sig[nm] = v
+            r = float(np.corrcoef(v, astar)[0, 1]) if v.std() > 0 else 0.0
+            print(f'    {nm:<18} r = {r:+.3f}')
+            if abs(r) > abs(best_r):
+                best_name, best_r = nm, r
+
+        print(f'  Tín hiệu mạnh nhất: {best_name} (r={best_r:+.3f})')
+
+        # Quy tắc đơn điệu: xếp hạng cụm theo tín hiệu -> α trải đều trong [lo, hi].
+        # Chỉ HAI tham số toàn cục, và chúng chọn trên nửa A rồi chấm trên nửa B —
+        # yếu hơn hẳn so với chọn α riêng cho từng cụm bằng nhãn.
+        v = cl_sig[best_name]
+        rank = np.argsort(np.argsort(v if best_r > 0 else -v)) / max(len(v) - 1, 1)
+        lo_hi = [(lo, hi) for lo in (0.2, 0.3, 0.4, 0.5) for hi in (0.5, 0.6, 0.7, 0.85, 1.0)
+                 if hi > lo]
+        B = ~half
+        base_B = base_ap[B].mean().item()
+
+        def rule_score(lo, hi, on):
+            tot = 0.0
+            for i, m in enumerate(cl_mask):
+                a = min(args.alphas, key=lambda x: abs(x - (lo + (hi - lo) * rank[i])))
+                mm = m & on
+                if mm.any():
+                    tot += ap_by_alpha[a][mm].sum().item()
+            return tot / max(int(on.sum()), 1)
+
+        lo_b, hi_b = max(lo_hi, key=lambda t: rule_score(*t, half))
+        held_rule = rule_score(lo_b, hi_b, B)
+        fixed_rule = rule_score(0.3, 0.7, B)      # dải cố định, KHÔNG fit gì
+        print(f'\n  {"quy tắc":<34} {"mAP (nửa B)":>12} {"so với nền":>11}')
+        print(f'  {"nền α=0.5":<34} {100 * base_B:>12.3f} {0.0:>+11.3f}')
+        print(f'  {"α∈[0.3,0.7] theo hạng — 0 tham số":<34} {100 * fixed_rule:>12.3f} '
+              f'{100 * (fixed_rule - base_B):>+11.3f}')
+        print(f'  {f"α∈[{lo_b},{hi_b}] — 2 tham số fit trên A":<34} {100 * held_rule:>12.3f} '
+              f'{100 * (held_rule - base_B):>+11.3f}')
+        print(f'  {"α theo cụm bằng NHÃN (H′)":<34} {100 * best_cluster[1]:>12.3f} '
+              f'{100 * (best_cluster[1] - base_B):>+11.3f}   <- trần của H″')
+        for nm, v_ in (('H″ rule 0 tham số', fixed_rule), (f'H″ rule [{lo_b},{hi_b}]', held_rule)):
+            rows.append({'method': nm, 'param': f'k={k},sig={best_name}',
+                         'mAP': v_, 'delta': v_ - base_B})
+
     out = args.out or os.path.join(args.run_dir, 'improve_eval.csv')
     with open(out, 'w', newline='', encoding='utf-8') as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
