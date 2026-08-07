@@ -86,6 +86,8 @@ def build_cfg(**overrides):
         learn_logit_scale=False,
         learn_mix_alpha=False,
         mix_alpha_lr=1e-3,
+        supcon=False,
+        text_align_mode='legacy',
         eval_mode='category',
         temperature=0.07,
         lambda_cross_modal=1.0,
@@ -605,6 +607,8 @@ def main():
             ('enhance_text', {'enhance_text': True}),
             ('learn_logit_scale', {'learn_logit_scale': True}),
             ('learn_mix_alpha', {'learn_mix_alpha': True}),
+            ('supcon', {'supcon': True}),
+            ('text_rel', {'enhance_text': True, 'text_align_mode': 'rel'}),
             ('no_augmentation', {'_no_aug': True}),
             ('shallow_prompt', {'prompt_depth': 3, 'cross_layer': 1}),
         ]

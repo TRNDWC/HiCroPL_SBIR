@@ -205,6 +205,7 @@ class RunCSVLogger(Callback):
         'n_ctx', 'prompt_depth', 'cross_layer',
         'disable_cross_exchange', 'disable_augmentation', 'enhance_text',
         'learn_logit_scale', 'learn_mix_alpha', 'mix_alpha_lr',
+        'supcon', 'text_align_mode',
         'temperature', 'lambda_cross_modal', 'lambda_ce', 'lambda_consistency',
         'lambda_text_consistency', 'lambda_visual_cross',
     )

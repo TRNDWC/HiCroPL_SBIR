@@ -31,6 +31,69 @@ def cross_loss(feature_1, feature_2, temperature):
 
     return F.cross_entropy(logits, labels_target)
 
+def supcon_loss(feature_1, feature_2, labels, temperature):
+    """Supervised contrastive — MỌI mẫu cùng lớp là positive.
+
+    `cross_loss` (NT-Xent) chỉ coi đúng một cặp ghép là positive; mọi ảnh khác
+    trong batch là negative, KỂ CẢ ảnh cùng lớp. Với batch 128 và 104 lớp, mỗi
+    hàng có ~2.4 false negative — chỉ ~1% về số lượng, nhưng chúng là những
+    negative GIỐNG NHẤT nên chi phối gradient của InfoNCE.
+    """
+    device = feature_1.device
+    f = torch.cat([F.normalize(feature_1, dim=1), F.normalize(feature_2, dim=1)], dim=0)
+    lab = torch.cat([labels, labels], dim=0).view(-1, 1)
+
+    pos = (lab == lab.t()).float().to(device)
+    eye = torch.eye(len(f), dtype=torch.bool, device=device)
+    pos = pos.masked_fill(eye, 0)                      # bỏ chính nó khỏi positive
+
+    logits = (f @ f.t()) / temperature
+    logits = logits.masked_fill(eye, -1e9)             # và khỏi mẫu số
+    log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
+
+    n_pos = pos.sum(1)
+    valid = n_pos > 0                                  # hàng không có positive thì bỏ
+    if not valid.any():
+        return torch.zeros((), device=device)
+    return -((pos * log_prob).sum(1)[valid] / n_pos[valid]).mean()
+
+
+def text_align_loss(feat, target, mode):
+    """Căn chỉnh `feat` với `target` (đã chuẩn hoá) theo một trong ba dạng.
+
+    'legacy' — dạng gốc `1 - cos(a+b, a)`. Với vector đã chuẩn hoá nó bằng
+        `1 - sqrt((1 + a·b)/2)`, tức chỉ là một reparameterization đơn điệu của
+        cosine với gradient bão hoà. Không sai nhưng không giải thích được.
+    'direct' — `1 - cos(a, b)`. Cùng ý đồ, viết thẳng.
+    'rel'    — KL giữa phân bố tương đồng của `feat` và của `target` TRÊN CÁC LỚP.
+        Chỉ so sánh THỨ HẠNG giữa các lớp nên tôn trọng modality gap của CLIP:
+        đặc trưng ảnh và text nằm trong hai nón tách rời, cos(image, text) chỉ
+        ~0.2-0.3 ngay cả với cặp khớp hoàn hảo, nên ép căn chỉnh TUYỆT ĐỐI sẽ
+        đẩy đặc trưng ảnh ra khỏi manifold của CLIP.
+    """
+    if mode == 'legacy':
+        return (1.0 - F.cosine_similarity(feat + target, feat, dim=-1)).mean()
+    if mode == 'direct':
+        return (1.0 - F.cosine_similarity(feat, target, dim=-1)).mean()
+    raise ValueError(f'text_align_mode không hợp lệ: {mode}')
+
+
+def relational_text_loss(feat, feat_frozen, protos, temperature=0.07):
+    """KL( softmax(feat·Pᵀ/τ) ‖ softmax(feat_frozen·Pᵀ/τ) ) — mục tiêu QUAN HỆ.
+
+    CÙNG bộ prototype text `P`, KHÁC đặc trưng: nhánh prompted phải xếp hạng các
+    lớp giống như nhánh frozen. Thay vì kéo đặc trưng ảnh về đặc trưng text (đi
+    ngược modality gap), chỉ ràng buộc THỨ HẠNG — đặc trưng được tự do dịch
+    chuyển miễn giữ nguyên cấu trúc tương đối giữa các lớp.
+
+    `feat_frozen` là mục tiêu cố định nên detach; nếu không, cách rẻ nhất để
+    giảm loss là kéo mục tiêu về phía nguồn, đúng lỗi đã gặp ở nhánh distill.
+    """
+    p = F.log_softmax(feat @ protos.t() / temperature, dim=-1)
+    q = F.softmax(feat_frozen.detach() @ protos.t() / temperature, dim=-1)
+    return F.kl_div(p, q, reduction='batchmean')
+
+
 def uses_triplet(args):
     """Điều kiện DUY NHẤT quyết định `neg_feat` có được dùng hay không.
 
@@ -61,6 +124,7 @@ def loss_fn_hicropl(args, features):
         logits_photo_aug, logits_sketch_aug,
         text_feat_photo, text_feat_sketch,
         text_distill_photo, text_distill_sketch,
+        photo_feat_fixed, sketch_feat_fixed,
         *_
     ) = features
 
@@ -83,6 +147,9 @@ def loss_fn_hicropl(args, features):
         dist_pos = 1.0 - F.cosine_similarity(sketch_feat, photo_feat)
         dist_neg = 1.0 - F.cosine_similarity(sketch_feat, neg_feat)
         loss_cross_modal = lambda_cross_modal * F.relu(dist_pos - dist_neg + triplet_margin).mean()
+    elif getattr(args, 'supcon', False):
+        loss_cross_modal = lambda_cross_modal * supcon_loss(
+            sketch_feat, photo_feat, label, temperature)
     else:
         loss_cross_modal = lambda_cross_modal * cross_loss(sketch_feat, photo_feat, temperature)
 
@@ -101,19 +168,32 @@ def loss_fn_hicropl(args, features):
     loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
     if getattr(args, 'enhance_text', False):
-        # --- L3: Text Consistency (LLM-guided dual sketch/photo descriptions) ---
-        loss_cons_text_sketch = 1.0 - F.cosine_similarity(text_feat_sketch + text_distill_sketch, text_feat_sketch, dim=-1)
-        loss_cons_text_photo = 1.0 - F.cosine_similarity(text_feat_photo + text_distill_photo, text_feat_photo, dim=-1)
-        loss_cons_text = lambda_text_consistency * (loss_cons_text_sketch.mean() + loss_cons_text_photo.mean())
-    
-        # --- L_cons_visual_cross: Cross-anchor Visual to Text ---
+        mode = getattr(args, 'text_align_mode', 'legacy')
         lambda_visual_cross = getattr(args, 'lambda_visual_cross', 0.1)
-        text_distill_sketch_batch = text_distill_sketch[label]
-        text_distill_photo_batch = text_distill_photo[label]
 
-        loss_cons_visual_cross_sketch = 1.0 - F.cosine_similarity(sketch_feat + text_distill_sketch_batch, sketch_feat, dim=-1)
-        loss_cons_visual_cross_photo = 1.0 - F.cosine_similarity(photo_feat + text_distill_photo_batch, photo_feat, dim=-1)
-        loss_cons_visual_cross = lambda_visual_cross * (loss_cons_visual_cross_sketch.mean() + loss_cons_visual_cross_photo.mean())
+        # --- L3: Text Consistency (LLM-guided dual sketch/photo descriptions) ---
+        # Cả hai vế đều là đặc trưng TEXT nên không dính modality gap; chỉ cần
+        # bỏ cách viết vòng vo của bản gốc.
+        loss_cons_text = lambda_text_consistency * (
+            text_align_loss(text_feat_sketch, text_distill_sketch,
+                            'direct' if mode != 'legacy' else 'legacy')
+            + text_align_loss(text_feat_photo, text_distill_photo,
+                              'direct' if mode != 'legacy' else 'legacy'))
+
+        # --- L_cons_visual_cross: Cross-anchor Visual to Text ---
+        # Đây MỚI là chỗ modality gap gây hại: kéo đặc trưng ẢNH về đặc trưng
+        # TEXT. Chế độ 'rel' thay ràng buộc tuyệt đối bằng ràng buộc thứ hạng
+        # giữa các lớp.
+        if mode == 'rel':
+            loss_cons_visual_cross = lambda_visual_cross * (
+                relational_text_loss(sketch_feat, sketch_feat_fixed,
+                                     text_distill_sketch, temperature)
+                + relational_text_loss(photo_feat, photo_feat_fixed,
+                                       text_distill_photo, temperature))
+        else:
+            loss_cons_visual_cross = lambda_visual_cross * (
+                text_align_loss(sketch_feat, text_distill_sketch[label], mode)
+                + text_align_loss(photo_feat, text_distill_photo[label], mode))
     else:
         loss_cons_text = 0.0
         loss_cons_visual_cross = 0.0

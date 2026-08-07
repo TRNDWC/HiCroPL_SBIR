@@ -51,6 +51,16 @@ parser.add_argument('--num_trainable_ln', type=int, default=-1,
 parser.add_argument('--disable_cross_exchange', action='store_true', help='Disable Visual-Visual cross-modal token exchange')
 parser.add_argument('--disable_augmentation', action='store_true', help='Disable data augmentation and consistency loss')
 parser.add_argument('--enhance_text', action='store_true', help='Enable L3 and L_cons_visual_cross for text enhancement')
+parser.add_argument('--text_align_mode', type=str, default='legacy',
+                    choices=['legacy', 'direct', 'rel'],
+                    help="Dạng loss căn chỉnh text. 'legacy' = 1-cos(a+b,a) như bản gốc; "
+                         "'direct' = 1-cos(a,b), cùng ý đồ nhưng viết thẳng; "
+                         "'rel' = ràng buộc THỨ HẠNG lớp, tôn trọng modality gap của CLIP "
+                         "(đặc trưng ảnh và text nằm hai nón tách rời)")
+parser.add_argument('--supcon', action='store_true',
+                    help='Dùng supervised contrastive cho L1 thay NT-Xent. NT-Xent coi ảnh '
+                         'CÙNG LỚP là negative — batch 128/104 lớp cho ~2.4 false negative mỗi '
+                         'hàng, và chúng là những negative giống nhất nên chi phối gradient')
 
 # ----------------------
 # ViT & HiCroPL Prompt Parameters
