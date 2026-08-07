@@ -31,10 +31,19 @@ một khuyết tật của thành phần nào.**
 | L4 (cross-entropy) có gây overfit? | Bỏ đi → **tệ hơn 0.83 pp** | **Bác bỏ** |
 | Weight decay có chặn được suy giảm? | Đổi best **0.014 pp** | **Bác bỏ** |
 | Capacity lớn hơn có giúp? | `n_ctx` 2→16: suy giảm tăng **9.8×** | **Bác bỏ, ngược dấu** |
+| Cho mô hình tự chọn tỉ lệ trộn residual? | α → 1, mAP **tệ hơn 0.51–0.80 pp** | **Bác bỏ, ngược dấu** |
 
-Hệ quả: hướng đi phải là một **ràng buộc có mục tiêu** giữ đúng cấu trúc ngữ
-nghĩa của CLIP — không phải bỏ bớt loss, không phải regularization chung chung,
-không phải thêm/bớt capacity.
+**Mẫu hình xuyên suốt: mọi can thiệp làm tăng mức độ thích nghi đều làm hiệu
+năng tệ đi; mọi can thiệp làm giảm nó thì trơ hoặc cũng tệ đi.** Điểm vận hành
+hiện tại nằm ở phía "thích nghi quá nhiều" của đường cong.
+
+Hệ quả: hướng đi phải là làm cho **bản thân quá trình thích nghi bảo toàn tính
+tổng quát hơn**, chứ không phải điều chỉnh cường độ của nó.
+
+> **Cảnh báo phương pháp (§3.7):** `ValidDataset` dùng đúng `UNSEEN_CLASSES`, tức
+> **không có tập validation riêng** — best epoch đang được chọn trên chính tập
+> test. Điều này không làm hỏng các so sánh trong tài liệu (mọi cấu hình đều chịu
+> cùng một thiên lệch) nhưng khiến **con số tuyệt đối 78.4 là lạc quan**.
 
 ---
 
@@ -204,36 +213,101 @@ Kết quả này **đảo ngược khuyến nghị ban đầu của tôi**. Tôi
 `n_ctx`" là ưu tiên số một với lập luận mô hình thiếu capacity vì prompt chỉ
 chiếm 3.8% chuỗi ViT. Lập luận đó sai, và dữ liệu bác bỏ nó dứt khoát.
 
+### 3.6 Trọng số trộn học được: α → 1, và điều đó làm tệ đi
+
+**[ĐO]** Cho `α = sigmoid(θ)` học được (khởi tạo θ=0 → α=0.5, trùng đúng hành vi
+cũ), 3 seed, 8 epoch:
+
+| Cấu hình | α @ep1 | α @ep7 | best mAP | suy giảm |
+|---|---:|---:|---:|---:|
+| α cố định 0.5 | 0.500 | 0.500 | **78.37** | **0.74** |
+| học, `lr=1e-3` | 0.545 | 0.780 | 77.86 | 1.38 |
+| học, `lr=1e-2` | 0.718 | 0.926 | 77.57 | 1.43 |
+
+<sub>α là trung bình của `α_photo` và `α_sketch` trên 3 seed.</sub>
+
+Kiểm cặp: base tốt hơn **+0.507 pp** (KTC `[+0.414, +0.600]`, t=10.68) so với
+`lr=1e-3`, và **+0.796 pp** (KTC `[+0.677, +0.917]`, t=12.85) so với `lr=1e-2`.
+
+**Ba cột đơn điệu cùng chiều.** α tăng càng nhanh → best càng thấp, suy giảm càng
+lớn. Đây là **quan hệ liều–đáp ứng**, bằng chứng nhân quả mạnh hơn hẳn tương quan
+đơn thuần.
+
+**[SUY]** Vì sao α → 1 là tất yếu, không phải phát hiện: nhánh frozen là hằng số
+nên **không thể** giảm train loss; nhánh prompted thì có thể. Gradient descent
+buộc phải dịch trọng số về phía thành phần thích nghi được.
+
+> **Tổng quát:** bất kỳ trọng số học được nào giữa một thành phần **thích nghi**
+> và một thành phần **đóng băng**, khi huấn luyện trên chính mục tiêu huấn luyện,
+> đều sẽ dịch về phía thành phần thích nghi — bất kể điều đó tốt hay xấu cho tập
+> test.
+
+**[SUY]** Giá trị thật của thí nghiệm không phải "hỏi ý mô hình" (mô hình chỉ
+phát biểu được về train loss, không về lớp chưa thấy) mà là: nó **đo được theo
+thang liều lượng mức lệch pha giữa mục tiêu huấn luyện và mục tiêu đánh giá**,
+chỉ bằng một tham số.
+
+**[SUY]** Đảo ngược một kết luận trước đó: **residual mix cố định ở 0.5 là một
+tính năng, không phải khiếm khuyết.** Nó là bộ điều chuẩn ngầm, và nó hoạt động
+**chính vì không học được**.
+
+**Bất đối xứng modality — bằng chứng yếu.** Tỉ lệ dịch chuyển của `α_sketch` so
+với `α_photo` (đo từ mốc 0.5) ở epoch 1 là **1.30×** (`lr=1e-3`) và **1.35×**
+(`lr=1e-2`), dương ở cả 3/3 seed — đúng chiều giả thuyết "CLIP yếu trên sketch".
+Nhưng ở `lr=1e-3`, gap tan biến về cuối (epoch 7: −0.34 pp, dấu lẫn lộn giữa các
+seed). Chưa đủ để làm một luận điểm.
+
+### 3.7 Không có tập validation riêng — best epoch chọn trên tập test
+
+**[ĐO]** `ValidDataset` (`src/dataset_retrieval.py`) dùng đúng `UNSEEN_CLASSES`,
+cùng tập lớp dùng để báo cáo kết quả ZS-SBIR. `ModelCheckpoint` monitor
+`val_map_200`, và `best_metric` là `max` theo epoch trên chính tập đó.
+
+**[SUY]** Với suy giảm best−last = 1.14 pp và best epoch = 2–3 trong 8–10 epoch,
+việc chọn epoch **có nhìn tập test** mang lại thiên lệch lạc quan cỡ vài phần
+mười pp, chặn trên bởi 1.14 pp.
+
+**Phạm vi ảnh hưởng:** mọi cấu hình trong tài liệu này đều chịu **cùng một** thiên
+lệch, nên các **so sánh** (toàn bộ §3.2–3.6) vẫn hợp lệ. Chỉ **con số tuyệt đối**
+là lạc quan — quan trọng khi đưa vào bảng so sánh với các công trình khác.
+
 ---
 
 ## 4. Chẩn đoán tổng hợp
 
-Ba mũi can thiệp, ba kết quả loại trừ lẫn nhau:
+Bốn mũi can thiệp, bốn kết quả:
 
-| Can thiệp | Kết quả |
-|---|---|
-| **Bỏ** một số hạng loss | tệ hơn 0.83 pp |
-| **Thêm** regularization tổng quát | trơ (0.014 pp) |
-| **Thêm** capacity | tệ hơn nhiều (suy giảm ×9.8) |
+| Can thiệp | Chiều | Kết quả |
+|---|---|---|
+| **Bỏ** một số hạng loss (L4) | ↓ thích nghi | tệ hơn 0.83 pp |
+| **Thêm** regularization tổng quát | ↓ thích nghi | trơ (0.014 pp) |
+| **Thêm** capacity (`n_ctx`) | ↑ thích nghi | tệ hơn nhiều (suy giảm ×9.8) |
+| **Nới** ràng buộc residual mix (α học được) | ↑ thích nghi | tệ hơn 0.51–0.80 pp |
+
+**[SUY]** Hai can thiệp làm **tăng** mức thích nghi đều làm tệ đi, đơn điệu theo
+cường độ. Nghĩa là điểm vận hành hiện tại đã nằm ở **phía thích nghi quá mức**
+của đường cong. Đây là chẩn đoán chính, và nó chặt hơn kết luận trước đó nhờ có
+thêm §3.6.
 
 **[SUY]** Suy giảm **không đến từ một khuyết tật cụ thể nào** mà là hệ quả nội
-tại của việc khớp phân phối huấn luyện. Do đó lời giải phải là một cơ chế **giữ
-lại thứ cần giữ** — cấu trúc tương đồng giữa các lớp mà CLIP đã học — chứ không
-phải điều chỉnh cường độ học.
+tại của việc khớp phân phối huấn luyện — trên 104 lớp **đã thấy**, trong khi test
+là lớp **chưa thấy**.
 
-**[SUY]** Hiện tại, thứ **duy nhất** đang giữ tính tổng quát là **residual mix**:
+**[ĐO+SUY]** Thứ **duy nhất** đang giữ tính tổng quát là **residual mix**:
 
 ```python
 feat = norm( norm(prompted) + frozen )
 ```
 
-Nó ép cứng một nửa đặc trưng cuối là CLIP đóng băng. Hiệu quả, nhưng:
+§3.6 cho thấy nó hiệu quả **chính vì** tỉ lệ 1:1 là hằng số áp đặt. Cho mô hình
+tự chọn thì nó chọn sai, một cách tất yếu và có thể dự đoán được.
 
-- **không học được** — tỉ lệ 1:1 là hằng số áp đặt
-- **đối xứng** giữa hai modality, trong khi CLIP mạnh trên ảnh và yếu trên
-  sketch, nên nhánh sketch bị neo vào chính phần đặc trưng kém chất lượng nhất
-- **chặn trần** của mọi cải tiến ở cơ chế prompt — đây là lý do baseline 169,984
-  params và cross exchange 46.3M params đều hội tụ về ~78.3
+**[SUY]** Do đó lời giải **không** phải là nới ràng buộc này ra, mà là một trong
+hai:
+
+1. Tìm **giá trị α tốt hơn** cho ràng buộc cố định (chưa quét α < 0.5 — §7.1)
+2. Làm cho **bản thân quá trình thích nghi bảo toàn tính tổng quát hơn**, để nó
+   không cần bị ghìm mạnh đến vậy
 
 ---
 
@@ -243,67 +317,105 @@ Mỗi hướng ghi rõ **cơ sở** (bằng chứng nào dẫn tới nó), **cơ
 và **cách bác bỏ** — nếu một đề xuất không nêu được cách nó có thể sai thì nó
 chưa phải giả thuyết khoa học.
 
-### A. Trọng số trộn residual học được theo modality — *ưu tiên cao*
+### A. Quét α cố định — *khả thi nhất, làm trước tiên* ⭐
 
-**Cơ sở.** §4: residual mix là cơ chế giữ tổng quát duy nhất, đang cố định và
-đối xứng. §3.5: mọi cách thêm capacity vào nhánh prompted đều thất bại, nên đòn
-bẩy còn lại nằm ở **tỉ lệ tin nhánh đó**.
+**Cơ sở.** §3.6 cho biết α=0.5 tốt hơn α→1, đơn điệu. Nhưng **chưa có dữ liệu nào
+về α < 0.5**. Đường cong `mAP(α)` là thứ rẻ nhất còn lại và trả lời nhiều câu hỏi
+treo nhất cùng lúc.
 
-**Cơ chế.**
+**Cơ chế.** Cố định α, không học. Quét `α ∈ {0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0}`.
 
-```
-feat = norm( a · prompted + (1−a) · frozen ),   a = sigmoid(θ)
-```
+**Ba câu hỏi được trả lời cùng lúc:**
 
-`θ` riêng cho photo và sketch. **Hai tham số cho cả mô hình.**
-
-**Tính chất then chốt:** `θ = 0 → a = 0.5 →` trùng đúng `norm(u + f)`, đã kiểm
-bằng số (sai khác `0.000e+00`). Nên mọi khác biệt quan sát được **chắc chắn** do
-`a` học ra, không do đổi công thức.
-
-**Giá trị lớn nhất không nằm ở mAP.** Quỹ đạo của `a` là **lời khai của chính mô
-hình** về việc nên tin nhánh prompted bao nhiêu:
-
-| Quan sát | Kết luận |
+| Điểm trên đường cong | Ý nghĩa |
 |---|---|
-| `a_sketch ≠ a_photo` | bất đối xứng modality có thật |
-| `a → 0` | nhánh prompted **gây hại**, residual mix cố định đang che giấu |
-| `a` đứng yên 0.5 | gradient không tới được — kiểm `mix_alpha_lr` |
+| **α = 0** | chính là `frozen-only` — con số còn thiếu từ Giai đoạn 0 |
+| **vị trí đỉnh** | nếu đỉnh ở α<0.5, nhánh prompted nên bị hạ trọng số |
+| **độ dốc quanh 0.5** | kết quả nhạy thế nào với lựa chọn này |
 
-Trường hợp `a → 0` là kết quả mạnh **dù mAP không đổi**: nó thống nhất toàn bộ
-chuỗi kết quả âm (cross exchange trung tính, capacity có hại, bỏ loss có hại)
-thành một câu chuyện duy nhất.
+**Chi phí.** Quét tại **thời điểm eval** trên một checkpoint đã train: 1 run
+(~40 phút) + N lần eval (vài phút mỗi lần). Quét tại thời điểm train thì đắt hơn
+(N run) nhưng cho biết tối ưu chung của (train, eval).
 
-**Trạng thái.** Đã cài đặt (`--learn_mix_alpha`), `scripts/run_phase3.sh`, chưa
-chạy.
+**Cách bác bỏ.** Nếu đường cong phẳng trong khoảng [0.3, 0.7] thì α không phải
+đòn bẩy, và trọng tâm chuyển sang hướng D/E/F.
 
-**Cách bác bỏ.** Nếu `a` ở lại quanh 0.5 với nhiều `mix_alpha_lr` khác nhau thì
-nhánh prompted đang đóng góp thật và hướng B rủi ro hơn nhiều.
+**Nếu đỉnh ở α < 0.5:** thay đổi khả thi nhất là **một hằng số**. Ít hấp dẫn về
+mặt bài báo, nhưng là lợi ích thật với chi phí bằng 0.
 
-### B. Thay residual mix bằng ràng buộc quan hệ tường minh — *trần cao nhất, rủi ro cao nhất*
+### B. ~~Thay residual mix bằng ràng buộc quan hệ~~ — **CHỐNG CHỈ ĐỊNH**
 
-**Cơ sở.** §4: cần cơ chế giữ đúng thứ cần giữ. §3.2 + §3.5: mọi cải tiến bên
-trong cơ chế prompt đều bị residual mix dập tắt.
+**Trạng thái trước §3.6:** tôi xếp hướng này "trần cao nhất".
 
-**Cơ chế.** Giữ **cấu trúc quan hệ** thay vì **giá trị tuyệt đối**:
+**Vì sao rút lại.** Bỏ residual mix để nhánh prompted làm tất cả **chính là** cực
+hạn α → 1. §3.6 đo được rằng đi theo hướng đó, dù chỉ một phần, làm hiệu năng tệ
+đi **đơn điệu theo cường độ**: α@ep7 = 0.78 → −0.51 pp; α@ep7 = 0.93 → −0.80 pp
+(mAP thấp hơn base).
+Ngoại suy tới α = 1.0 không có lý do gì để tốt hơn.
+
+`L_rel` **có thể** làm thay đổi bức tranh này — nó là ràng buộc mà thí nghiệm α
+không có. Nhưng giờ nó phải vượt qua một bằng chứng phản bác trực tiếp thay vì
+chỉ là giả thuyết trung tính. **Không nên đầu tư trước khi có đường cong ở
+hướng A.**
+
+**Điều kiện hồi sinh:** nếu §A cho thấy đỉnh nằm ở α > 0.5, thì giả định nền của
+hướng B được khôi phục và đáng thử lại.
+
+### B′. `L_rel` như ràng buộc BỔ SUNG, giữ nguyên α = 0.5 — *thay thế cho B*
+
+**Cơ sở.** §4 mục (2): làm quá trình thích nghi bảo toàn tính tổng quát hơn. §3.6
+bác bỏ việc **nới** ràng buộc, nhưng không nói gì về việc **thêm** ràng buộc.
+
+**Cơ chế.** Giữ nguyên residual mix cố định, cộng thêm:
 
 ```
 L_rel = ‖ sim(F_prompted) − sim(F_frozen) ‖²_F
 ```
 
-trên ma trận tương đồng trong batch. Rồi **giảm dần trọng số nhánh frozen về 0**,
-để đặc trưng cuối là nhánh prompted thuần.
+trên ma trận tương đồng trong batch. Ép nhánh prompted giữ hình học tương đối của
+CLIP **trong khi vẫn được ghìm bởi residual mix**.
 
-**Vì sao có thể hiệu quả [GIẢ].** Relational distillation cho phép đặc trưng dịch
-chuyển tự do **miễn là giữ hình học tương đối giữa các lớp** — chính xác là thứ
-quyết định tổng quát hoá zero-shot. Prompt được giải phóng để thu hẹp khoảng cách
-miền thay vì chỉ tinh chỉnh quanh một nền cố định.
+**Dự đoán kiểm chứng được [GIẢ].** Nếu `L_rel` thật sự bảo toàn tính tổng quát
+thì **suy giảm phải giảm** — đây là chỉ số nhạy nhất ta có (std 0.12 pp). Và khi
+đó, α học được sẽ tăng chậm hơn: một phép kiểm chéo độc lập.
 
-**Lộ trình an toàn.** `a` cố định 1:1 → `a` học được (A) → `a` + `L_rel` →
-anneal `(1−a)` về 0 → bỏ hẳn nhánh frozen.
+**Cách bác bỏ.** Nếu suy giảm không đổi với mọi trọng số `L_rel`, giả thuyết
+"cấu trúc quan hệ là thứ cần giữ" sai.
 
-**Cách bác bỏ.** Nếu bỏ nhánh frozen làm mAP sập dù `L_rel` mạnh, thì residual
-mix không chỉ là thủ thuật mà là thành phần không thể thay thế.
+### G. Tách lớp `pseudo-unseen` để chọn mô hình — *mới, sinh ra từ §3.6 + §3.7* ⭐
+
+**Cơ sở.** Hai kết quả độc lập cùng chỉ về một chỗ:
+
+- §3.6: mục tiêu huấn luyện **không thể** cho biết điều gì tốt cho lớp chưa thấy
+  — nó đẩy α đi sai hướng một cách tất yếu.
+- §3.7: hiện **không có tập validation riêng**; best epoch chọn trên chính tập
+  test.
+
+Cả hai đều là biểu hiện của **cùng một thiếu sót**: không có tín hiệu nào đại
+diện cho "lớp chưa thấy" mà thuật toán được phép nhìn.
+
+**Cơ chế.** Chia 104 lớp huấn luyện thành `seen-train` (~84) và `pseudo-unseen`
+(~20). Huấn luyện trên `seen-train`; dùng `pseudo-unseen` để chọn epoch, chọn α,
+và chọn mọi siêu tham số.
+
+**Vì sao đây là hướng mạnh:**
+
+1. **Sửa lỗi phương pháp.** Loại bỏ việc chọn mô hình trên tập test (§3.7) — cần
+   thiết cho bất kỳ báo cáo nghiêm túc nào.
+2. **Mở khoá lựa chọn có nguyên tắc.** α, số epoch, cường độ thích nghi — tất cả
+   đều là những đại lượng mà §3.6 chứng minh không thể chọn từ train loss. Giờ
+   chúng có một mục tiêu đại diện hợp lệ.
+3. **Có thể nâng thành đóng góp.** Không chỉ *chọn* α trên `pseudo-unseen` mà
+   **học** nó ở đó — một mục tiêu bi-level nhắm thẳng vào sự lệch pha đã đo được.
+   §3.6 đã cho thấy học α trên tập train là sai; học trên pseudo-unseen là phiên
+   bản đúng của cùng ý tưởng.
+
+**Chi phí.** Sửa `dataset_retrieval.py` để tách lớp, thêm một val loader. Vừa
+phải. Tập train nhỏ đi ~20% — cần đo lại baseline.
+
+**Cách bác bỏ.** Nếu α chọn trên `pseudo-unseen` ≈ α chọn trên test, thì
+`pseudo-unseen` không mang thêm thông tin và chỉ còn giá trị về tính liêm chính
+của phương pháp (vẫn đáng làm, nhưng không phải đóng góp).
 
 ### C. Prompt điều kiện theo instance — *cứu cross exchange*
 
@@ -323,9 +435,11 @@ prompt_i = base_i + g_i( f_frozen(input) )
 *"ánh xạ prompt tĩnh không thêm capacity (chứng minh + ablation 46.3M tham số
 trung tính), thay bằng ánh xạ điều kiện instance rẻ hơn 10 lần"*.
 
-**Rủi ro [ĐO gián tiếp].** §3.5 cho thấy thêm capacity làm overfit nặng hơn. Prompt
-điều kiện instance là thêm capacity — nên **phải đi kèm A hoặc B**, không chạy
-độc lập.
+**Rủi ro [ĐO].** §3.5 và §3.6 đều cho thấy tăng mức thích nghi làm tệ đi. Prompt
+điều kiện instance là **thêm capacity và thêm khả năng thích nghi** — tức đúng
+chiều đã bị bác bỏ hai lần. Sau các kết quả này, ưu tiên của hướng C **giảm
+mạnh**: chỉ nên thử **sau khi** B′ hoặc G cho thấy đã kiểm soát được tổng quát
+hoá, và không bao giờ chạy độc lập.
 
 ### D. Sửa công thức text enhance — *chi phí gần 0*
 
@@ -387,12 +501,21 @@ Phần này giá trị ngang phần đề xuất, vì mỗi mục đều có b�
 | Đừng làm | Cơ sở |
 |---|---|
 | Tăng `n_ctx` để có thêm capacity | §3.5 — suy giảm tăng 9.8×, lợi từ train về 0, best không tăng |
+| **Cho α học được trên mục tiêu huấn luyện** | §3.6 — α→1 tất yếu, mAP tệ hơn 0.51–0.80 pp, liều–đáp ứng đơn điệu |
+| **Bỏ residual mix để nhánh prompted làm tất cả** | §3.6 — đó là cực hạn α→1, chiều đã bị bác bỏ |
 | Thêm weight decay để chống overfit | §3.4 — lệch 0.014 pp, dưới δ_min 22 lần |
 | Bỏ L4 để giảm overfit | §3.3 — best tệ hơn 0.83 pp, KTC `[−0.93, −0.71]` |
 | Giữ static cross exchange làm base | §3.2 — trung tính ở giá 272× tham số, và làm chậm mọi vòng lặp |
 | Chạy 60 epoch | §3.1 — best epoch 2–3; 8 epoch là đủ, tiết kiệm 7.5× |
+| **Báo cáo mAP tuyệt đối mà không nói rõ cách chọn epoch** | §3.7 — best epoch chọn trên tập test |
 | Kết luận từ chênh lệch mAP < 0.31 pp | §2.1 — đó là δ_min |
 | So hai cấu hình bằng 1 seed | §2.1 — std seed 0.32 pp |
+| Đọc cột "n seed" như số seed khi có run chạy lại | Huấn luyện tất định → bản trùng làm std nhỏ đi giả tạo |
+
+**Nguyên tắc rút ra từ §3.5 + §3.6:** mọi đề xuất làm **tăng** khả năng thích nghi
+(thêm capacity, nới ràng buộc, thêm điều kiện hoá) đều đang đi ngược hai kết quả
+liều–đáp ứng độc lập. Nếu đề xuất một hướng như vậy, phải nêu được **cơ chế bù**
+giữ tổng quát hoá đi kèm.
 
 ---
 
@@ -417,20 +540,32 @@ Con số này khiến nhánh thứ nhất của bảng trên có vẻ khả dĩ 
 §3.3 loại L4, nhưng cấu hình `lambda_ce=0` (chỉ còn L1) **vẫn suy giảm 1.04 pp**.
 Chưa có thí nghiệm nào cô lập L1.
 
-### 7.3 Quỹ đạo `a` (hướng A)
+### 7.3 Đường cong `mAP(α)` phía α < 0.5
 
-Đã cài đặt, chưa chạy.
+§3.6 chỉ đo được α ≥ 0.5 (vì α học được luôn tăng). Nửa còn lại của đường cong
+hoàn toàn chưa biết, và `α = 0` chính là §7.1. Đây là lý do hướng A gộp cả hai.
 
 ---
 
 ## 8. Thứ tự đề xuất
 
-1. **`--eval_frozen_only`** (~10 phút) — quyết định mọi thứ còn lại (§7.1)
-2. **Hướng A** (~4 giờ) — 2 tham số, quỹ đạo `a` cho câu trả lời trực tiếp
-3. Rẽ nhánh theo kết quả:
-   - `a → 0` hoặc frozen-only cao → **hướng B**
-   - `a` quanh 0.5 → **hướng C** kèm A, và **hướng D**
-4. **E, F** đi kèm bất kể nhánh nào
+| # | Việc | Chi phí | Trả lời được gì |
+|---|---|---|---|
+| 1 | **Hướng A** — quét α tại eval | ~1 giờ | §7.1 + §7.3 cùng lúc; α tối ưu |
+| 2 | **Hướng G** — tách `pseudo-unseen` | ~1 ngày code | Sửa §3.7; mở khoá lựa chọn có nguyên tắc |
+| 3 | **Hướng B′** — `L_rel` bổ sung | ~4 giờ | Có bảo toàn tổng quát được không |
+| 4 | **D, E, F** | rẻ | Cải tiến đi kèm, không phụ thuộc nhánh |
+| — | ~~B~~, C | — | Hoãn: chống chỉ định / rủi ro cao sau §3.6 |
+
+**Rẽ nhánh sau bước 1:**
+
+- **Đỉnh ở α < 0.5** → nhánh prompted đang gây hại ngay cả ở tỉ lệ hiện tại.
+  Đặt α tối ưu (miễn phí), rồi ưu tiên G, và cân nhắc lại toàn bộ hướng đi: câu
+  chuyện trở thành *"cơ chế prompt hiện tại không đóng góp"*.
+- **Đỉnh ở α ≈ 0.5, đường cong nhọn** → 0.5 là tối ưu thật, không phải trùng hợp.
+  Ưu tiên B′.
+- **Đường cong phẳng [0.3, 0.7]** → α không phải đòn bẩy. Chuyển sang D, E, F.
+- **Đỉnh ở α > 0.5** → giả định nền của hướng B được khôi phục, đáng thử lại.
 
 ---
 
