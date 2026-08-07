@@ -825,7 +825,93 @@ mà dữ liệu hiện có cho phép.
 
 ---
 
-## 9. Phụ lục: công cụ
+## 9. Kế hoạch: từ bảy kết quả âm đến một bài báo
+
+### 9.1 Đọc đúng tình hình
+
+Bảy can thiệp, không cái nào cho lợi ích dương có ý nghĩa:
+
+| # | Can thiệp | Kết quả |
+|---|---|---|
+| 1 | Cross exchange (46.1M params) | trung tính |
+| 2 | Bỏ L4 | −0.83 pp |
+| 3 | Weight decay | trơ (0.014 pp) |
+| 4 | Tăng `n_ctx` | suy giảm ×9.8 |
+| 5 | α học được | −0.51 đến −0.80 pp |
+| 6 | Quét α cố định | 0.5 đã tối ưu |
+| 7 | Cổng α theo tín hiệu query | 3% dư địa |
+
+**[SUY]** Đây không phải chuỗi xui. Bảy phép đo độc lập vẽ ra **cùng một bức
+tranh**: điểm vận hành hiện tại đã nằm ở phía *thích nghi quá mức*, và không có
+đòn bẩy dễ nào còn lại. Giá trị đã tạo ra nằm ở **những gì đã loại trừ được**, và
+đó là thứ đăng báo được.
+
+### 9.2 Hai khung bài báo
+
+**Khung A — bài phân tích/đo lường** (khả thi ngay với dữ liệu đã có):
+
+> *"Điều gì thực sự quyết định hiệu năng trong prompt tuning dựa trên CLIP cho
+> ZS-SBIR"*
+
+Đóng góp, tất cả đã đo xong:
+
+1. **Prompt tuning đóng góp +48.5 pp** (30.0 → 78.5) — thiết lập lại mốc nền, vì
+   phần lớn công trình không báo cáo zero-shot CLIP thuần.
+2. **Ánh xạ prompt tĩnh là reparameterization**, capacity thêm vào bằng 0 — chứng
+   minh giải tích **và** ablation 46.1M tham số trung tính.
+3. **Residual mix là bổ trợ, không phải điều chuẩn** — hỗn hợp vượt cả hai nhánh;
+   α=0.5 là cực đại đã kiểm định.
+4. **Trọng số hoà trộn học được luôn hỏng** — chứng minh cơ học + quan hệ liều–đáp
+   ứng đo được. Áp dụng cho mọi kiến trúc có nhánh thích nghi + nhánh đóng băng.
+5. **Capacity làm tệ đi đơn điệu** — `n_ctx` 2→16.
+6. **Phương pháp luận:** giao thức δ_min, kiểm định cặp trên AP từng query, chỉ số
+   suy giảm, và cảnh báo oracle-theo-query là thiên lệch chọn-trên-nhiễu.
+
+Điểm (4) và (6) có giá trị vượt ra ngoài SBIR.
+
+**Khung B — cần ít nhất một kết quả dương.** Ứng viên còn lại: H′, F, G, D, E.
+
+### 9.3 H′ — α theo CỤM, phục hồi từ thất bại của H ⭐
+
+**Cơ sở.** Cổng theo query thất bại (3%) **nhưng** cấu trúc mức lớp là thật
+(+2.868 pp, sống sót kiểm chứng chia đôi). Vấn đề không phải "không có cấu trúc"
+mà là **không đọc được cấu trúc lớp từ đặc trưng của một query riêng lẻ**.
+
+**[SUY]** ZS-SBIR cho ta **toàn bộ gallery** lúc test. Có thể phục hồi cấu trúc lớp
+bằng **phân cụm không giám sát** trên gallery, rồi gán α theo cụm. Đây là thiết lập
+transductive — hợp lệ và phổ biến trong retrieval, chỉ cần báo cáo rõ.
+
+**Kiểm được bằng dữ liệu đã lưu, không cần train:** k-means trên đặc trưng frozen
+của gallery → gán mỗi query vào cụm gần nhất → oracle α theo cụm **kèm kiểm chứng
+chia đôi**. Nếu phục hồi được phần đáng kể của +2.868 pp thì đây là phương pháp
+khả thi; nếu không, hướng α thích ứng chết hẳn.
+
+Cần lưu thêm đặc trưng thô trong `sweep_alpha.py` (~52 MB).
+
+### 9.4 Thứ tự đề xuất
+
+| # | Việc | Chi phí | Vì sao |
+|---|---|---|---|
+| 1 | **G** — tách `pseudo-unseen` | ~1 ngày | **Bắt buộc.** §3.7: best epoch đang chọn trên tập test, nên 78.5 chưa dùng được trong bảng so sánh |
+| 2 | **H′** — α theo cụm | ~2 giờ | Kiểm được trên dữ liệu đã có; quyết định sống chết của hướng α thích ứng |
+| 3 | **F** — re-ranking | ~2 giờ | Rẻ, không train lại, là hướng duy nhất **không** đi ngược mẫu hình "tăng thích nghi = tệ hơn" |
+| 4 | **D, E** | ~4 giờ mỗi cái | Rẻ, độc lập |
+| — | B′, C | — | Kỳ vọng thấp: cùng nhóm với weight decay (đã trơ) hoặc tăng thích nghi (đã hỏng) |
+
+**Song song:** viết Khung A ngay. Nó không phụ thuộc kết quả nào ở trên, và nếu
+1–4 đều âm thì nó là bài báo. Nếu có cái dương, nó thành phần phân tích của bài
+phương pháp.
+
+### 9.5 Điều cần trung thực trong mọi khung
+
+- **§3.7** — con số 78.5 hưởng lợi từ việc chọn epoch trên tập test. Phải sửa
+  (hướng G) hoặc nêu rõ trước khi so với công trình khác.
+- **Một seed cho mỗi cấu hình là không đủ** — δ_min = 0.31 pp.
+- **Oracle không phải trần** trừ khi đã kiểm chứng chia đôi.
+
+---
+
+## 10. Phụ lục: công cụ
 
 | Công cụ | Vai trò |
 |---|---|
