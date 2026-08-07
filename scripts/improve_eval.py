@@ -95,6 +95,8 @@ def main():
     ap.add_argument('--dba_k', nargs='+', type=int, default=[0])
     ap.add_argument('--data_dir', default=None)
     ap.add_argument('--device', default='cuda' if (torch and torch.cuda.is_available()) else 'cpu')
+    ap.add_argument('--skip_cluster', action='store_true',
+                    help='bỏ H′/H″ (đã đo xong, cả hai đóng) — chỉ quét αQE')
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
 
@@ -136,16 +138,22 @@ def main():
     rows = [{'method': f'baseline α={args.alpha}', 'param': '', 'mAP': base, 'delta': 0.0}]
 
     # ---------------- H′ : α theo cụm, có kiểm chứng chia đôi ----------------
-    print('\n### H′ — α theo cụm (phân cụm KHÔNG giám sát trên gallery)')
-    print('Chọn α trên nửa query A, chấm trên nửa B. Chỉ dòng "giữ lại" mới đáng tin.')
-    print(f'{"#cụm":>6} {"oracle":>9} {"giữ lại":>9} {"so với nền":>11}')
-    print('-' * 40)
+    # H′/H″ đã đo xong và cả hai đều đóng (xem docs §8b). --skip_cluster bỏ chúng
+    # để chỉ quét αQE — nhanh hơn nhiều vì không phải chấm điểm 8 giá trị α.
     rs = np.random.default_rng(0)
     best_cluster = (0, -1.0)
     half = torch.from_numpy(rs.random(len(lq)) < 0.5).to(dev)
-    ap_by_alpha = {a: score(mix(uq, fq, a), mix(ug, fg, a))[1] for a in args.alphas}
+    clusters = [] if args.skip_cluster else args.clusters
+    ap_by_alpha = ({a: score(mix(uq, fq, a), mix(ug, fg, a))[1] for a in args.alphas}
+                   if clusters else {})
 
-    for k in args.clusters:
+    if clusters:
+        print('\n### H′ — α theo cụm (phân cụm KHÔNG giám sát trên gallery)')
+        print('Chọn α trên nửa query A, chấm trên nửa B. Chỉ dòng "giữ lại" mới đáng tin.')
+        print(f'{"#cụm":>6} {"oracle":>9} {"giữ lại":>9} {"so với nền":>11}')
+        print('-' * 40)
+
+    for k in clusters:
         cent = kmeans(g0, k, seed=0)
         assign = (q0 @ cent.t()).argmax(1)          # query -> cụm gần nhất
         orc = held = 0.0
