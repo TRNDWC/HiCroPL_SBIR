@@ -827,7 +827,32 @@ mà dữ liệu hiện có cho phép.
 
 ## 8b. KẾT QUẢ DƯƠNG ĐẦU TIÊN: hậu xử lý retrieval (+3.256 pp)
 
-**[ĐO]** Trên cùng checkpoint, không train lại gì:
+### Xác nhận trên 3 seed
+
+**[ĐO]** αQE là hậu xử lý xác định, nên toàn bộ dao động đến từ checkpoint:
+
+| seed | nền | + αQE (`qe_k=20`) | Δ |
+|---|---:|---:|---:|
+| 1 | 78.500 | 81.756 | +3.256 |
+| 2 | 78.602 | 82.036 | +3.434 |
+| 3 | 78.001 | 81.591 | +3.589 |
+| **trung bình** | **78.368 ± 0.322** | **81.794 ± 0.225** | **+3.427 ± 0.167** |
+
+- **`qe_k=20` tối ưu ở CẢ BA seed** → không phải tune, dùng được một giá trị cố định.
+- **Δ nhỏ nhất +3.256 pp, gấp 11 lần δ_min.** Không seed nào gần ngưỡng.
+- Độ lệch chuẩn của Δ (0.167) **nhỏ hơn** của chính mAP nền (0.322) — αQE ổn định
+  hơn cả mô hình sinh ra nó.
+
+**Bảng cho bài báo:**
+
+```
+Ours (inductive)            78.4 ± 0.3
+Ours + αQE (transductive)   81.8 ± 0.2
+```
+
+---
+
+**[ĐO]** Chi tiết trên một checkpoint (seed 1), không train lại gì:
 
 | Phương pháp | mAP@200 | Δ | Cần nhãn lúc test? |
 |---|---:|---:|---|

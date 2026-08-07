@@ -64,22 +64,35 @@ python - "$TAG" $SEEDS <<'PY'
 import csv, glob, os, statistics as st, sys
 tag, seeds = sys.argv[1], sys.argv[2:]
 per_k, bases = {}, []
+missing = []
 for s in seeds:
-    for p in glob.glob(f'tb_logs/{tag}_alphasweep_s{s}/*/improve_eval.csv'):
-        rows = list(csv.DictReader(open(p, encoding='utf-8')))
-        b = next((float(r['mAP']) for r in rows if r['method'].startswith('baseline')), None)
-        if b is None:
+    # Một exp_name có thể có NHIỀU run_dir (mỗi lần chạy một cái). Lấy cái MỚI
+    # NHẤT theo tên thư mục timestamp, và in ra để kiểm được — bản trước lấy
+    # kết quả đầu tiên glob trả về, nên có thể đọc phải CSV cũ của lần chạy khác.
+    hits = sorted(glob.glob(f'tb_logs/{tag}_alphasweep_s{s}/*/improve_eval.csv'))
+    if not hits:
+        missing.append(s)
+        continue
+    p = hits[-1]
+    rows = list(csv.DictReader(open(p, encoding='utf-8')))
+    b = next((float(r['mAP']) for r in rows if r['method'].startswith('baseline')), None)
+    if b is None:
+        missing.append(s)
+        continue
+    print(f'  seed {s}: nền {100*b:.3f}  <- {p}')
+    bases.append(b)
+    for r in rows:
+        if r['method'] != 'F postproc':
             continue
-        bases.append(b)
-        for r in rows:
-            if r['method'] != 'F postproc':
-                continue
-            k = int(r['param'].split('qe_k=')[1].split(',')[0])
-            per_k.setdefault(k, []).append(float(r['mAP']) - b)
-        break
+        k = int(r['param'].split('qe_k=')[1].split(',')[0])
+        per_k.setdefault(k, []).append(float(r['mAP']) - b)
 
+if missing:
+    print(f'  !! thiếu kết quả cho seed: {missing} — bảng dưới KHÔNG đủ seed')
 if not per_k:
     raise SystemExit('Không đọc được improve_eval.csv nào.')
+if len(bases) < len(seeds):
+    print(f'  !! chỉ tổng hợp được {len(bases)}/{len(seeds)} seed')
 print(f'nền: {100*st.fmean(bases):.3f} ± '
       f'{100*st.stdev(bases):.3f} pp  (n={len(bases)} seed)' if len(bases) > 1
       else f'nền: {100*bases[0]:.3f} (n=1)')
