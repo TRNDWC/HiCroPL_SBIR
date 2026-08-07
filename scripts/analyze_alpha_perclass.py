@@ -99,11 +99,18 @@ def main():
     print(f'  query được giúp: {100 * (gain > 0).mean():.1f}%   '
           f'bị hại: {100 * (gain < 0).mean():.1f}%   không đổi: {100 * (gain == 0).mean():.1f}%')
 
+    # Chia riêng phần dương và phần âm. Dùng "tỉ lệ trên tổng RÒNG" sẽ vượt 100%
+    # khi có nhiều query bị hại, và con số đó không diễn giải được.
     order = np.argsort(-gain)
+    tot_pos, tot_neg = gain[gain > 0].sum(), gain[gain < 0].sum()
+    print(f'  tổng phần được giúp {100 * tot_pos / len(gain):+.2f} pp, '
+          f'phần bị hại {100 * tot_neg / len(gain):+.2f} pp, '
+          f'ròng {100 * gain.mean():+.2f} pp')
     for frac in (0.05, 0.10, 0.25):
         k = int(len(gain) * frac)
-        share = gain[order[:k]].sum() / gain.sum() if gain.sum() != 0 else float('nan')
-        print(f'  {frac:.0%} query được giúp nhiều nhất chiếm {100 * share:.0f}% tổng mức cải thiện')
+        share = gain[order[:k]].sum() / tot_pos if tot_pos != 0 else float('nan')
+        print(f'  {frac:.0%} query tốt nhất chiếm {100 * share:.0f}% TỔNG PHẦN ĐƯỢC GIÚP '
+              f'(đều tay = {100 * frac:.0f}%)')
 
     # ---- 2. Theo lớp ----
     print(f'\n=== Theo lớp: α={args.best} so với α={args.ref} (prompted thuần) ===')
@@ -147,8 +154,35 @@ def main():
     print(f'  α tốt nhất theo lớp: min {astar.min():.2f}, trung vị {np.median(astar):.2f}, '
           f'max {astar.max():.2f}  (std {astar.std():.3f})')
 
+    # ---- Cận trên của α thích ứng theo nội dung ----
+    # Nếu chọn được α tối ưu cho TỪNG LỚP thì mAP là bao nhiêu? Đây là oracle:
+    # không thực hiện được (cần nhãn tập test), nhưng nó chặn trên mọi phương pháp
+    # dự đoán α từ nội dung. Nếu cận trên gần với α toàn cục thì hướng đó vô ích.
+    n_tot = len(labels)
+    glob_best = max(alphas, key=lambda a: sweep[a].mean())
+    oracle = sum(max(sweep[a][labels == r_lab].mean() for a in alphas) * (labels == r_lab).sum()
+                 for r_lab in sorted(set(labels.tolist())))/ n_tot
+    print(f'\n=== Cận trên: α tối ưu theo từng lớp (oracle) ===')
+    print(f'  α toàn cục tốt nhất ({glob_best}): {100 * sweep[glob_best].mean():.3f}')
+    print(f'  oracle α theo lớp             : {100 * oracle:.3f}')
+    print(f'  dư địa tối đa cho α thích ứng : {100 * (oracle - sweep[glob_best].mean()):+.3f} pp')
+    print('  (oracle dùng nhãn tập test nên KHÔNG đạt được; đây chỉ là trần.)')
+
     # ---- Diễn giải: báo từng tín hiệu riêng, không gộp thành một phán quyết ----
     print('\n=== Diễn giải ===')
+
+    # Có tín hiệu nào dự đoán được α* không? Tương quan với chất lượng nhánh
+    # prompted là ứng viên đầu tiên và không cần thêm dữ liệu gì.
+    pv = np.array([r['prompted'] for r in rows])
+    if pv.std() > 0 and astar.std() > 0:
+        r_pa = float(np.corrcoef(pv, astar)[0, 1])
+        r_pg = float(np.corrcoef(pv, g)[0, 1])
+        print(f'  [0] corr(chất lượng prompted, α*) = {r_pa:+.3f} ; '
+              f'corr(chất lượng prompted, gain) = {r_pg:+.3f}')
+        if abs(r_pa) > 0.3 or abs(r_pg) > 0.3:
+            print('      -> α* CÓ cấu trúc dự đoán được: lớp mà nhánh prompted đã tốt thì muốn α')
+            print('         cao, lớp prompted yếu thì cần frozen bù. Một cổng α phụ thuộc nội')
+            print('         dung là khả thi về nguyên tắc.')
     spread = (g.max() - g.min()) / abs(med) if med != 0 else float('inf')
     print(f'  [1] Độ tản theo lớp = (max−min)/trung vị = {spread:.2f}')
     if spread > 0.5:

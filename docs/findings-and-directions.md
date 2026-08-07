@@ -324,6 +324,56 @@ nghi — đúng là biểu hiện định lượng của tension ở §4.
 
 Hai thí nghiệm hoàn toàn độc lập khớp nhau trong ~0.3 pp. Điều này củng cố cả hai.
 
+### 3.6c Phân tích theo lớp: α tối ưu **phụ thuộc nội dung**, và dự đoán được
+
+**[ĐO]** Gain của hỗn hợp (α=0.5) so với prompted-only (α=1.0), theo từng lớp, kèm
+SE của hiệu theo cặp trong lớp:
+
+| Cần frozen nhất | gain | α* | | Bị hỗn hợp làm hại | gain | α* |
+|---|---:|---:|---|---|---:|---:|
+| scissors | +21.37 | 0.20 | | saw | −8.55 | 1.00 |
+| window | +15.02 | 0.40 | | cabin | −8.23 | 1.00 |
+| seagull | +10.12 | 0.30 | | songbird | −4.43 | 1.00 |
+| bat | +9.15 | 0.40 | | skyscraper | −2.04 | 0.70 |
+
+**19/21 lớp** có gain phân biệt được với 0 (SE điển hình 0.40 pp). **7 lớp bị hỗn
+hợp làm TỆ đi.** α* biến thiên từ **0.20 đến 1.00**, std 0.263.
+
+**[ĐO] Hỗn hợp là một đánh đổi, không phải cải thiện thuần:**
+
+```
+tổng phần được giúp  +3.85 pp
+phần bị hại          −1.26 pp
+ròng                 +2.59 pp
+```
+
+Con số +2.59 pp mà §3.6b báo là **phần còn lại** sau khi đã trả 1.26 pp, không
+phải lợi ích đều tay.
+
+**[ĐO] α* có cấu trúc dự đoán được:**
+
+```
+corr( chất lượng nhánh prompted , α*   ) = +0.42
+corr( chất lượng nhánh prompted , gain ) = −0.55
+```
+
+| Nhóm | Số lớp | mAP của nhánh prompted |
+|---|---:|---:|
+| α* ≤ 0.4 — cần frozen bù | 8 | 70.1 |
+| α* = 1.0 — chỉ dùng prompted | 5 | 86.3 |
+
+> **Quy luật:** lớp mà nhánh prompted **đã tốt** thì muốn α cao (đừng pha loãng);
+> lớp mà nhánh prompted **yếu** thì cần nhánh frozen bù.
+
+**[SUY]** Đây là bằng chứng trực tiếp rằng **một hằng số α toàn cục là thoả hiệp**,
+và rằng một **cổng α phụ thuộc nội dung** là khả thi về nguyên tắc — vì tín hiệu
+quyết định (nhánh prompted có đáng tin cho đầu vào này không) có cấu trúc, không
+phải ngẫu nhiên.
+
+**Còn thiếu:** cận trên của hướng đó. `analyze_alpha_perclass.py` nay tính oracle
+α-theo-lớp. Nếu oracle chỉ hơn α toàn cục vài phần mười pp thì hướng này vô ích;
+nếu hơn 1–2 pp thì đáng theo. **Chạy lại script để có con số này.**
+
 ### 3.7 Không có tập validation riêng — best epoch chọn trên tập test
 
 **[ĐO]** `ValidDataset` (`src/dataset_retrieval.py`) dùng đúng `UNSEEN_CLASSES`,
@@ -536,6 +586,45 @@ phải. Tập train nhỏ đi ~20% — cần đo lại baseline.
 `pseudo-unseen` không mang thêm thông tin và chỉ còn giá trị về tính liêm chính
 của phương pháp (vẫn đáng làm, nhưng không phải đóng góp).
 
+### H. Cổng α phụ thuộc nội dung, huấn luyện trên `pseudo-unseen` — *mới, từ §3.6c* ⭐
+
+**Cơ sở — bốn phép đo độc lập cùng chỉ về đây:**
+
+| # | Bằng chứng | Nói lên điều gì |
+|---|---|---|
+| §3.6c | α* biến thiên 0.20–1.00 theo lớp (std 0.263) | hằng số toàn cục là thoả hiệp |
+| §3.6c | `corr(chất lượng prompted, α*) = +0.42` | tín hiệu quyết định **có cấu trúc**, dự đoán được |
+| §3.6c | hỗn hợp trả 1.26 pp để lấy 3.85 pp | cổng hoàn hảo giữ phần lợi, tránh phần hại |
+| §3.6 | α học trên mục tiêu train luôn → 1 | **không** được huấn luyện cổng trên tập train |
+
+**Cơ chế.**
+
+```
+α(x) = σ( g([u ; f ; u·f]) ),   u = prompted_norm,  f = frozen_norm
+feat  = norm( α(x)·u + (1−α(x))·f )
+```
+
+`g` là MLP nhẹ (1025 → 64 → 1), vài chục nghìn tham số. Tín hiệu vào **có sẵn lúc
+suy luận và không cần nhãn** — đó là điểm mấu chốt phân biệt với oracle theo lớp.
+Độ bất đồng `u·f` là ứng viên tự nhiên: khi hai nhánh đồng thuận, trộn thế nào cũng
+vậy; khi chúng lệch nhau, mới cần quyết định tin ai.
+
+**Phụ thuộc bắt buộc vào hướng G.** §3.6 đã chứng minh học α trên mục tiêu huấn
+luyện thì nó chạy về 1 — một cách tất yếu, vì nhánh frozen không giảm được train
+loss. Cổng `g` sẽ mắc **đúng** lỗi đó. Nên nó **phải** được huấn luyện trên tập
+lớp `pseudo-unseen` (hướng G). Điều này biến G từ "sửa lỗi phương pháp" thành
+**thành phần cấu tạo** của phương pháp.
+
+**Cận trên.** Oracle α-theo-lớp (§3.6c) chặn trên mọi cách dự đoán α. **Phải đo
+trước** — nếu oracle chỉ hơn α toàn cục vài phần mười pp thì bỏ hướng này ngay.
+
+**Cách bác bỏ.** (a) oracle ≈ α toàn cục; hoặc (b) cổng huấn luyện trên
+`pseudo-unseen` không tổng quát sang lớp test thật.
+
+**Vì sao đây là đóng góp mạnh hơn B′.** Nó xuất phát từ một quan sát đo được
+(§3.6c) chứ không từ suy đoán, nó giải thích được **vì sao** phải có G, và nó
+không mắc bẫy "ép hai nhánh giống nhau" đã làm hỏng B′.
+
 ### C. Prompt điều kiện theo instance — *cứu cross exchange*
 
 **Cơ sở.** §3.2: ánh xạ tĩnh không phụ thuộc dữ liệu nên **không thể** thêm
@@ -682,11 +771,16 @@ nhiễu chạy lại. Hệ quả thực tế: không bao giờ cần lặp lại
 | # | Việc | Chi phí | Trả lời được gì |
 |---|---|---|---|
 | ✔ | ~~Hướng A~~ — quét α | xong | §7.1 + §7.3; α*=0.5, không có lợi ích miễn phí |
-| **0** | **`analyze_alpha_perclass.py`** | **~1 phút, không GPU** | Nhánh frozen bù cho cái gì — quyết định B′ có đúng thiết kế không |
-| **1** | **Hướng B′** — `L_rel` bổ sung | ~4 giờ | Có λ nào đưa hỗn hợp vượt 78.50 không |
-| 2 | **Hướng G** — tách `pseudo-unseen` | ~1 ngày code | Sửa §3.7; mở khoá lựa chọn có nguyên tắc |
+| ✔ | ~~`analyze_alpha_perclass.py`~~ | xong | §3.6c: α* phụ thuộc nội dung, dự đoán được |
+| **0** | **Oracle α-theo-lớp** | **~1 phút, không GPU** | Cận trên của hướng H — quyết định có theo hay bỏ |
+| **1** | **Hướng G + H** — `pseudo-unseen` + cổng α | ~2 ngày | Hiện thực hoá dư địa mà oracle chỉ ra |
+| 2 | **Hướng B′** — `L_rel` bổ sung | ~4 giờ | Có λ nào đưa hỗn hợp vượt 78.50 không |
 | 3 | **D, E, F** | rẻ | Cải tiến đi kèm, không phụ thuộc nhánh |
 | — | ~~B~~, C | — | Hoãn: chống chỉ định / rủi ro cao sau §3.6 |
+
+**Vì sao H vượt lên trước B′.** B′ sinh ra từ suy luận cấu trúc và đã phải rút lại
+một nửa (xem cảnh báo trong mục B′). H sinh ra từ bốn phép đo độc lập trong §3.6c,
+và nó giải thích được vì sao G là bắt buộc chứ không chỉ là dọn dẹp phương pháp.
 
 **Chạy song song được:** hướng F (re-ranking) dùng đúng ma trận tương đồng mà
 `sweep_alpha.py` đã tính, không cần train lại và không phụ thuộc kết quả nào khác.
