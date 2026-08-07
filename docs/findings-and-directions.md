@@ -289,9 +289,21 @@ lớp tinh chỉnh mỏng.
 > tuning hội tụ trong **chưa tới một epoch**, nên `epoch0` đã chứa gần như toàn bộ
 > phần đóng góp. Manh mối đó chỉ sai hướng hoàn toàn.
 
-**(2) `α = 0.5` là đỉnh thật.** Giá trị 1:1 trông như tuỳ tiện lại nằm đúng cực
-đại. Chênh với α=0.6 chỉ 0.185 pp (cần kiểm cặp để phân giải), nhưng hai phía đều
-đi xuống.
+**(2) `α = 0.5` là đỉnh thật, đã xác nhận bằng kiểm định.** Giá trị 1:1 trông như
+tuỳ tiện lại nằm đúng cực đại. Kiểm cặp α=0.5 vs α=0.6: **+0.185 pp**, KTC 95%
+`[+0.091, +0.278]`, t = 3.87 — **có ý nghĩa**. Lưu ý δ_min = 0.31 pp **không áp
+dụng** ở đây: hai giá trị α dùng chung một checkpoint và chung đặc trưng, nên
+không có dao động seed, chỉ còn bất định do lấy mẫu query.
+
+**[ĐO] Một chi tiết quan trọng hơn cả kết luận.** Trong phép so đó:
+`4,639 query tốt hơn / 4,977 kém hơn / 3,078 hoà`. **Nhiều query bị α=0.5 làm tệ
+đi hơn là làm tốt lên**, vậy mà trung bình vẫn cao hơn — nghĩa là lợi thế đến từ
+**thắng đậm trên một nhóm nhỏ**, không phải cải thiện đều tay.
+
+**[SUY]** Nếu nhóm đó tập trung ở vài lớp cụ thể thì ta biết nhánh frozen đang bù
+đắp **chính xác cái gì**, và đó là thông tin bắt buộc để thiết kế đúng regularizer.
+Dùng `scripts/analyze_alpha_perclass.py` (chỉ cần numpy, đọc `ap_alpha*.npz` đã
+lưu) — xem §8.
 
 **(3) Hai nhánh BỔ TRỢ nhau, không chỉ là điều chuẩn.** Hỗn hợp vượt **cả hai**
 thành phần: hơn prompted-only **+2.59 pp**, hơn frozen-only **+48.5 pp**. Nghĩa là
@@ -442,15 +454,36 @@ hiện đạt **75.91**, hỗn hợp đạt **78.50**. Khoảng cách **2.59 pp*
 thông tin mà nhánh prompted đánh mất khi thích nghi. `L_rel` thành công nghĩa là
 thu hẹp khoảng cách đó.
 
-**Hai mức thành công, cả hai đều đáng báo cáo:**
+> **⚠ Rút lại một tuyên bố quá lạc quan trong bản trước.** Tôi từng viết rằng
+> "mức thành công mạnh" của B′ là đưa `prompted-only` lên ≈78.5 để **bỏ hẳn nhánh
+> frozen, giảm một nửa chi phí suy luận**. Phân tích kỹ cho thấy **không đường nào
+> trong hai đường hiển nhiên làm được điều đó**:
+>
+> - **Ép `sim(F_prompted) = sim(F_frozen)`:** với vector đã chuẩn hoá, khớp *mọi*
+>   tích vô hướng đôi một buộc `F_prompted` phải là một **phép quay trực giao** của
+>   `F_frozen`. Retrieval chỉ dùng tích vô hướng, nên hiệu năng bằng đúng
+>   frozen-only = **30.0**. `L_rel` mạnh kéo prompted **xuống**, không lên.
+> - **Tự chưng cất hỗn hợp vào nhánh prompted** (`p ← norm(0.5p + 0.5f)`): điểm bất
+>   động là `p ∥ f`, tức cũng sụp về frozen.
+>
+> **Lý do gốc:** hỗn hợp tốt **chính vì hai nhánh khác nhau**. Mọi mục tiêu ép
+> chúng giống nhau đều phá bỏ đúng cái nguồn lợi ích đó.
 
-| Mức | Kết quả | Ý nghĩa |
-|---|---|---|
-| Vừa | hỗn hợp > 78.50 | cải thiện hiệu năng |
-| **Mạnh** | prompted-only ≈ 78.5 | **bỏ được nhánh frozen → giảm một nửa chi phí suy luận** với cùng độ chính xác |
+**Mục tiêu thực tế của B′, đã điều chỉnh:** `L_rel` là một **núm đánh đổi**, không
+phải cải thiện miễn phí. λ=0 cho thích nghi tự do (prompted-only = 75.91);
+λ→∞ cho tương đương frozen (30.0). Câu hỏi là liệu có tồn tại λ ở giữa mà tại đó
+**hỗn hợp vượt 78.50** — tức nhánh prompted giữ lại nhiều cấu trúc hơn mà vẫn thích
+nghi đủ.
 
-Mức mạnh là một đóng góp trung thực và đo được: không hứa tăng mAP, mà hứa **giữ
-nguyên mAP với một nửa compute**. Hiện mỗi ảnh phải qua hai lượt forward ViT.
+| Kết quả | Ý nghĩa |
+|---|---|
+| hỗn hợp > 78.50 | `L_rel` là regularizer đúng hướng — kết quả dương đầu tiên của cả dự án |
+| hỗn hợp ≈ 78.50, prompted-only tăng | đánh đổi tốc độ/độ chính xác đo được, không miễn phí |
+| hỗn hợp giảm đơn điệu theo λ | giả thuyết "cấu trúc quan hệ là thứ cần giữ" sai |
+
+**Điều kiện tiên quyết:** chạy `analyze_alpha_perclass.py` trước. Nếu lợi ích của
+nhánh frozen tập trung ở vài lớp cụ thể thì một `L_rel` áp đều toàn cục là sai
+thiết kế ngay từ đầu.
 
 **Cơ chế.** Giữ nguyên residual mix cố định, cộng thêm:
 
@@ -649,7 +682,8 @@ nhiễu chạy lại. Hệ quả thực tế: không bao giờ cần lặp lại
 | # | Việc | Chi phí | Trả lời được gì |
 |---|---|---|---|
 | ✔ | ~~Hướng A~~ — quét α | xong | §7.1 + §7.3; α*=0.5, không có lợi ích miễn phí |
-| **1** | **Hướng B′** — `L_rel` bổ sung | ~4 giờ | Lấp được bao nhiêu trong 2.59 pp |
+| **0** | **`analyze_alpha_perclass.py`** | **~1 phút, không GPU** | Nhánh frozen bù cho cái gì — quyết định B′ có đúng thiết kế không |
+| **1** | **Hướng B′** — `L_rel` bổ sung | ~4 giờ | Có λ nào đưa hỗn hợp vượt 78.50 không |
 | 2 | **Hướng G** — tách `pseudo-unseen` | ~1 ngày code | Sửa §3.7; mở khoá lựa chọn có nguyên tắc |
 | 3 | **D, E, F** | rẻ | Cải tiến đi kèm, không phụ thuộc nhánh |
 | — | ~~B~~, C | — | Hoãn: chống chỉ định / rủi ro cao sau §3.6 |
