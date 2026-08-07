@@ -183,6 +183,22 @@ def main():
     lq, lg = lq.to(dev), lg.to(dev)
 
     map_k, p_k = retrieval_topk(cfg.dataset)
+
+    # Tín hiệu QUAN SÁT ĐƯỢC lúc suy luận (không dùng nhãn) — để kiểm xem một cổng
+    # α phụ thuộc nội dung có khả thi không. Oracle theo lớp cho biết TRẦN của
+    # hướng đó; các tín hiệu này cho biết phần trần nào với tới được.
+    signals = {}
+    with torch.no_grad():
+        signals['agree'] = (uq * fq).sum(-1)          # hai nhánh đồng thuận tới đâu
+        for nm, a in (('prompted', 1.0), ('frozen', 0.0)):
+            q, g = mix(uq, fq, a), mix(ug, fg, a)
+            top = (q @ g.t()).topk(10, dim=-1).values
+            signals[f'top1_{nm}'] = top[:, 0]         # độ tự tin tuyệt đối
+            signals[f'margin_{nm}'] = top[:, 0] - top[:, -1]   # top1 nhọn tới đâu
+            del q, g, top
+        signals['margin_diff'] = signals['margin_prompted'] - signals['margin_frozen']
+        signals['top1_diff'] = signals['top1_prompted'] - signals['top1_frozen']
+
     rows, ap_store = [], {}
     print(f'\n{"α":>6} {"mAP@" + str(map_k or "all"):>10} {"P@" + str(p_k):>9}   ghi chú')
     print('-' * 52)
@@ -209,6 +225,10 @@ def main():
                      epoch=np.array(ck.get('epoch', -1)), best_map=np.array(apv.mean()),
                      map_k=np.array(map_k), p_k=np.array(p_k))
         print(f'Vector AP: {args.run_dir}/ap_alpha*.npz — dùng được với paired_test.py')
+
+        sig_path = os.path.join(args.run_dir, 'alpha_signals.npz')
+        np.savez(sig_path, **{k: v.cpu().numpy() for k, v in signals.items()})
+        print(f'Tín hiệu  : {sig_path} — {", ".join(signals)}')
 
     # -- diễn giải --
     best = max(rows, key=lambda r: r['mAP'])

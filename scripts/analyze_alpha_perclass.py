@@ -75,6 +75,8 @@ def main():
     ap.add_argument('--dataset', default='sketchy_ext')
     ap.add_argument('--ref', type=float, default=1.0, help='α của nhánh prompted thuần')
     ap.add_argument('--best', type=float, default=0.5, help='α của hỗn hợp tốt nhất')
+    ap.add_argument('--bins', type=int, default=10,
+                    help='số nhóm phân vị khi đo phần trần với tới được bằng tín hiệu')
     ap.add_argument('--out', default=None)
     args = ap.parse_args()
 
@@ -162,11 +164,60 @@ def main():
     glob_best = max(alphas, key=lambda a: sweep[a].mean())
     oracle = sum(max(sweep[a][labels == r_lab].mean() for a in alphas) * (labels == r_lab).sum()
                  for r_lab in sorted(set(labels.tolist())))/ n_tot
-    print(f'\n=== Cận trên: α tối ưu theo từng lớp (oracle) ===')
-    print(f'  α toàn cục tốt nhất ({glob_best}): {100 * sweep[glob_best].mean():.3f}')
-    print(f'  oracle α theo lớp             : {100 * oracle:.3f}')
-    print(f'  dư địa tối đa cho α thích ứng : {100 * (oracle - sweep[glob_best].mean()):+.3f} pp')
-    print('  (oracle dùng nhãn tập test nên KHÔNG đạt được; đây chỉ là trần.)')
+    # Oracle theo TỪNG QUERY: chọn α tốt nhất cho mỗi query riêng lẻ. Đây mới là
+    # trần tuyệt đối của mọi cách chọn α. Oracle theo LỚP KHÔNG chặn trên cổng
+    # theo query, vì α* còn biến thiên trong nội bộ từng lớp.
+    per_query_oracle = float(np.max(np.stack([sweep[a] for a in alphas]), axis=0).mean())
+    gm = float(sweep[glob_best].mean())
+    print(f'\n=== Các mức oracle của α thích ứng ===')
+    print(f'  α toàn cục tốt nhất ({glob_best})    : {100 * gm:.3f}   (đạt được)')
+    print(f'  oracle theo LỚP                : {100 * oracle:.3f}   '
+          f'({100 * (oracle - gm):+.3f} pp — cần nhãn)')
+    print(f'  oracle theo TỪNG QUERY         : {100 * per_query_oracle:.3f}   '
+          f'({100 * (per_query_oracle - gm):+.3f} pp — trần tuyệt đối)')
+
+    # ---- Phần trần với tới được bằng tín hiệu quan sát được ----
+    # Oracle theo lớp là TRẦN nhưng cần nhãn. Ở đây hỏi câu khác: nếu chỉ dùng một
+    # tín hiệu tính được lúc suy luận, chia query theo phân vị của tín hiệu đó rồi
+    # chọn α tối ưu cho từng nhóm, thì với tới bao nhiêu phần của trần?
+    # Vẫn là oracle (chọn α trên tập test) nhưng bị RÀNG BUỘC chỉ được dùng tín
+    # hiệu quan sát được — nên nó chặn trên mọi cổng học từ tín hiệu ấy.
+    sig_path = os.path.join(args.run_dir, 'alpha_signals.npz')
+    if os.path.exists(sig_path):
+        sig = np.load(sig_path)
+        glob_map = sweep[glob_best].mean()
+        print(f'\n=== Phần trần với tới được bằng tín hiệu quan sát được ===')
+        print(f'  (chia {args.bins} nhóm theo phân vị, oracle α cho mỗi nhóm)')
+        print(f'  {"tín hiệu":<18} {"mAP":>8} {"so với α toàn cục":>18} {"% trần query":>13}')
+        print('  ' + '-' * 62)
+        head = per_query_oracle - glob_map
+        best_sig = None
+        for name in sig.files:
+            s = sig[name]
+            if len(s) != n_tot:
+                continue
+            edges = np.quantile(s, np.linspace(0, 1, args.bins + 1))
+            edges[-1] += 1e-9
+            tot = 0.0
+            for i in range(args.bins):
+                m = (s >= edges[i]) & (s < edges[i + 1])
+                if m.sum() == 0:
+                    continue
+                tot += max(sweep[a][m].mean() for a in alphas) * m.sum()
+            v = tot / n_tot
+            frac = (v - glob_map) / head if head > 0 else float('nan')
+            print(f'  {name:<18} {100 * v:>8.3f} {100 * (v - glob_map):>+18.3f} '
+                  f'{100 * frac:>10.0f}%')
+            if best_sig is None or v > best_sig[1]:
+                best_sig = (name, v)
+        if best_sig:
+            print(f'\n  Tín hiệu tốt nhất: {best_sig[0]} -> {100 * best_sig[1]:.3f} '
+                  f'({100 * (best_sig[1] - glob_map):+.3f} pp)')
+            print('  Đây vẫn là oracle (chọn α trên tập test) nên là TRẦN của mọi cổng học')
+            print('  từ tín hiệu đó. Cổng thật sẽ đạt ít hơn.')
+    else:
+        print(f'\n(Không thấy {sig_path} — chạy lại sweep_alpha.py --save_ap để có')
+        print(' phân tích "tín hiệu nào với tới được phần trần".)')
 
     # ---- Diễn giải: báo từng tín hiệu riêng, không gộp thành một phán quyết ----
     print('\n=== Diễn giải ===')
@@ -192,8 +243,9 @@ def main():
         print('      -> Khá đều. Nhánh frozen đóng vai trò điều chuẩn chung, không đặc thù lớp.')
 
     k = int(len(gain) * 0.25)
-    share = gain[order[:k]].sum() / gain.sum() if gain.sum() != 0 else float('nan')
-    print(f'  [2] 25% query tốt nhất chiếm {100 * share:.0f}% tổng cải thiện (đều tay = 25%)')
+    share = gain[order[:k]].sum() / tot_pos if tot_pos != 0 else float('nan')
+    print(f'  [2] 25% query tốt nhất chiếm {100 * share:.0f}% tổng phần được giúp '
+          f'(đều tay = 25%)')
     if share > 0.6:
         print('      -> Tập trung mạnh. Lợi ích đến từ thiểu số query, không phải cải thiện đều.')
 

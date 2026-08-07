@@ -370,9 +370,25 @@ và rằng một **cổng α phụ thuộc nội dung** là khả thi về nguy�
 quyết định (nhánh prompted có đáng tin cho đầu vào này không) có cấu trúc, không
 phải ngẫu nhiên.
 
-**Còn thiếu:** cận trên của hướng đó. `analyze_alpha_perclass.py` nay tính oracle
-α-theo-lớp. Nếu oracle chỉ hơn α toàn cục vài phần mười pp thì hướng này vô ích;
-nếu hơn 1–2 pp thì đáng theo. **Chạy lại script để có con số này.**
+**[ĐO] Dư địa: oracle α-theo-lớp = 81.368 so với α toàn cục 78.500 → +2.868 pp.**
+
+Con số này **lớn hơn mọi hiệu ứng đã đo được trong toàn bộ dự án** (mọi thí nghiệm
+khác đều nằm trong ±0.8 pp). Đây là lần đầu có một dư địa đáng kể được xác định.
+
+> **⚠ Sửa một lỗi khái niệm của tôi.** Tôi từng gọi oracle-theo-lớp là "cận trên
+> của hướng H". Sai: nó **không chặn trên** một cổng theo *query*, vì α* còn biến
+> thiên trong nội bộ từng lớp. Trần tuyệt đối là **oracle theo từng query**. Script
+> nay báo cả ba mức: α toàn cục (đạt được) / oracle theo lớp (cần nhãn) / oracle
+> theo query (trần tuyệt đối).
+
+**Câu hỏi quyết định còn lại:** dư địa đó có **với tới được bằng tín hiệu quan sát
+được lúc suy luận** không? `sweep_alpha.py` nay lưu thêm các tín hiệu không cần
+nhãn — độ đồng thuận hai nhánh `u·f`, độ nhọn top-1 của mỗi nhánh, và hiệu của
+chúng. `analyze_alpha_perclass.py` chia query theo phân vị từng tín hiệu rồi chọn
+α oracle cho mỗi nhóm: đó là **trần của mọi cổng học từ tín hiệu ấy**.
+
+**Chạy lại cả hai script để có con số này** — nếu tín hiệu tốt nhất chỉ với tới
+vài phần trăm của trần thì hướng H không khả thi dù dư địa lớn.
 
 ### 3.7 Không có tập validation riêng — best epoch chọn trên tập test
 
