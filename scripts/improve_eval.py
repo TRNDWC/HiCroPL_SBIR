@@ -21,10 +21,8 @@ Chạy:
 
 import argparse
 import csv
-import json
 import os
 import sys
-from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 for _s in (sys.stdout, sys.stderr):
@@ -91,10 +89,10 @@ def main():
     ap.add_argument('--alphas', nargs='+', type=float,
                     default=[0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.85, 1.0],
                     help='dải α cho H′')
-    ap.add_argument('--clusters', nargs='+', type=int, default=[7, 14, 21, 42])
-    ap.add_argument('--qe_k', nargs='+', type=int, default=[0, 1, 2, 3, 5, 10, 20])
+    ap.add_argument('--clusters', nargs='+', type=int, default=[21, 42, 84, 168])
+    ap.add_argument('--qe_k', nargs='+', type=int, default=[0, 5, 10, 20, 40, 75, 120])
     ap.add_argument('--qe_power', type=float, default=3.0)
-    ap.add_argument('--dba_k', nargs='+', type=int, default=[0, 2, 5, 10, 20])
+    ap.add_argument('--dba_k', nargs='+', type=int, default=[0])
     ap.add_argument('--data_dir', default=None)
     ap.add_argument('--device', default='cuda' if (torch and torch.cuda.is_available()) else 'cpu')
     ap.add_argument('--out', default=None)
@@ -189,6 +187,47 @@ def main():
 
     print(f'\nTốt nhất: qe_k={best[1]}, dba_k={best[2]} -> {100 * best[0]:.3f} '
           f'({100 * (best[0] - base):+.3f} pp so với nền {100 * base:.3f})')
+
+    # ---------------- Kết hợp: α theo cụm rồi αQE ----------------
+    # Hai cải tiến tác động lên hai trục khác nhau (α đổi đặc trưng, QE đổi truy
+    # vấn), nên câu hỏi là chúng có CỘNG DỒN hay giẫm chân nhau. Chấm trên nửa B
+    # với α chọn từ nửa A, để con số so được với cột "giữ lại" của H′.
+    if best[1] > 0 and args.clusters:
+        kbest = max(args.clusters)
+        cent = kmeans(g0, kbest, seed=0)
+        assign = (q0 @ cent.t()).argmax(1)
+        qmix = q0.clone()
+        for j in range(kbest):
+            m = assign == j
+            mA = m & half
+            if not m.any() or mA.sum() == 0:
+                continue
+            aj = max(args.alphas, key=lambda a: ap_by_alpha[a][mA].mean().item())
+            qmix[m] = mix(uq[m], fq[m], aj)
+        B = ~half
+        base_B = base_ap[B].mean().item()
+
+        def score_B(qq, gg):
+            m_, _, apv, _, _, _ = retrieval_metrics(qq, gg, lq, lg, cfg.dataset)
+            return apv[B].mean().item()
+
+        gA = dba(g0, best[2], args.qe_power)
+        simc = qmix @ gA.t()
+        v_comb = score_B(alpha_qe(qmix, gA, simc, best[1], args.qe_power), gA)
+        v_qe_only = score_B(alpha_qe(q0, gA, q0 @ gA.t(), best[1], args.qe_power), gA)
+        v_cl_only = score_B(qmix, g0)
+
+        print(f'\n### Kết hợp (chấm trên nửa B, α cụm chọn từ nửa A, k={kbest})')
+        print(f'  nền                       {100 * base_B:>8.3f}')
+        print(f'  chỉ α theo cụm            {100 * v_cl_only:>8.3f}  {100 * (v_cl_only - base_B):+.3f}')
+        print(f'  chỉ αQE (qe_k={best[1]})  {100 * v_qe_only:>8.3f}  {100 * (v_qe_only - base_B):+.3f}')
+        print(f'  CẢ HAI                    {100 * v_comb:>8.3f}  {100 * (v_comb - base_B):+.3f}')
+        add = (v_comb - base_B) - (v_cl_only - base_B) - (v_qe_only - base_B)
+        print(f'  -> {"cộng dồn tốt" if add > -0.002 else "giẫm chân nhau"} '
+              f'(chênh so với tổng hai phần riêng: {100 * add:+.3f} pp)')
+        rows.append({'method': 'H′+F kết hợp', 'param': f'k={kbest},qe_k={best[1]}',
+                     'mAP': v_comb, 'delta': v_comb - base_B})
+        del gA, simc
 
     out = args.out or os.path.join(args.run_dir, 'improve_eval.csv')
     with open(out, 'w', newline='', encoding='utf-8') as f:
