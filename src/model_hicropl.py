@@ -56,6 +56,46 @@ def unfreeze_ln(m):
         if hasattr(m, 'bias') and m.bias is not None:
             m.bias.requires_grad_(True)
 
+def retrieval_topk(dataset):
+    """(map_k, p_k) theo dataset. map_k = 0 nghĩa là mAP@all."""
+    if dataset in ("sketchy_2", "sketchy_ext"):
+        return 200, 200
+    if dataset == "quickdraw":
+        return 0, 200
+    return 0, 100
+
+
+def retrieval_metrics(query_features, gallery_features, query_labels, gallery_labels,
+                      dataset='sketchy'):
+    """mAP và P@k cho retrieval theo lớp.
+
+    Tách khỏi LightningModule để `scripts/sweep_alpha.py` dùng ĐÚNG cùng một
+    phép tính. Nếu script quét tự cài lại metric thì không thể phân biệt được
+    "α=0.5 cho số khác lúc train" là do lỗi cài đặt hay do thật.
+
+    Trả (mAP, mean_precision, ap, precision, map_k, p_k) — ap/precision là
+    vector theo từng query, dùng cho kiểm định cặp.
+    """
+    map_k, p_k = retrieval_topk(dataset)
+    similarity_matrix = query_features @ gallery_features.t()
+
+    n = len(query_features)
+    ap = torch.zeros(n, device=query_features.device)
+    precision = torch.zeros(n, device=query_features.device)
+
+    for idx in range(n):
+        target = (gallery_labels == query_labels[idx])
+        distance = similarity_matrix[idx]
+        if map_k != 0:
+            ap[idx] = retrieval_average_precision(
+                distance, target, top_k=min(map_k, len(gallery_features)))
+        else:
+            ap[idx] = retrieval_average_precision(distance, target)
+        precision[idx] = retrieval_precision(distance, target, top_k=p_k)
+
+    return torch.mean(ap), torch.mean(precision), ap, precision, map_k, p_k
+
+
 def _normalize_classname(name):
     return str(name).strip().lower().replace(" ", "_")
 
@@ -660,16 +700,12 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         return loss
 
-    def extract_eval_features(self, tensor, modality):
-        """Extract visual features: Prompted + Distill Fixed (Residual Mix)"""
-        # Chẩn đoán: bỏ hẳn nhánh prompted, chỉ dùng CLIP đóng băng. Cho biết
-        # prompt thực sự đóng góp bao nhiêu điểm so với zero-shot thuần.
-        if getattr(self.cfg, 'eval_frozen_only', False):
-            distill = (self.model.clip_distill_photo if modality == 'photo'
-                       else self.model.clip_distill_sketch).visual
-            fixed = distill(tensor.type(self.model.dtype))
-            return fixed / fixed.norm(dim=-1, keepdim=True)
+    def extract_eval_branches(self, tensor, modality):
+        """Trả (prompted_norm, fixed_norm) — hai nhánh RIÊNG, chưa trộn.
 
+        Tách ra để `scripts/sweep_alpha.py` quét nhiều giá trị α mà chỉ chạy
+        encoder một lần: hai nhánh không phụ thuộc α, chỉ phép trộn phụ thuộc.
+        """
         # Call visual learner once, cache outputs
         vis1_shallow, vis2_shallow, vis1_deeper, vis2_deeper = self.model.visual_visual_learner()
 
@@ -688,13 +724,25 @@ class HiCroPL_SBIR(pl.LightningModule):
         # `.data.copy_()`) nên bỏ nó đi không đổi trạng thái model.
         prompted_feat = visual_encoder(tensor.type(self.model.dtype), vis_shallow, vis_deeper)
         prompted_feat_norm = prompted_feat / prompted_feat.norm(dim=-1, keepdim=True)
-        
+
         fixed_feat = distill_encoder(tensor.type(self.model.dtype))
         fixed_feat_norm = fixed_feat / fixed_feat.norm(dim=-1, keepdim=True)
+        return prompted_feat_norm, fixed_feat_norm
 
+    def extract_eval_features(self, tensor, modality):
+        """Extract visual features: Prompted + Distill Fixed (Residual Mix)"""
+        # Chẩn đoán: bỏ hẳn nhánh prompted, chỉ dùng CLIP đóng băng. Cho biết
+        # prompt thực sự đóng góp bao nhiêu điểm so với zero-shot thuần.
+        if getattr(self.cfg, 'eval_frozen_only', False):
+            distill = (self.model.clip_distill_photo if modality == 'photo'
+                       else self.model.clip_distill_sketch).visual
+            fixed = distill(tensor.type(self.model.dtype))
+            return fixed / fixed.norm(dim=-1, keepdim=True)
+
+        prompted_norm, fixed_norm = self.extract_eval_branches(tensor, modality)
         # Dùng chung `residual_mix` với forward: nếu train và eval trộn khác tỉ lệ
         # thì mọi con số đánh giá đều đo sai mô hình.
-        return self.model.residual_mix(prompted_feat_norm, fixed_feat_norm, modality)
+        return self.model.residual_mix(prompted_norm, fixed_norm, modality)
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         return self._validation_step_category(batch, batch_idx, dataloader_idx)
@@ -729,37 +777,12 @@ class HiCroPL_SBIR(pl.LightningModule):
         all_photo_category  = torch.cat(self.test_photo_labels, dim=0).to(self.device)
         all_sketch_category = torch.cat(self.test_sketch_labels, dim=0).to(self.device)
 
-        similarity_matrix = query_features @ gallery_features.t()
-
-        dataset = getattr(self.args, 'dataset', 'sketchy')
-        if dataset == "sketchy_2" or dataset == "sketchy_ext":
-            map_k = 200
-            p_k = 200
-        elif dataset == "quickdraw":
-            map_k = 0
-            p_k = 200
-        else:
-            map_k = 0
-            p_k = 100
-
-        ap = torch.zeros(len(query_features), device=self.device)
-        precision = torch.zeros(len(query_features), device=self.device)
-
-        for idx in range(len(query_features)):
-            category = all_sketch_category[idx]
-            distance = similarity_matrix[idx]
-            target = (all_photo_category == category)
-
-            if map_k != 0:
-                top_k_actual = min(map_k, len(gallery_features))
-                ap[idx] = retrieval_average_precision(distance, target, top_k=top_k_actual)
-            else:
-                ap[idx] = retrieval_average_precision(distance, target)
-
-            precision[idx] = retrieval_precision(distance, target, top_k=p_k)
-
-        mAP = torch.mean(ap)
-        mean_precision = torch.mean(precision)
+        # Dùng chung với scripts/sweep_alpha.py — xem retrieval_metrics().
+        mAP, mean_precision, ap, precision, map_k, p_k = retrieval_metrics(
+            query_features, gallery_features,
+            all_sketch_category, all_photo_category,
+            getattr(self.args, 'dataset', 'sketchy'),
+        )
 
         self.log("mAP", mAP, on_step=False, on_epoch=True)
         self.log(f"P@{p_k}", mean_precision, on_step=False, on_epoch=True)
