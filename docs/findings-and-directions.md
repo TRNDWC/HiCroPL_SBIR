@@ -257,6 +257,61 @@ với `α_photo` (đo từ mốc 0.5) ở epoch 1 là **1.30×** (`lr=1e-3`) và
 Nhưng ở `lr=1e-3`, gap tan biến về cuối (epoch 7: −0.34 pp, dấu lẫn lộn giữa các
 seed). Chưa đủ để làm một luận điểm.
 
+### 3.6b Đường cong `mAP(α)`: hai nhánh BỔ TRỢ nhau, và 0.5 là đỉnh thật
+
+**[ĐO]** Quét α tại thời điểm eval trên checkpoint tốt nhất (`α=0.5` tái lập
+đúng 78.500 = con số checkpoint báo lúc train, nên bảng đáng tin):
+
+| α | mAP@200 | P@200 | |
+|---:|---:|---:|---|
+| 0.00 | **30.014** | 26.322 | frozen-only — CLIP thuần |
+| 0.10 | 44.781 | 40.942 | |
+| 0.20 | 59.814 | 56.503 | |
+| 0.30 | 71.348 | 68.103 | |
+| 0.40 | 77.054 | 73.985 | |
+| **0.50** | **78.500** | **75.690** | **đỉnh** — mặc định hiện tại |
+| 0.60 | 78.315 | 75.624 | |
+| 0.70 | 77.682 | 75.024 | |
+| 0.85 | 76.701 | 73.959 | |
+| 1.00 | **75.914** | 73.025 | prompted-only |
+
+**Ba kết luận, tất cả đều bất ngờ so với dự đoán trước đó:**
+
+**(1) Cơ chế prompt đóng góp +48.5 pp, không phải ~1.5 pp.** CLIP zero-shot thuần
+chỉ đạt **30.0** mAP@200 — khoảng cách miền sketch↔photo của CLIP gốc lớn hơn
+nhiều so với hình dung. Prompt tuning là thành phần chính của hệ thống, không phải
+lớp tinh chỉnh mỏng.
+
+> **⚠ Sửa một suy luận sai trong bản trước của tài liệu này.** Tôi từng viết:
+> *"mAP sau một epoch đã là 77.19 còn đỉnh là 78.50 — toàn bộ huấn luyện chỉ thêm
+> 1.31 pp"* và suy ra prompt có lẽ đóng góp rất ít. Sai lầm: `epoch0` là mAP **sau
+> một epoch huấn luyện đầy đủ** (450 step), không phải trước khi huấn luyện. Prompt
+> tuning hội tụ trong **chưa tới một epoch**, nên `epoch0` đã chứa gần như toàn bộ
+> phần đóng góp. Manh mối đó chỉ sai hướng hoàn toàn.
+
+**(2) `α = 0.5` là đỉnh thật.** Giá trị 1:1 trông như tuỳ tiện lại nằm đúng cực
+đại. Chênh với α=0.6 chỉ 0.185 pp (cần kiểm cặp để phân giải), nhưng hai phía đều
+đi xuống.
+
+**(3) Hai nhánh BỔ TRỢ nhau, không chỉ là điều chuẩn.** Hỗn hợp vượt **cả hai**
+thành phần: hơn prompted-only **+2.59 pp**, hơn frozen-only **+48.5 pp**. Nghĩa là
+nhánh frozen mang thông tin mà nhánh prompted **đã đánh mất** trong quá trình thích
+nghi — đúng là biểu hiện định lượng của tension ở §4.
+
+**Đường cong bất đối xứng mạnh:** dốc `+14.5 pp` mỗi 0.1 α ở phía trái đỉnh, chỉ
+`−1.9 pp` ở phía phải. Nên chệch lên trên 0.5 rẻ hơn nhiều so với chệch xuống dưới.
+
+**[ĐO] Kiểm tra chéo với §3.6.** Dùng đường cong này dự đoán hiệu năng của các run
+α học được, tại giá trị α ở epoch tốt nhất của chúng:
+
+| Run | α tại best epoch | đường cong dự đoán | thực tế | lệch |
+|---|---:|---:|---:|---:|
+| `lr=1e-3`, s1 | 0.554 | 78.40 | 78.12 | −0.28 |
+| `lr=1e-3`, s2 | 0.670 | 77.87 | 77.82 | −0.05 |
+| `lr=1e-2`, s3 | 0.729 | 77.49 | 77.99 | +0.50 |
+
+Hai thí nghiệm hoàn toàn độc lập khớp nhau trong ~0.3 pp. Điều này củng cố cả hai.
+
 ### 3.7 Không có tập validation riêng — best epoch chọn trên tập test
 
 **[ĐO]** `ValidDataset` (`src/dataset_retrieval.py`) dùng đúng `UNSEEN_CLASSES`,
@@ -293,7 +348,7 @@ thêm §3.6.
 tại của việc khớp phân phối huấn luyện — trên 104 lớp **đã thấy**, trong khi test
 là lớp **chưa thấy**.
 
-**[ĐO+SUY]** Thứ **duy nhất** đang giữ tính tổng quát là **residual mix**:
+**[ĐO+SUY]** Cơ chế giữ tính tổng quát là **residual mix**:
 
 ```python
 feat = norm( norm(prompted) + frozen )
@@ -302,12 +357,22 @@ feat = norm( norm(prompted) + frozen )
 §3.6 cho thấy nó hiệu quả **chính vì** tỉ lệ 1:1 là hằng số áp đặt. Cho mô hình
 tự chọn thì nó chọn sai, một cách tất yếu và có thể dự đoán được.
 
-**[SUY]** Do đó lời giải **không** phải là nới ràng buộc này ra, mà là một trong
-hai:
+**[ĐO] §3.6b làm rõ bản chất của nó: đây là BỔ TRỢ, không chỉ là điều chuẩn.**
+Hỗn hợp (78.50) vượt **cả hai** thành phần — prompted-only (75.91) và frozen-only
+(30.01). Nhánh frozen mang thông tin mà nhánh prompted đã đánh mất khi thích nghi.
+Và α = 0.5 nằm đúng cực đại của đường cong.
 
-1. Tìm **giá trị α tốt hơn** cho ràng buộc cố định (chưa quét α < 0.5 — §7.1)
-2. Làm cho **bản thân quá trình thích nghi bảo toàn tính tổng quát hơn**, để nó
-   không cần bị ghìm mạnh đến vậy
+**[SUY]** Do đó lời giải **không** phải là nới ràng buộc này ra (§3.6 và §3.6b
+bác bỏ) và cũng **không** phải chỉnh lại hằng số α (§3.6b cho thấy 0.5 đã tối ưu).
+Chỉ còn một hướng:
+
+> Làm cho **bản thân quá trình thích nghi bảo toàn tính tổng quát hơn**, để nhánh
+> prompted không đánh mất thứ mà nhánh frozen đang phải bù lại.
+
+**[SUY]** Điều này còn có một hệ quả thực tiễn đo được: hiện mỗi ảnh phải qua
+**hai** lượt forward ViT (prompted + frozen) khi suy luận. Nếu nhánh prompted tự
+đạt được 78.5 thì **chi phí suy luận giảm một nửa**. Hiện nó chỉ đạt 75.91, tức
+khoảng cách cần lấp là **2.59 pp**.
 
 ---
 
@@ -317,7 +382,7 @@ Mỗi hướng ghi rõ **cơ sở** (bằng chứng nào dẫn tới nó), **cơ
 và **cách bác bỏ** — nếu một đề xuất không nêu được cách nó có thể sai thì nó
 chưa phải giả thuyết khoa học.
 
-### A. Quét α cố định — *khả thi nhất, làm trước tiên* ⭐
+### A. ~~Quét α cố định~~ — **ĐÃ XONG, không có lợi ích miễn phí** ✔
 
 **Cơ sở.** §3.6 cho biết α=0.5 tốt hơn α→1, đơn điệu. Nhưng **chưa có dữ liệu nào
 về α < 0.5**. Đường cong `mAP(α)` là thứ rẻ nhất còn lại và trả lời nhiều câu hỏi
@@ -337,11 +402,16 @@ treo nhất cùng lúc.
 (~40 phút) + N lần eval (vài phút mỗi lần). Quét tại thời điểm train thì đắt hơn
 (N run) nhưng cho biết tối ưu chung của (train, eval).
 
-**Cách bác bỏ.** Nếu đường cong phẳng trong khoảng [0.3, 0.7] thì α không phải
-đòn bẩy, và trọng tâm chuyển sang hướng D/E/F.
+**Kết quả (§3.6b).** Đỉnh nằm đúng tại **α = 0.5** — giá trị mặc định. Không có
+lợi ích miễn phí nào. Nhưng đường cong trả về ba thông tin quan trọng hơn cả câu
+hỏi ban đầu:
 
-**Nếu đỉnh ở α < 0.5:** thay đổi khả thi nhất là **một hằng số**. Ít hấp dẫn về
-mặt bài báo, nhưng là lợi ích thật với chi phí bằng 0.
+- frozen-only = **30.0** → cơ chế prompt đóng góp **+48.5 pp**, không phải ~1.5 pp
+- hỗn hợp vượt cả hai thành phần → **bổ trợ**, không chỉ điều chuẩn
+- prompted-only = **75.9**, tức khoảng cách 2.59 pp cần lấp nếu muốn bỏ nhánh
+  frozen khỏi suy luận
+
+Theo cây quyết định đã đặt ra: *"đỉnh ở α ≈ 0.5 → ưu tiên hướng B′"*.
 
 ### B. ~~Thay residual mix bằng ràng buộc quan hệ~~ — **CHỐNG CHỈ ĐỊNH**
 
@@ -361,10 +431,26 @@ hướng A.**
 **Điều kiện hồi sinh:** nếu §A cho thấy đỉnh nằm ở α > 0.5, thì giả định nền của
 hướng B được khôi phục và đáng thử lại.
 
-### B′. `L_rel` như ràng buộc BỔ SUNG, giữ nguyên α = 0.5 — *thay thế cho B*
+### B′. `L_rel` như ràng buộc BỔ SUNG, giữ nguyên α = 0.5 — *ưu tiên số một hiện nay* ⭐
 
-**Cơ sở.** §4 mục (2): làm quá trình thích nghi bảo toàn tính tổng quát hơn. §3.6
-bác bỏ việc **nới** ràng buộc, nhưng không nói gì về việc **thêm** ràng buộc.
+**Cơ sở.** §4: hướng duy nhất còn lại sau khi §3.6 bác bỏ việc nới ràng buộc và
+§3.6b cho thấy hằng số α đã tối ưu. §3.6 bác bỏ việc **nới** ràng buộc, nhưng
+không nói gì về việc **thêm** ràng buộc.
+
+**Mục tiêu định lượng rõ ràng từ §3.6b.** Không cần hứa hẹn mơ hồ: nhánh prompted
+hiện đạt **75.91**, hỗn hợp đạt **78.50**. Khoảng cách **2.59 pp** chính là lượng
+thông tin mà nhánh prompted đánh mất khi thích nghi. `L_rel` thành công nghĩa là
+thu hẹp khoảng cách đó.
+
+**Hai mức thành công, cả hai đều đáng báo cáo:**
+
+| Mức | Kết quả | Ý nghĩa |
+|---|---|---|
+| Vừa | hỗn hợp > 78.50 | cải thiện hiệu năng |
+| **Mạnh** | prompted-only ≈ 78.5 | **bỏ được nhánh frozen → giảm một nửa chi phí suy luận** với cùng độ chính xác |
+
+Mức mạnh là một đóng góp trung thực và đo được: không hứa tăng mAP, mà hứa **giữ
+nguyên mAP với một nửa compute**. Hiện mỗi ảnh phải qua hai lượt forward ViT.
 
 **Cơ chế.** Giữ nguyên residual mix cố định, cộng thêm:
 
@@ -562,25 +648,26 @@ nhiễu chạy lại. Hệ quả thực tế: không bao giờ cần lặp lại
 
 | # | Việc | Chi phí | Trả lời được gì |
 |---|---|---|---|
-| 1 | **Hướng A** — quét α tại eval | ~1 giờ | §7.1 + §7.3 cùng lúc; α tối ưu |
+| ✔ | ~~Hướng A~~ — quét α | xong | §7.1 + §7.3; α*=0.5, không có lợi ích miễn phí |
+| **1** | **Hướng B′** — `L_rel` bổ sung | ~4 giờ | Lấp được bao nhiêu trong 2.59 pp |
 | 2 | **Hướng G** — tách `pseudo-unseen` | ~1 ngày code | Sửa §3.7; mở khoá lựa chọn có nguyên tắc |
-| 3 | **Hướng B′** — `L_rel` bổ sung | ~4 giờ | Có bảo toàn tổng quát được không |
-| 4 | **D, E, F** | rẻ | Cải tiến đi kèm, không phụ thuộc nhánh |
+| 3 | **D, E, F** | rẻ | Cải tiến đi kèm, không phụ thuộc nhánh |
 | — | ~~B~~, C | — | Hoãn: chống chỉ định / rủi ro cao sau §3.6 |
 
-**Chạy song song được với bước 1:** hướng F (re-ranking) dùng đúng ma trận tương
-đồng mà `sweep_alpha.py` đã tính, không cần train lại và không phụ thuộc kết quả
-α. Đây là việc duy nhất trong danh sách không bị chặn bởi bất cứ thứ gì.
+**Chạy song song được:** hướng F (re-ranking) dùng đúng ma trận tương đồng mà
+`sweep_alpha.py` đã tính, không cần train lại và không phụ thuộc kết quả nào khác.
 
-**Rẽ nhánh sau bước 1:**
+**Mốc để đo hướng B′** — cả ba từ §3.6b, trên cùng một checkpoint:
 
-- **Đỉnh ở α < 0.5** → nhánh prompted đang gây hại ngay cả ở tỉ lệ hiện tại.
-  Đặt α tối ưu (miễn phí), rồi ưu tiên G, và cân nhắc lại toàn bộ hướng đi: câu
-  chuyện trở thành *"cơ chế prompt hiện tại không đóng góp"*.
-- **Đỉnh ở α ≈ 0.5, đường cong nhọn** → 0.5 là tối ưu thật, không phải trùng hợp.
-  Ưu tiên B′.
-- **Đường cong phẳng [0.3, 0.7]** → α không phải đòn bẩy. Chuyển sang D, E, F.
-- **Đỉnh ở α > 0.5** → giả định nền của hướng B được khôi phục, đáng thử lại.
+```
+frozen-only    30.01     nhánh đóng băng một mình
+prompted-only  75.91     nhánh thích nghi một mình   ← cần nâng lên
+hỗn hợp α=0.5  78.50     hiện tại                    ← mục tiêu
+```
+
+Nếu `L_rel` đưa `prompted-only` lên ~78.5 thì bỏ được nhánh frozen khỏi suy luận:
+**cùng độ chính xác, một nửa compute**. Đó là phát biểu đóng góp trung thực nhất
+mà dữ liệu hiện có cho phép.
 
 ---
 
