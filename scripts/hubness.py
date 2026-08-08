@@ -46,6 +46,7 @@ Chạy:
 
 import argparse
 import csv
+import json
 import os
 import sys
 
@@ -185,7 +186,10 @@ def main():
     ap_.add_argument('--hub_k', nargs='+', type=int, default=[5, 10, 20, 50])
     ap_.add_argument('--beta', nargs='+', type=float, default=[0.25, 0.5, 0.75, 1.0],
                      help='cường độ trừ hub; 0.5 = CSLS gốc')
-    ap_.add_argument('--hub_branch', default='mixed', choices=['mixed', 'frozen', 'prompted'])
+    ap_.add_argument('--hub_branch', nargs='+', default=['mixed', 'frozen'],
+                     choices=['mixed', 'frozen', 'prompted'],
+                     help='nhánh ước lượng mật độ hub; nhiều giá trị chạy chung '
+                          'MỘT lần trích đặc trưng')
     ap_.add_argument('--abt_d', nargs='+', type=int, default=[0, 1, 2, 4, 8])
     ap_.add_argument('--tau', nargs='+', type=float, default=[0.02, 0.05, 0.1])
     ap_.add_argument('--sinkhorn_iters', type=int, default=3)
@@ -249,13 +253,16 @@ def main():
     print('\n' + '=' * 70)
     print('A. CHẨN ĐOÁN HUBNESS')
     print('=' * 70)
+    diag = {'baseline_mAP': base, 'nk': args.nk, 'alpha': args.alpha}
     print(f'\nĐộ lệch (skewness) của N_{args.nk} — càng cao càng nhiều hub:')
     print(f'{"không gian":<26}{"skew":>9}{"N_k max":>10}{"gallery không bao giờ vào top":>32}')
     print('-' * 77)
-    for nm, a in (('frozen (α=0)', 0.0), ('prompted (α=1)', 1.0),
-                  (f'mixed (α={args.alpha})', args.alpha)):
+    for nm, key_, a in (('frozen (α=0)', 'frozen', 0.0), ('prompted (α=1)', 'prompted', 1.0),
+                        (f'mixed (α={args.alpha})', 'mixed', args.alpha)):
         s = sim0 if a == args.alpha else mix(uq, fq, a) @ mix(ug, fg, a).t()
         nk_, _ = n_occurrence(s, args.nk)
+        diag[f'skew_{key_}'] = skew(nk_)
+        diag[f'orphan_{key_}'] = float((nk_ == 0).float().mean())
         print(f'{nm:<26}{skew(nk_):>9.3f}{int(nk_.max()):>10}'
               f'{100 * float((nk_ == 0).float().mean()):>31.1f}%')
         if s is not sim0:
@@ -265,6 +272,8 @@ def main():
     s_ss = g0 @ g0.t()
     s_ss.fill_diagonal_(-2)
     nk_ss, _ = n_occurrence(s_ss, args.nk)
+    diag['skew_photo2photo'] = skew(nk_ss)
+    diag['orphan_photo2photo'] = float((nk_ss == 0).float().mean())
     print(f'{"photo->photo (cùng miền)":<26}{skew(nk_ss):>9.3f}{int(nk_ss.max()):>10}'
           f'{100 * float((nk_ss == 0).float().mean()):>31.1f}%')
     del s_ss, nk_ss
@@ -286,6 +295,10 @@ def main():
     mp = np.array([r[1] for r in rows_c])
     bh = np.array([r[2] for r in rows_c])
     r_corr = float(np.corrcoef(mp, bh)[0, 1]) if bh.std() > 0 else 0.0
+    diag.update(r_class_mAP_vs_badhub=r_corr,
+                hub_share=float(hub_hit.float().mean()),
+                bad_hub_share=float(bad_hub.float().mean()),
+                n_classes=len(rows_c))
     print(f'\nTương quan mAP của lớp vs tỉ lệ bị hút vào hub sai lớp: r = {r_corr:+.3f}')
     print('  (âm mạnh = lớp yếu đúng là lớp bị hub nuốt -> giả thuyết được ủng hộ)')
     print(f'\n{"lớp":>5}{"mAP":>9}{"% ô là hub sai lớp":>21}{"n truy vấn":>12}')
@@ -313,28 +326,47 @@ def main():
         rows.append({'method': name, 'param': param, 'mAP': v, 'delta': v - base})
         return v
 
-    sim_hub = sim0 if args.hub_branch == 'mixed' else (
-        lambda a: mix(uq, fq, a) @ mix(ug, fg, a).t())(1.0 if args.hub_branch == 'prompted' else 0.0)
-
     # β tính bằng đơn vị độ lệch chuẩn của sim nền (xem standardize) để so được
     # giữa các nhánh. CSLS thô báo cáo riêng ở dưới để không mất phương pháp gốc.
     unit = sim0.std()
-    print(f'\n### B1. Trừ hub — s(i,j) − β·r̂_G(j)   [r_G ước lượng ở nhánh: {args.hub_branch}]')
+    print(f'\n### B1+B3. Trừ hub và Sinkhorn, theo NHÁNH ước lượng mật độ')
     print(f'    β theo đơn vị σ(sim) = {float(unit):.4f}')
-    print(f'{"k":>5}{"β":>7}{"mAP":>10}{"so với nền":>12}')
-    print('-' * 34)
-    best_csls = (base, args.hub_k[0], args.beta[0])
-    for k in args.hub_k:
-        rg = standardize(hub_scores(sim_hub, k), unit)
-        for b in args.beta:
-            apv, _ = score(q0, g0, lq, lg, map_k, p_k, col_off=-b * rg, chunk=ch)
-            v = rec('CSLS', f'k={k},β={b},branch={args.hub_branch}', apv)
-            flag = ' <-' if v > best_csls[0] else ''
-            print(f'{k:>5}{b:>7.2f}{100 * v:>10.3f}{100 * (v - base):>+12.3f}{flag}')
-            if v > best_csls[0]:
-                best_csls = (v, k, b)
-                store['csls'] = apv.cpu().numpy()
-        del rg
+    print('    Mỗi nhánh dựng ma trận sim một lần rồi giải phóng — nhiều nhánh KHÔNG')
+    print('    tốn thêm lần trích đặc trưng nào.')
+    best_csls = (base, args.hub_k[0], args.beta[0], args.hub_branch[0])
+    best_sk = (base, args.tau[0], args.hub_branch[0])
+    for br in args.hub_branch:
+        sim_hub = sim0 if br == 'mixed' else (
+            lambda a: mix(uq, fq, a) @ mix(ug, fg, a).t())(1.0 if br == 'prompted' else 0.0)
+        print(f'\n  -- nhánh ước lượng: {br} --')
+        print(f'  {"k":>5}{"β":>7}{"mAP":>10}{"so với nền":>12}')
+        print('  ' + '-' * 34)
+        for k in args.hub_k:
+            rg = standardize(hub_scores(sim_hub, k), unit)
+            for b in args.beta:
+                apv, _ = score(q0, g0, lq, lg, map_k, p_k, col_off=-b * rg, chunk=ch)
+                v = rec('CSLS', f'k={k},β={b},branch={br}', apv)
+                flag = ' <-' if v > best_csls[0] else ''
+                print(f'  {k:>5}{b:>7.2f}{100 * v:>10.3f}{100 * (v - base):>+12.3f}{flag}')
+                if v > best_csls[0]:
+                    best_csls = (v, k, b, br)
+                    store['csls'] = apv.cpu().numpy()
+            del rg
+        print(f'  {"τ (Sinkhorn)":>12}{"mAP":>10}{"so với nền":>12}')
+        print('  ' + '-' * 34)
+        for t in args.tau:
+            off = sinkhorn_offset(sim_hub, t, args.sinkhorn_iters, chunk=ch)
+            apv, _ = score(q0, g0, lq, lg, map_k, p_k, col_off=off, chunk=ch)
+            v = rec('sinkhorn', f'τ={t},branch={br}', apv)
+            flag = ' <-' if v > best_sk[0] else ''
+            print(f'  {t:>12.3f}{100 * v:>10.3f}{100 * (v - base):>+12.3f}{flag}')
+            if v > best_sk[0]:
+                best_sk = (v, t, br)
+                store['sinkhorn'] = apv.cpu().numpy()
+            del off
+        if sim_hub is not sim0:
+            del sim_hub
+        torch.cuda.empty_cache() if dev == 'cuda' else None
 
     # CSLS đúng như bài gốc: r_G thô trên nhánh mixed, β = 0.5. Phải có dòng này
     # để bảng báo cáo được phương pháp tham chiếu, không chỉ biến thể đã chỉnh.
@@ -361,21 +393,6 @@ def main():
             store['abt'] = apv.cpu().numpy()
         del qw, gw
 
-    print(f'\n### B3. Chuẩn hoá Sinkhorn ({args.sinkhorn_iters} vòng)')
-    print(f'{"τ":>7}{"mAP":>10}{"so với nền":>12}')
-    print('-' * 29)
-    best_sk = (base, args.tau[0])
-    for t in args.tau:
-        off = sinkhorn_offset(sim_hub, t, args.sinkhorn_iters, chunk=ch)
-        apv, _ = score(q0, g0, lq, lg, map_k, p_k, col_off=off, chunk=ch)
-        v = rec('sinkhorn', f'τ={t}', apv)
-        flag = ' <-' if v > best_sk[0] else ''
-        print(f'{t:>7.3f}{100 * v:>10.3f}{100 * (v - base):>+12.3f}{flag}')
-        if v > best_sk[0]:
-            best_sk = (v, t)
-            store['sinkhorn'] = apv.cpu().numpy()
-        del off
-
     # B4. cộng dồn với αQE — αQE sửa TRUY VẤN, trừ hub sửa CỘT gallery
     if args.qe_k > 0:
         print(f'\n### B4. Kết hợp với αQE (qe_k={args.qe_k})')
@@ -384,13 +401,20 @@ def main():
         v_qe = rec('αQE', f'k={args.qe_k}', ap_qe)
         store['qe'] = ap_qe.cpu().numpy()
 
-        rg = standardize(hub_scores(sim_hub, best_csls[1]), unit)
-        ap_b, _ = score(qA, g0, lq, lg, map_k, p_k, col_off=-best_csls[2] * rg, chunk=ch)
-        v_both = rec('αQE + CSLS', f'k={args.qe_k},β={best_csls[2]}', ap_b)
+        # dựng lại sim của nhánh thắng — nó đã được giải phóng sau vòng B1+B3
+        _, kb, bb, brb = best_csls
+        sh = sim0 if brb == 'mixed' else (
+            lambda a: mix(uq, fq, a) @ mix(ug, fg, a).t())(1.0 if brb == 'prompted' else 0.0)
+        rg = standardize(hub_scores(sh, kb), unit)
+        if sh is not sim0:
+            del sh
+        ap_b, _ = score(qA, g0, lq, lg, map_k, p_k, col_off=-bb * rg, chunk=ch)
+        v_both = rec('αQE + CSLS', f'k={args.qe_k},β={bb},branch={brb}', ap_b)
         store['qe_csls'] = ap_b.cpu().numpy()
 
         print(f'  nền           {100 * base:>9.3f}')
-        print(f'  chỉ CSLS      {100 * best_csls[0]:>9.3f}  {100 * (best_csls[0] - base):+.3f}')
+        print(f'  chỉ CSLS      {100 * best_csls[0]:>9.3f}  {100 * (best_csls[0] - base):+.3f}'
+              f'   [k={kb}, β={bb}, nhánh={brb}]')
         print(f'  chỉ αQE       {100 * v_qe:>9.3f}  {100 * (v_qe - base):+.3f}')
         print(f'  CẢ HAI        {100 * v_both:>9.3f}  {100 * (v_both - base):+.3f}')
         add = (v_both - base) - (best_csls[0] - base) - (v_qe - base)
@@ -414,6 +438,9 @@ def main():
         for c, m_, _, _ in rows_c[:7]:
             print(f'{c:>5}{100 * m_:>10.2f}{100 * float(d[lq == c].mean()):>+11.3f}')
             weak |= lq == c
+        diag.update(best_method=best['method'], best_param=best['param'],
+                    best_delta=best['delta'],
+                    gain_weak=float(d[weak].mean()), gain_rest=float(d[~weak].mean()))
         print(f'\n  nhóm yếu {100 * float(d[weak].mean()):+.3f} pp   |   '
               f'nhóm còn lại {100 * float(d[~weak].mean()):+.3f} pp')
         print('  Giả thuyết đúng <=> nhóm yếu tăng NHIỀU HƠN HẲN nhóm còn lại.')
@@ -421,7 +448,13 @@ def main():
     out = args.out or os.path.join(args.run_dir, 'hubness.csv')
     with open(out, 'w', newline='', encoding='utf-8') as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
-    print(f'\nCSV: {os.path.abspath(out)}')
+    print(f'\nCSV : {os.path.abspath(out)}')
+    # Số chẩn đoán phần A chỉ được IN ra, mà chúng mới là phần quyết định câu
+    # chuyện — nên ghi ra JSON để tổng hợp qua nhiều seed.
+    dj = os.path.splitext(out)[0] + '_diag.json'
+    with open(dj, 'w', encoding='utf-8') as f:
+        json.dump(diag, f, ensure_ascii=False, indent=2)
+    print(f'Diag: {os.path.abspath(dj)}')
 
     if args.save_ap:
         for nm, v in store.items():
