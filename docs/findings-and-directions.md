@@ -974,10 +974,42 @@ lớp / batch 128 chỉ ~1% cặp là false negative, quá ít để tạo khác
 
 > **⚠ Confound trong thiết kế thí nghiệm của tôi.** Ba chế độ dùng chung
 > `lambda_visual_cross=0.1` nhưng độ lớn loss khác hẳn: `legacy` 0.0373,
-> `direct` 0.1322, `rel` **0.0088**. Nên `rel` đang bị áp với trọng số hiệu dụng
-> **nhỏ hơn `direct` 15 lần**. Kết quả `text_rel − text_direct = −0.053` (đều âm,
-> t=−9.76) vì vậy **KHÔNG kết luận được** — cần chạy lại `rel` với λ≈1.5.
-> `scripts/run_phase5b.sh` quét λ ∈ {0.5, 1.5, 4.0}.
+> `direct` 0.1322, `rel` **0.0088**. Nên `rel` bị áp với trọng số hiệu dụng
+> **nhỏ hơn `direct` 15 lần**, và kết quả `text_rel − text_direct = −0.053` không
+> kết luận được. Đã chạy lại ở §8d.
+
+### 8d. Ràng buộc quan hệ ở trọng số khớp: **lập luận modality gap bị bác bỏ**
+
+**[ĐO]** Quét `lambda_visual_cross` cho chế độ `rel`, 3 seed, so cặp với base:
+
+| λ_vc | mAP | Δ vs base | ±std | t |
+|---:|---:|---:|---:|---:|
+| 0.1 | 78.436 | **+0.068** | 0.015 | +7.66 |
+| 0.5 | 78.352 | −0.016 | 0.018 | −1.49 |
+| **1.5** (khớp `direct`) | 78.112 | **−0.255** | 0.033 | −13.43 |
+| 4.0 | 77.632 | **−0.735** | 0.060 | −21.32 |
+| `direct` (λ=0.1) | 78.489 | **+0.121** | 0.023 | +9.30 |
+
+**[ĐO] Đơn điệu giảm theo λ.** Tăng cường ràng buộc quan hệ làm tệ đi đều đặn:
+`+0.068 → −0.016 → −0.255 → −0.735`.
+
+**[ĐO] So công bằng tại trọng số hiệu dụng ngang nhau:**
+
+```
+rel(λ=1.5) − direct(λ=0.1):  −0.349, −0.378, −0.403
+                             mean −0.376 ± 0.027,  t = −24.36,  đều âm
+```
+
+> **Kết luận: lập luận modality gap BỊ BÁC BỎ.** Tôi lập luận rằng kéo đặc trưng
+> ảnh về đặc trưng text đi ngược hình học CLIP, nên ràng buộc **thứ hạng** sẽ tốt
+> hơn ràng buộc **tuyệt đối**. Ở trọng số ngang nhau, ràng buộc quan hệ **kém hơn
+> 0.376 pp**. Chỉ số dương nhỏ ở λ=0.1 là do ràng buộc gần như không được áp.
+
+**[SUY]** Đây là lần thứ ba trong dự án một quan hệ liều–đáp ứng đơn điệu cho
+thấy **tăng cường ràng buộc lên quá trình thích nghi đều làm tệ đi** — sau `n_ctx`
+(§3.5) và α học được (§3.6). Mẫu hình này giờ đã rất vững.
+
+**Hướng D đóng.** Dạng tốt nhất là `direct` ở λ=0.1: **+0.121 ± 0.023 pp**.
 
 **[SUY]** Mọi hiệu ứng ở đây nhỏ hơn αQE (+3.427 pp) khoảng **25–40 lần**. Khớp
 với mẫu hình toàn dự án: can thiệp vào **quá trình thích nghi** cho hiệu ứng ở mức
