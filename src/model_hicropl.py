@@ -729,6 +729,42 @@ class HiCroPL_SBIR(pl.LightningModule):
         fixed_feat_norm = fixed_feat / fixed_feat.norm(dim=-1, keepdim=True)
         return prompted_feat_norm, fixed_feat_norm
 
+    def extract_eval_tokens(self, tensor, modality, branch='mixed', alpha=0.5):
+        """Trả TOÀN BỘ token đã chiếu, [B, L, 512] — cho khớp ở mức patch.
+
+        Động lực (docs §8e): 7 lớp yếu nhất chiếm 34% query với mAP 64.0 so với
+        89.4 của nhóm mạnh. `door`, `window`, `saw` là vật thể nhỏ hoặc mảnh nằm
+        trong ảnh cảnh, trong khi sketch là vật thể cô lập chiếm hết khung — CLS
+        token của ảnh bị nền trung bình hoá. ViT đã tính sẵn 50 patch token rồi
+        vứt 49 cái; đó chính là thông tin cần để khớp cục bộ.
+        """
+        x = tensor.type(self.model.dtype)
+        if branch == 'frozen':
+            distill = (self.model.clip_distill_photo if modality == 'photo'
+                       else self.model.clip_distill_sketch).visual
+            return distill(x, return_tokens=True)
+
+        vis1_s, vis2_s, vis1_d, vis2_d = self.model.visual_visual_learner()
+        if modality == 'photo':
+            enc, vs, vd = self.model.visual_encoder_photo.vit, vis2_s, vis2_d
+            distill = self.model.clip_distill_photo.visual
+        else:
+            enc, vs, vd = self.model.visual_encoder_sketch.vit, vis1_s, vis1_d
+            distill = self.model.clip_distill_sketch.visual
+
+        prompted = enc(x, vs, vd, return_tokens=True)
+        if branch == 'prompted':
+            return prompted
+        # 'mixed': trộn theo cùng tỉ lệ với đường eval chuẩn, chuẩn hoá từng token
+        frozen = distill(x, return_tokens=True)
+        p = prompted / prompted.norm(dim=-1, keepdim=True)
+        f = frozen / frozen.norm(dim=-1, keepdim=True)
+        # Hai nhánh có số token khác nhau (prompted có thêm n_ctx prompt token ở
+        # cuối); cắt về phần chung là patch + CLS.
+        n = min(p.shape[1], f.shape[1])
+        m = alpha * p[:, :n] + (1.0 - alpha) * f[:, :n]
+        return m / m.norm(dim=-1, keepdim=True)
+
     def extract_eval_features(self, tensor, modality):
         """Extract visual features: Prompted + Distill Fixed (Residual Mix)"""
         # Chẩn đoán: bỏ hẳn nhánh prompted, chỉ dùng CLIP đóng băng. Cho biết

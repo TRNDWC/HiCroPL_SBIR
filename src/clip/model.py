@@ -464,7 +464,7 @@ class VisionTransformer(nn.Module):
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, return_tokens=False):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
@@ -488,6 +488,14 @@ class VisionTransformer(nn.Module):
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
+
+        # Late interaction cần TOÀN BỘ token, không chỉ CLS. ViT vốn tính 50
+        # patch token mỗi ảnh rồi vứt 49 — với vật thể nhỏ trong ảnh cảnh (door,
+        # window, saw) thì CLS bị nền trung bình hoá, đó là thông tin bị mất.
+        # Mặc định False nên không đổi hành vi của bất kỳ đường chạy nào.
+        if return_tokens:
+            t = self.ln_post(x)                      # [B, L, width]
+            return t @ self.proj if self.proj is not None else t
 
         x = self.ln_post(x[:, 0, :])
 
@@ -519,7 +527,8 @@ class VisionTransformer_HiCroPL(nn.Module):
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
-    def forward(self, x: torch.Tensor, img_prompts, cross_prompts_visual_deeper):
+    def forward(self, x: torch.Tensor, img_prompts, cross_prompts_visual_deeper,
+                return_tokens=False):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
@@ -542,6 +551,14 @@ class VisionTransformer_HiCroPL(nn.Module):
         outputs = self.transformer([x, cross_prompts_visual_deeper])
         x = outputs[0]
         x = x.permute(1, 0, 2)  # LND -> NLD
+
+        # Late interaction cần TOÀN BỘ token, không chỉ CLS. ViT vốn tính 50
+        # patch token mỗi ảnh rồi vứt 49 — với vật thể nhỏ trong ảnh cảnh (door,
+        # window, saw) thì CLS bị nền trung bình hoá, đó là thông tin bị mất.
+        # Mặc định False nên không đổi hành vi của bất kỳ đường chạy nào.
+        if return_tokens:
+            t = self.ln_post(x)                      # [B, L, width]
+            return t @ self.proj if self.proj is not None else t
 
         x = self.ln_post(x[:, 0, :])
 
@@ -571,7 +588,8 @@ class VisionTransformer_MaPLe(nn.Module):
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
-    def forward(self, x: torch.Tensor, shared_ctx, compound_deeper_prompts):
+    def forward(self, x: torch.Tensor, shared_ctx, compound_deeper_prompts,
+                return_tokens=False):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
@@ -596,6 +614,14 @@ class VisionTransformer_MaPLe(nn.Module):
         outputs = self.transformer([x, compound_deeper_prompts, 0])  # third argument is counter
         x = outputs[0]
         x = x.permute(1, 0, 2)  # LND -> NLD
+
+        # Late interaction cần TOÀN BỘ token, không chỉ CLS. ViT vốn tính 50
+        # patch token mỗi ảnh rồi vứt 49 — với vật thể nhỏ trong ảnh cảnh (door,
+        # window, saw) thì CLS bị nền trung bình hoá, đó là thông tin bị mất.
+        # Mặc định False nên không đổi hành vi của bất kỳ đường chạy nào.
+        if return_tokens:
+            t = self.ln_post(x)                      # [B, L, width]
+            return t @ self.proj if self.proj is not None else t
 
         x = self.ln_post(x[:, 0, :])
 
