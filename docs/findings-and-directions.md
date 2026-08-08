@@ -944,6 +944,47 @@ Vì α theo cụm cần nhãn, điểm này chỉ có ý nghĩa học thuật. *
 
 ---
 
+## 8c. Hướng D và E: hiệu ứng thật nhưng nhỏ hơn αQE 25–40 lần
+
+**[ĐO]** 3 seed, 8 epoch, cùng nền 78.368. Vì các biến thể dùng **chung seed và
+chung thứ tự dữ liệu** (chỉ khác loss), phép so đúng là **so cặp** — δ_min = 0.31
+pp là ngưỡng cho so *không cặp* nên quá bảo thủ ở đây.
+
+| biến thể | Δ vs base (3 seed) | trung bình | t | |
+|---|---|---:|---:|---|
+| `text_direct` | +0.131, +0.096, +0.138 | **+0.121 ± 0.023** | **9.30** | đều dương |
+| `text_rel` | +0.069, +0.052, +0.083 | **+0.068 ± 0.015** | **7.66** | đều dương |
+| `supcon_text_rel` | +0.255, **−0.043**, +0.393 | +0.202 ± 0.223 | 1.57 | lẫn lộn |
+| `supcon` | +0.177, **−0.127**, +0.346 | +0.132 ± 0.240 | 0.95 | lẫn lộn |
+| `text_legacy` | +0.007, +0.019, +0.085 | +0.037 ± 0.042 | 1.53 | đều dương |
+
+**[ĐO] Phê phán công thức được xác nhận.** Tách riêng ảnh hưởng của *công thức*
+(cả hai cùng bật `enhance_text`):
+
+```
+text_direct − text_legacy:  +0.124, +0.076, +0.053  →  +0.084 ± 0.036, t=4.03
+```
+
+Đều dương ở cả ba seed. Đổi `1 − cos(a+b, a)` thành `1 − cos(a, b)` thực sự giúp
+— đúng như phân tích về gradient bão hoà ở §5.D. Nhưng chỉ **+0.084 pp**.
+
+**[ĐO] SupCon: không phân biệt được.** Một seed âm, std 0.240 — gấp 10 lần std
+của `text_direct`. Giả thuyết false-negative không được ủng hộ; có thể vì với 104
+lớp / batch 128 chỉ ~1% cặp là false negative, quá ít để tạo khác biệt đo được.
+
+> **⚠ Confound trong thiết kế thí nghiệm của tôi.** Ba chế độ dùng chung
+> `lambda_visual_cross=0.1` nhưng độ lớn loss khác hẳn: `legacy` 0.0373,
+> `direct` 0.1322, `rel` **0.0088**. Nên `rel` đang bị áp với trọng số hiệu dụng
+> **nhỏ hơn `direct` 15 lần**. Kết quả `text_rel − text_direct = −0.053` (đều âm,
+> t=−9.76) vì vậy **KHÔNG kết luận được** — cần chạy lại `rel` với λ≈1.5.
+> `scripts/run_phase5b.sh` quét λ ∈ {0.5, 1.5, 4.0}.
+
+**[SUY]** Mọi hiệu ứng ở đây nhỏ hơn αQE (+3.427 pp) khoảng **25–40 lần**. Khớp
+với mẫu hình toàn dự án: can thiệp vào **quá trình thích nghi** cho hiệu ứng ở mức
+nhiễu; chỉ can thiệp vào **trục khác** (cấu trúc gallery) mới cho hiệu ứng lớn.
+
+---
+
 ## 9. Kế hoạch: từ bảy kết quả âm đến một bài báo
 
 ### 9.1 Đọc đúng tình hình
