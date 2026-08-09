@@ -107,6 +107,30 @@ def score(qf, gf, lq, lg, map_k, p_k, col_off=None, chunk=CHUNK):
     return torch.cat(APs), torch.cat(PKs)
 
 
+def tie_stats(qf, gf, K, chunk=CHUNK, rows=None):
+    """Đếm hoà điểm trong top-K: (tỉ lệ truy vấn có hoà, số cặp hoà trung bình).
+
+    Quan trọng gấp đôi ở đây. Thứ nhất, hoà điểm giải thích vì sao hai cách cài
+    AP đúng như nhau vẫn lệch: `topk` phá hoà theo thứ tự chỉ số, và kernel 1-D
+    (torchmetrics gọi trên từng hàng) khác kernel 2-D (gọi trên cả lô).
+
+    Thứ hai — và đây mới là chỗ nguy hiểm — MỌI phép sửa trong script này là một
+    độ lệch trên mỗi cột. Cộng một độ lệch vào các mục đang hoà sẽ PHÁ HOÀ, nên
+    tạo ra thay đổi mAP không đến từ cơ chế hubness nào cả. Tỉ lệ hoà là cận
+    trên của phần "ăn may" đó, nên phải đo và báo cáo.
+    """
+    q = qf if rows is None else qf[rows]
+    tot = nq = 0
+    pairs = 0.0
+    for s in range(0, len(q), chunk):
+        v = (q[s:s + chunk] @ gf.t()).topk(K, dim=-1).values
+        eq = v[:, 1:] == v[:, :-1]
+        tot += int(eq.any(1).sum())
+        pairs += float(eq.sum())
+        nq += len(v)
+    return tot / max(nq, 1), pairs / max(nq, 1)
+
+
 def hub_scores(sim, k):
     """r_G(j) = trung bình top-k độ tương đồng của gallery j sang phía TRUY VẤN."""
     return sim.topk(k, dim=0).values.mean(0)              # [Ng]
@@ -237,15 +261,41 @@ def main():
     # -- tự kiểm: đường tính AP mới phải khớp retrieval_metrics của repo --------
     ap0, _ = score(q0, g0, lq, lg, map_k, p_k, chunk=ch)
     _, _, ref_ap, _, _, _ = retrieval_metrics(q0, g0, lq, lg, cfg.dataset)
-    dmax = float((ap0 - ref_ap).abs().max())
-    print(f'\nTự kiểm score() vs retrieval_metrics: lệch tối đa {dmax:.2e}', end='  ')
-    if dmax > 1e-4:
-        print('\n  ✗ KHÔNG khớp — dừng, đừng tin số bên dưới.')
-        return 1
-    print('OK')
+    dd = (ap0 - ref_ap).abs()
+    dmax, dmean = float(dd.max()), float(dd.mean())
+    nd = int((dd > 1e-6).sum())
     del ref_ap
+    K = min(map_k or len(g0), len(g0))
+    print(f'\nTự kiểm score() vs retrieval_metrics:')
+    print(f'  lệch tối đa {dmax:.2e} | trung bình {dmean:.2e} | '
+          f'{nd}/{len(dd)} truy vấn lệch')
+
+    # Sai LOGIC thì lệch có hệ thống trên nhiều truy vấn. Phá hoà thì lệch nhỏ,
+    # thưa, và chỉ ở những truy vấn có hoà điểm. Hai trường hợp phân biệt được.
+    if dmean > 1e-6 or dmax > 5e-3:
+        print('  ✗ Lệch có hệ thống — sai logic, KHÔNG phải phá hoà. Dừng.')
+        return 1
+    tie_all, pairs_all = tie_stats(q0, g0, K, ch)
+    if nd:
+        tie_bad, _ = tie_stats(q0, g0, K, ch, rows=(dd > 1e-6).nonzero(as_tuple=True)[0])
+        print(f'  hoà điểm trong top-{K}: {100 * tie_all:.2f}% truy vấn nói chung, '
+              f'{100 * tie_bad:.2f}% trong nhóm lệch')
+        if tie_bad < 0.9:
+            print('  ✗ Nhóm lệch KHÔNG phải do hoà điểm — còn nguyên nhân khác. Dừng.')
+            return 1
+        print('  OK — lệch chỉ đến từ phá hoà, không phải sai logic.')
+    else:
+        print('  OK — khớp tuyệt đối.')
+
+    # Cận trên của phần "ăn may": mọi phép sửa ở phần B là một độ lệch trên mỗi
+    # cột, nên nó PHÁ HOÀ và có thể đổi mAP mà không cần cơ chế hubness nào.
+    print(f'\n⚠ Hoà điểm trong top-{K}: {100 * tie_all:.2f}% truy vấn, '
+          f'trung bình {pairs_all:.2f} cặp/truy vấn.')
+    print('  Mọi phép sửa ở phần B là độ lệch theo cột nên nó phá hoà. Con số trên')
+    print('  là cận trên của mức thay đổi mAP KHÔNG đến từ cơ chế hubness.')
+
     base = float(ap0.mean())
-    print(f'NỀN α={args.alpha}: mAP@{map_k or "all"} = {100 * base:.3f}')
+    print(f'\nNỀN α={args.alpha}: mAP@{map_k or "all"} = {100 * base:.3f}')
 
     # ======================================================================
     # A. CHẨN ĐOÁN — hubness có thật không, và có trùng nhóm lớp yếu không
@@ -253,7 +303,9 @@ def main():
     print('\n' + '=' * 70)
     print('A. CHẨN ĐOÁN HUBNESS')
     print('=' * 70)
-    diag = {'baseline_mAP': base, 'nk': args.nk, 'alpha': args.alpha}
+    diag = {'baseline_mAP': base, 'nk': args.nk, 'alpha': args.alpha,
+            'tie_frac': tie_all, 'tie_pairs': pairs_all,
+            'selfcheck_dmax': dmax, 'selfcheck_dmean': dmean}
     print(f'\nĐộ lệch (skewness) của N_{args.nk} — càng cao càng nhiều hub:')
     print(f'{"không gian":<26}{"skew":>9}{"N_k max":>10}{"gallery không bao giờ vào top":>32}')
     print('-' * 77)
@@ -329,6 +381,28 @@ def main():
     # β tính bằng đơn vị độ lệch chuẩn của sim nền (xem standardize) để so được
     # giữa các nhánh. CSLS thô báo cáo riêng ở dưới để không mất phương pháp gốc.
     unit = sim0.std()
+    # -- B0. ĐỐI CHỨNG GIẢ DƯỢC --------------------------------------------
+    # Độ lệch cột NGẪU NHIÊN, cùng độ trải với r̂_G. Nó không mang thông tin
+    # hubness nào, nên mọi thay đổi mAP mà nó tạo ra đều là phá hoà cộng với
+    # nhiễu thuần. Mức tăng của CSLS chỉ có nghĩa khi vượt hẳn mức này.
+    print('\n### B0. Đối chứng — độ lệch cột NGẪU NHIÊN cùng độ trải')
+    g_ = torch.Generator(device='cpu').manual_seed(0)
+    plac = []
+    for i in range(5):
+        off = torch.randn(len(g0), generator=g_).to(dev) * unit
+        for b in args.beta:
+            apv, _ = score(q0, g0, lq, lg, map_k, p_k, col_off=-b * off, chunk=ch)
+            plac.append(float(apv.mean()) - base)
+        del off
+    plac_abs = max(abs(x) for x in plac)
+    print(f'  {len(plac)} lần thử (5 hạt giống × {len(args.beta)} β): '
+          f'thay đổi trong khoảng [{100 * min(plac):+.3f}, {100 * max(plac):+.3f}] pp')
+    print(f'  -> NGƯỠNG GIẢ DƯỢC = {100 * plac_abs:.3f} pp. Mức tăng dưới ngưỡng này')
+    print('     không phân biệt được với phá hoà.')
+    rows.append({'method': 'giả dược (lệch cột ngẫu nhiên)',
+                 'param': f'|max| trên {len(plac)} lần', 'mAP': base + plac_abs,
+                 'delta': plac_abs})
+
     print(f'\n### B1+B3. Trừ hub và Sinkhorn, theo NHÁNH ước lượng mật độ')
     print(f'    β theo đơn vị σ(sim) = {float(unit):.4f}')
     print('    Mỗi nhánh dựng ma trận sim một lần rồi giải phóng — nhiều nhánh KHÔNG')
@@ -423,10 +497,15 @@ def main():
         del qA, rg
 
     # -- tốt nhất + phân rã theo lớp (đây mới là chỗ xác nhận CƠ CHẾ) ------
-    best = max(rows, key=lambda r: r['mAP'])
+    # Dòng giả dược là NGƯỠNG, không phải một phương pháp — loại khỏi phép chọn.
+    best = max((r for r in rows if not r['method'].startswith('giả dược')),
+               key=lambda r: r['mAP'])
     print('\n' + '=' * 70)
     print(f'Tốt nhất: {best["method"]} ({best["param"]}) -> {100 * best["mAP"]:.3f} '
           f'({100 * best["delta"]:+.3f} pp)')
+    verdict = ('VƯỢT giả dược' if best['delta'] > plac_abs else
+               'KHÔNG vượt giả dược — không phân biệt được với phá hoà')
+    print(f'  ngưỡng giả dược {100 * plac_abs:.3f} pp  |  δ_min 0.31 pp  ->  {verdict}')
     key = {'CSLS': 'csls', 'CSLS gốc (thô)': 'csls_raw', 'all-but-top': 'abt',
            'sinkhorn': 'sinkhorn', 'αQE': 'qe', 'αQE + CSLS': 'qe_csls'}.get(best['method'])
     if key in store:
@@ -439,7 +518,7 @@ def main():
             print(f'{c:>5}{100 * m_:>10.2f}{100 * float(d[lq == c].mean()):>+11.3f}')
             weak |= lq == c
         diag.update(best_method=best['method'], best_param=best['param'],
-                    best_delta=best['delta'],
+                    best_delta=best['delta'], placebo_threshold=plac_abs,
                     gain_weak=float(d[weak].mean()), gain_rest=float(d[~weak].mean()))
         print(f'\n  nhóm yếu {100 * float(d[weak].mean()):+.3f} pp   |   '
               f'nhóm còn lại {100 * float(d[~weak].mean()):+.3f} pp')

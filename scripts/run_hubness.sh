@@ -131,19 +131,31 @@ if diags:
 
 # ---- B. các phép sửa ----
 print(f'\n{"="*66}\nB. CÁC PHÉP SỬA\n{"="*66}')
+PLAC = [d['placebo_threshold'] for d in diags if 'placebo_threshold' in d]
+plac = 100 * max(PLAC) if PLAC else 0.0
+TIE = [d['tie_frac'] for d in diags if 'tie_frac' in d]
+if TIE:
+    print(f'hoà điểm trong top-K: {100*st.fmean(TIE):.2f}% truy vấn')
+print(f'ngưỡng giả dược (lệch cột ngẫu nhiên, tệ nhất qua seed): {plac:.3f} pp')
+BAR = max(DMIN, plac)
+print(f'-> phải vượt max(δ_min, giả dược) = {BAR:.3f} pp mới có nghĩa\n')
+
 print(f'{"phương pháp":<22}{"tham số":<26}{"Δ tb":>9}{"std":>8}{"min":>8}{"n":>4}')
 print('-' * 77)
 for (meth, param), v in sorted(per.items(), key=lambda kv: -st.fmean(kv[1])):
+    if meth.startswith('giả dược'):
+        continue                      # là NGƯỠNG, không phải phương pháp
     sd = st.stdev(v) if len(v) > 1 else 0.0
     print(f'{meth:<22}{param:<26}{100*st.fmean(v):>+9.3f}{100*sd:>8.3f}'
           f'{100*min(v):>+8.3f}{len(v):>4}')
 
-(bm, bp), bv = max(per.items(), key=lambda kv: st.fmean(kv[1]))
-ok = len(bv) > 1 and 100 * min(bv) > DMIN
+real = {k: v for k, v in per.items() if not k[0].startswith('giả dược')}
+(bm, bp), bv = max(real.items(), key=lambda kv: st.fmean(kv[1]))
+ok = len(bv) > 1 and 100 * min(bv) > BAR
 print(f'\nTốt nhất: {bm} ({bp}) -> {100*st.fmean(bv):+.3f} pp')
 if len(bv) > 1:
     print(f'  khoảng qua seed [{100*min(bv):+.3f}, {100*max(bv):+.3f}] pp')
-    print(f'  {"ĐẠT" if ok else "CHƯA ĐẠT"}: mọi seed đều {">" if ok else "<="} δ_min = {DMIN} pp')
+    print(f'  {"ĐẠT" if ok else "CHƯA ĐẠT"}: mọi seed đều {">" if ok else "<="} {BAR:.3f} pp')
 
 # ---- C. cơ chế: nhóm yếu có tăng nhiều hơn không ----
 if diags and 'gain_weak' in diags[0]:
@@ -154,7 +166,7 @@ if diags and 'gain_weak' in diags[0]:
     print(f'  nhóm còn lại        : {100*st.fmean(gr):+.3f} pp')
     d = st.fmean(gw) - st.fmean(gr)
     print(f'  chênh               : {100*d:+.3f} pp -> '
-          f'{"CƠ CHẾ ĐƯỢC XÁC NHẬN" if 100*d > DMIN else "KHÔNG xác nhận — chỉ là hậu xử lý chung"}')
+          f'{"CƠ CHẾ ĐƯỢC XÁC NHẬN" if 100*d > BAR else "KHÔNG xác nhận — chỉ là hậu xử lý chung"}')
 PY
 
 cat <<'EOF'
