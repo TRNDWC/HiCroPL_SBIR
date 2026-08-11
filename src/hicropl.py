@@ -299,6 +299,13 @@ class VisualVisualPromptLearner(nn.Module):
     accumulation) is what the actual original repo does, which differs from
     the "Option 1 refactored" design note's pseudocode -- going with the real
     original mechanics here per explicit request.
+
+    Ablation: `disable_exchange=True` (cfg.disable_exchange) skips both
+    mapping blocks in forward() while leaving everything else in this class
+    (k-means layer-0 init, mapper/LKP construction) untouched --
+    cross_prompts_photo/sketch then train as fully independent per-branch
+    prompts, isolating the exchange itself as the only variable between a
+    paired ON/OFF comparison.
     """
 
     def __init__(self, cfg, clip_model_photo, clip_model_sketch, sample_photo_images=None, sample_sketch_images=None):
@@ -308,6 +315,14 @@ class VisualVisualPromptLearner(nn.Module):
         n_ctx = getattr(cfg, 'n_ctx', 4)
         cross_layer = getattr(cfg, 'cross_layer', -1)
         self.cross_layer = self.prompt_depth // 2 if cross_layer < 0 else cross_layer
+        # Clean on/off switch for the exchange itself, for ablation against
+        # the exact same codebase (same k-means init, same prompt_depth,
+        # same LR) -- everything below still gets constructed identically
+        # either way; only forward()
+        # skips the two mapping blocks when disabled, so
+        # cross_prompts_photo/sketch just stay as their own independently
+        # -trained values (matches ducta/baseline's no-exchange design).
+        self.disable_exchange = getattr(cfg, 'disable_exchange', False)
 
         assert self.prompt_depth >= 1
         assert 0 <= self.cross_layer <= self.prompt_depth, "cross_layer must be in [0, prompt_depth]"
@@ -342,15 +357,12 @@ class VisualVisualPromptLearner(nn.Module):
         # actually validated (mAP 0.7799); the all-layers variant's +0.0024
         # was 1-2 epoch noise, not a confirmed gain.
         #
-        # The persistent regularization anchor (regularization_loss, below)
-        # stays PHOTO-ONLY: CLIP's conv1 was never trained on sketch, so
-        # pulling the sketch prompt back toward its own frozen response every
-        # step could bias it toward photo statistics instead of the shape-
-        # abstraction the exchange is meant to preserve. That concern is
-        # about a *persistent* pull throughout training though -- it doesn't
-        # apply to a one-time init value gradient is then free to move away
-        # from, so sketch DOES get the same layer-0-only k-means init as
-        # photo below (own conv1, no anchor/regularization loss).
+        # One-time init value only -- no persistent regularization loss pulls
+        # the prompt back toward this anchor during training (removed; loss
+        # was gradient-negligible at any practical weight, see git history).
+        # Gradient is free to move ctx_photo/ctx_sketch away from this
+        # starting point. Sketch gets the same layer-0-only k-means init as
+        # photo below (own conv1).
         self.has_photo_anchor = sample_photo_images is not None
         if self.has_photo_anchor:
             with torch.no_grad():
@@ -362,7 +374,6 @@ class VisualVisualPromptLearner(nn.Module):
                 patches = patches.permute(0, 2, 1).reshape(-1, patches.shape[1])   # [B*grid*grid, p_dim]
                 photo_centroids = _kmeans(patches.float(), n_ctx).to(dtype)
             photo_vectors = photo_centroids.clone()
-            self.register_buffer("photo_anchor", photo_centroids.clone())
         else:
             photo_vectors = torch.empty(n_ctx, p_dim, dtype=dtype)
             nn.init.normal_(photo_vectors, std=0.02)
@@ -442,7 +453,7 @@ class VisualVisualPromptLearner(nn.Module):
         current_sketch_prompts = list(self.cross_prompts_sketch)
 
         ######## Photo -> Sketch mapping (shallow layers [0, cross_layer)) ########
-        if self.cross_layer > 0:
+        if not self.disable_exchange and self.cross_layer > 0:
             proxy_photo_tokens = []
             for i in range(self.cross_layer):
                 photo_proxy_token = self.attn_pooling_photo_nets[i](
@@ -469,7 +480,7 @@ class VisualVisualPromptLearner(nn.Module):
 
         ######## Sketch -> Photo mapping (deep layers [cross_layer, prompt_depth)) ########
         n_deep = self.prompt_depth - self.cross_layer
-        if n_deep > 0:
+        if not self.disable_exchange and n_deep > 0:
             proxy_sketch_tokens = []
             for i in range(self.cross_layer, self.prompt_depth):
                 sketch_proxy_token = self.attn_pooling_sketch_nets[i - self.cross_layer](
@@ -503,27 +514,6 @@ class VisualVisualPromptLearner(nn.Module):
             cross_prompts_photo_deeper,
             cross_prompts_sketch_deeper,
         )
-
-    def regularization_loss(self):
-        """KgCoOp-style pull-back: keep the photo layer-0 prompt close to its
-        k-means real-feature anchor, so it doesn't drift into something
-        meaningless while chasing the main losses. Photo-only by design (see
-        __init__ note) -- returns 0 if no anchor was computed (no sample
-        images were provided at construction time).
-
-        Uses per-token COSINE distance (mean over n_ctx), not raw MSE: KgCoOp
-        itself regularizes normalized CLIP embeddings, not raw high-dim
-        unnormalized vectors. Plain MSE over a [n_ctx, p_dim]=[4,768]=3072-
-        element tensor averages the loss down to a near-zero scale (~1e-7 for
-        realistic drift), making it utterly negligible next to L1/L4 for any
-        practical lambda_kg -- verified empirically: with MSE, lambda_kg
-        swept 0.1 -> 1 -> 2 produced no measurable change in loss or mAP.
-        Cosine distance is bounded in [0, 2] and scale-invariant to prompt
-        dimensionality, so it stays comparable to the other loss terms.
-        """
-        if not self.has_photo_anchor:
-            return torch.zeros((), device=self.cross_prompts_photo[0].device, dtype=self.cross_prompts_photo[0].dtype)
-        return (1.0 - F.cosine_similarity(self.cross_prompts_photo[0], self.photo_anchor, dim=-1)).mean()
 
 
 class SimpleTextPromptLearner(nn.Module):

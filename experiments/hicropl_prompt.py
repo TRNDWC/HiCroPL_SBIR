@@ -26,6 +26,17 @@ if __name__ == '__main__':
         print(f"[WARN] Overriding backbone {opts.backbone} -> ViT-B/32")
     opts.backbone = 'ViT-B/32'
 
+    # --no_prompt_learning ablation: force a vanilla (non-prompted) CLIP build
+    # -- src/clip/model.py only attaches the HiCroPL prompt-injection blocks
+    # when design_details['trainer'] == 'HiCroPL'/'MaPLe'; any other value
+    # (e.g. 'CoOp') builds the plain VisionTransformer/ResidualAttentionBlock,
+    # so encode_image/encode_text work standalone with no prompt tensors at
+    # all. Must happen BEFORE load_clip_to_cpu(opts) below.
+    if opts.no_prompt_learning:
+        if opts.clip_trainer != 'CoOp':
+            print(f"[CONFIG] --no_prompt_learning: overriding clip_trainer {opts.clip_trainer} -> CoOp (vanilla CLIP, no prompt injection)")
+        opts.clip_trainer = 'CoOp'
+
     def seed_worker(worker_id):
         """Seed numpy và random trong mỗi DataLoader worker (fix np.random.choice non-determinism)."""
         worker_seed = torch.initial_seed() % 2**32
@@ -103,8 +114,9 @@ if __name__ == '__main__':
     classnames = list(train_dataset.all_categories)
 
     # Sample real photo images once, used only for k-means-based photo prompt
-    # initialization / regularization anchor (see VisualVisualPromptLearner).
-    # Photo-only by design -- cheap, done once before training starts.
+    # layer-0 initialization (one-time, see VisualVisualPromptLearner) --
+    # no persistent regularization loss pulls the prompt back toward this
+    # afterward. Photo-only by design -- cheap, done once before training starts.
     # Stratified by category: plain uniform sampling over 57587 images / 104
     # categories left ~30 categories with zero representation in expectation
     # (coupon-collector effect at n=128), so we guarantee >=1 image/category

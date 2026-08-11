@@ -62,6 +62,13 @@ class CustomCLIP(nn.Module):
     def __init__(self, cfg, clip_model, classnames=None, sample_photo_images=None, sample_sketch_images=None):
         super().__init__()
         self.cfg = cfg
+        # Ablation: no visual/text prompt learning at all -- only LayerNorm
+        # trainable (matches ducta/baseline's CLIP-AT recipe). Requires
+        # clip_model to already be a vanilla (non-prompted) build --
+        # experiments/hicropl_prompt.py forces clip_trainer='CoOp' before
+        # load_clip_to_cpu when this flag is set, so `self.clip.encode_image`/
+        # `encode_text` work standalone (no prompt tensors required).
+        self.no_prompt_learning = getattr(cfg, 'no_prompt_learning', False)
 
         if classnames is None:
             classnames = []
@@ -84,29 +91,49 @@ class CustomCLIP(nn.Module):
         # Single shared logit scale (matches ducta/baseline)
         self.logit_scale = self.clip.logit_scale
 
-        # -- Prompt Learners --
-        # Initialize Visual-Visual learner + simple text learners + adapters
-        print("Initializing Visual Prompt Learner (photo + sketch, independent)...")
-        self.visual_visual_learner = VisualVisualPromptLearner(
-            cfg, self.clip, self.clip,
-            sample_photo_images=sample_photo_images, sample_sketch_images=sample_sketch_images
-        )
+        if self.no_prompt_learning:
+            print("[ABLATION] no_prompt_learning=True: skipping ALL prompt learners. "
+                  "Only LayerNorm is trainable; text uses the fixed ctx_init/ctx_init_sketch template.")
+            from src.clip import clip as _clip
+            classnames_clean = [name.replace("_", " ") for name in classnames]
+            ctx_init_photo = getattr(cfg, 'ctx_init', 'a photo of a').replace("_", " ")
+            ctx_init_sketch = getattr(cfg, 'ctx_init_sketch', 'a sketch of a').replace("_", " ")
+            prompts_photo = [f"{ctx_init_photo} {name}." for name in classnames_clean]
+            prompts_sketch = [f"{ctx_init_sketch} {name}." for name in classnames_clean]
+            # Fixed (non-learnable) tokenized templates -- registered as buffers,
+            # not nn.Parameter, so they never appear in configure_optimizers.
+            self.register_buffer(
+                "tokenized_prompts_photo",
+                torch.cat([_clip.tokenize(p) for p in prompts_photo]).to(original_device),
+            )
+            self.register_buffer(
+                "tokenized_prompts_sketch",
+                torch.cat([_clip.tokenize(p) for p in prompts_sketch]).to(original_device),
+            )
+        else:
+            # -- Prompt Learners --
+            # Initialize Visual-Visual learner + simple text learners + adapters
+            print("Initializing Visual Prompt Learner (photo + sketch, independent)...")
+            self.visual_visual_learner = VisualVisualPromptLearner(
+                cfg, self.clip, self.clip,
+                sample_photo_images=sample_photo_images, sample_sketch_images=sample_sketch_images
+            )
 
-        print("Initializing Photo Text Prompt Learner...")
-        cfg_photo = copy.copy(cfg)
-        cfg_photo.ctx_init = getattr(cfg, 'ctx_init', 'a photo of a')
-        self.text_prompt_photo = SimpleTextPromptLearner(cfg_photo, classnames, self.clip)
+            print("Initializing Photo Text Prompt Learner...")
+            cfg_photo = copy.copy(cfg)
+            cfg_photo.ctx_init = getattr(cfg, 'ctx_init', 'a photo of a')
+            self.text_prompt_photo = SimpleTextPromptLearner(cfg_photo, classnames, self.clip)
 
-        print("Initializing Sketch Text Prompt Learner...")
-        cfg_sketch = copy.copy(cfg)
-        cfg_sketch.ctx_init = getattr(cfg, 'ctx_init_sketch', 'a sketch of a')
-        self.text_prompt_sketch = SimpleTextPromptLearner(cfg_sketch, classnames, self.clip)
+            print("Initializing Sketch Text Prompt Learner...")
+            cfg_sketch = copy.copy(cfg)
+            cfg_sketch.ctx_init = getattr(cfg, 'ctx_init_sketch', 'a sketch of a')
+            self.text_prompt_sketch = SimpleTextPromptLearner(cfg_sketch, classnames, self.clip)
 
-        # -- Encoders (both branches wrap the SAME shared backbone) --
-        self.text_encoder_photo = TextEncoder(self.clip)
-        self.text_encoder_sketch = TextEncoder(self.clip)
-        self.visual_encoder_photo = VisualEncoder(self.clip)
-        self.visual_encoder_sketch = VisualEncoder(self.clip)
+            # -- Encoders (both branches wrap the SAME shared backbone) --
+            self.text_encoder_photo = TextEncoder(self.clip)
+            self.text_encoder_sketch = TextEncoder(self.clip)
+            self.visual_encoder_photo = VisualEncoder(self.clip)
+            self.visual_encoder_sketch = VisualEncoder(self.clip)
 
     def normalize_features(self, feat_prenorm):
         """L2-normalize feature tensors."""
@@ -122,23 +149,32 @@ class CustomCLIP(nn.Module):
         else:
             sk_tensor, photo_tensor, neg_tensor, label = x[:4]
 
-        # 1. Call visual-visual learner ONCE (shared by both branches)
-        photo_shallow, sketch_shallow, photo_deeper, sketch_deeper = self.visual_visual_learner()
+        if self.no_prompt_learning:
+            # Plain frozen CLIP forward (only LayerNorm trainable) -- no
+            # prompt tensors of any kind, text uses the fixed template.
+            image_features_photo = self.clip.encode_image(photo_tensor.type(self.dtype))
+            image_features_sketch = self.clip.encode_image(sk_tensor.type(self.dtype))
+            image_features_neg = self.clip.encode_image(neg_tensor.type(self.dtype))
+            text_features_all_photo = self.clip.encode_text(self.tokenized_prompts_photo)
+            text_features_all_sketch = self.clip.encode_text(self.tokenized_prompts_sketch)
+        else:
+            # 1. Call visual-visual learner ONCE (shared by both branches)
+            photo_shallow, sketch_shallow, photo_deeper, sketch_deeper = self.visual_visual_learner()
 
-        # 2. Photo branch: text learner + visual routing
-        # Compute text features for ALL classes (not just batch) - needed for loss computation
-        text_input_photo_all, cross_prompts_text_deeper_photo = self.text_prompt_photo(label=None)  # All classes
-        text_features_all_photo = self.text_encoder_photo(text_input_photo_all, self.text_prompt_photo.tokenized_prompts, cross_prompts_text_deeper_photo)
-        image_features_photo = self.visual_encoder_photo(photo_tensor.type(self.dtype), photo_shallow, photo_deeper)
+            # 2. Photo branch: text learner + visual routing
+            # Compute text features for ALL classes (not just batch) - needed for loss computation
+            text_input_photo_all, cross_prompts_text_deeper_photo = self.text_prompt_photo(label=None)  # All classes
+            text_features_all_photo = self.text_encoder_photo(text_input_photo_all, self.text_prompt_photo.tokenized_prompts, cross_prompts_text_deeper_photo)
+            image_features_photo = self.visual_encoder_photo(photo_tensor.type(self.dtype), photo_shallow, photo_deeper)
 
-        # 3. Sketch branch: text learner + visual routing
-        # Compute text features for ALL classes (not just batch) - needed for loss computation
-        text_input_sketch_all, cross_prompts_text_deeper_sketch = self.text_prompt_sketch(label=None)  # All classes
-        text_features_all_sketch = self.text_encoder_sketch(text_input_sketch_all, self.text_prompt_sketch.tokenized_prompts, cross_prompts_text_deeper_sketch)
-        image_features_sketch = self.visual_encoder_sketch(sk_tensor.type(self.dtype), sketch_shallow, sketch_deeper)
+            # 3. Sketch branch: text learner + visual routing
+            # Compute text features for ALL classes (not just batch) - needed for loss computation
+            text_input_sketch_all, cross_prompts_text_deeper_sketch = self.text_prompt_sketch(label=None)  # All classes
+            text_features_all_sketch = self.text_encoder_sketch(text_input_sketch_all, self.text_prompt_sketch.tokenized_prompts, cross_prompts_text_deeper_sketch)
+            image_features_sketch = self.visual_encoder_sketch(sk_tensor.type(self.dtype), sketch_shallow, sketch_deeper)
 
-        # 4. Negative branch (uses photo encoder + photo visual prompts)
-        image_features_neg = self.visual_encoder_photo(neg_tensor.type(self.dtype), photo_shallow, photo_deeper)
+            # 4. Negative branch (uses photo encoder + photo visual prompts)
+            image_features_neg = self.visual_encoder_photo(neg_tensor.type(self.dtype), photo_shallow, photo_deeper)
 
         # 5. Normalize features
         photo_feat = image_features_photo / image_features_photo.norm(dim=-1, keepdim=True)
@@ -152,15 +188,11 @@ class CustomCLIP(nn.Module):
         logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
         logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
 
-        # 7. Photo-only KgCoOp-style regularization (see VisualVisualPromptLearner.regularization_loss)
-        loss_kg_photo = self.visual_visual_learner.regularization_loss()
-
         return (
             photo_feat, logits_photo,
             sketch_feat, logits_sketch,
             neg_feat, label,
             text_feat_photo, text_feat_sketch,
-            loss_kg_photo,
         )
 
 
@@ -237,9 +269,12 @@ class HiCroPL_SBIR(pl.LightningModule):
         prompt_params = []
         # Collect from shared visual learner + per-branch text learners
         # These include all their internal params (CrossPromptAttention, AttentionPooling, etc.)
-        add_unique_params(self.model.visual_visual_learner.parameters(), prompt_params, seen_ids)
-        add_unique_params(self.model.text_prompt_photo.parameters(), prompt_params, seen_ids)
-        add_unique_params(self.model.text_prompt_sketch.parameters(), prompt_params, seen_ids)
+        # None of these submodules exist when no_prompt_learning=True (only
+        # LayerNorm is trainable in that mode) -- guarded accordingly.
+        if not self.model.no_prompt_learning:
+            add_unique_params(self.model.visual_visual_learner.parameters(), prompt_params, seen_ids)
+            add_unique_params(self.model.text_prompt_photo.parameters(), prompt_params, seen_ids)
+            add_unique_params(self.model.text_prompt_sketch.parameters(), prompt_params, seen_ids)
 
         ln_params = []
         # Only collect LayerNorms from clip encoders (NOT from learners, already included above)
@@ -266,7 +301,9 @@ class HiCroPL_SBIR(pl.LightningModule):
         prompt_lr = getattr(self.cfg, 'prompt_lr', 1e-5)
         clip_ln_lr = getattr(self.cfg, 'clip_LN_lr', 1e-5)
 
-        param_groups = [{'params': prompt_params, 'lr': prompt_lr}]
+        param_groups = []
+        if prompt_params:
+            param_groups.append({'params': prompt_params, 'lr': prompt_lr})
         if non_prompt_params:
             param_groups.append({'params': non_prompt_params, 'lr': clip_ln_lr})
 
@@ -275,12 +312,17 @@ class HiCroPL_SBIR(pl.LightningModule):
 
     def on_after_backward(self):
         """Diagnostic: does gradient actually reach ctx_photo (layer-0 photo
-        prompt)? If loss_kg_photo_raw prints ~0.000000 despite training, this
-        tells us whether that's because the parameter never moves (grad ~0 --
-        real graph-disconnection bug) or because it does move but the angular
+        prompt)? If grad_norm prints ~0.000000 despite training, this tells us
+        whether that's because the parameter never moves (grad ~0 -- real
+        graph-disconnection bug) or because it does move but the angular
         drift relative to its own norm is just small at this lr/step count
         (grad non-zero, expected -- not a bug).
+
+        No-op when no_prompt_learning=True -- ctx_photo doesn't exist in that
+        mode (no prompts at all).
         """
+        if self.model.no_prompt_learning:
+            return
         ctx_photo = self.model.visual_visual_learner.ctx_photo
         grad_norm = ctx_photo.grad.norm().item() if ctx_photo.grad is not None else 0.0
         param_norm = ctx_photo.detach().norm().item()
@@ -295,22 +337,14 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
         self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False, logger=False)
 
-        # Raw (unweighted by lambda_kg) regularization value -- logged separately
-        # so we can see the actual drift magnitude directly, instead of
-        # inferring it indirectly through the aggregate train_loss (which at
-        # small lambda_kg/drift values hides the signal in the noise floor).
-        # on_step=True mirrors train_loss's config exactly (that one is known
-        # to reliably show up in callback_metrics at validation-epoch-end;
-        # an on_epoch-only variant was tried first and didn't). prog_bar=False
-        # keeps it off the live progress bar -- it's printed once per epoch in
-        # _on_validation_epoch_end_category instead, so no per-step spam.
-        loss_kg_photo_raw = features[-1]
-        self.log('loss_kg_photo_raw', loss_kg_photo_raw, on_step=True, on_epoch=True, prog_bar=False, logger=True)
-
         return loss
 
     def extract_eval_features(self, tensor, modality):
         """Extract visual features (prompted only, no distill mixing)."""
+        if self.model.no_prompt_learning:
+            feat = self.model.clip.encode_image(tensor.type(self.model.dtype))
+            return feat / feat.norm(dim=-1, keepdim=True)
+
         # Call visual learner once, cache outputs
         photo_shallow, sketch_shallow, photo_deeper, sketch_deeper = self.model.visual_visual_learner()
 
@@ -414,12 +448,6 @@ class HiCroPL_SBIR(pl.LightningModule):
         train_loss = self.trainer.callback_metrics.get("train_loss", None)
         if train_loss is not None:
             self.print(f"Train loss (epoch avg): {train_loss.item():.6f}")
-
-        loss_kg_photo_raw = self.trainer.callback_metrics.get("loss_kg_photo_raw", None)
-        if loss_kg_photo_raw is not None:
-            self.print(f"loss_kg_photo_raw (epoch avg, unweighted by lambda_kg): {loss_kg_photo_raw.item():.6f}")
-        else:
-            self.print(f"[DEBUG] loss_kg_photo_raw not in callback_metrics. Available keys: {list(self.trainer.callback_metrics.keys())}")
 
         grad_norm = self.trainer.callback_metrics.get("ctx_photo_grad_norm", None)
         param_norm = self.trainer.callback_metrics.get("ctx_photo_param_norm", None)
