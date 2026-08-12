@@ -10,6 +10,7 @@ from src.hicropl import (
     VisualEncoder,
     VisualVisualPromptLearner,
     SimpleTextPromptLearner,
+    CrossModalPromptLearner,
 )
 
 
@@ -69,6 +70,13 @@ class CustomCLIP(nn.Module):
         # load_clip_to_cpu when this flag is set, so `self.clip.encode_image`/
         # `encode_text` work standalone (no prompt tensors required).
         self.no_prompt_learning = getattr(cfg, 'no_prompt_learning', False)
+        # Alternative architecture: per-branch text<->visual exchange (see
+        # CrossModalPromptLearner) instead of the default photo<->sketch
+        # VisualVisualPromptLearner. Mutually exclusive with the default path
+        # -- --disable_exchange has NO effect here (it only gates the
+        # photo<->sketch mapping blocks inside VisualVisualPromptLearner,
+        # which isn't constructed at all when this is set).
+        self.use_text_visual_exchange = getattr(cfg, 'use_text_visual_exchange', False)
 
         if classnames is None:
             classnames = []
@@ -110,6 +118,33 @@ class CustomCLIP(nn.Module):
                 "tokenized_prompts_sketch",
                 torch.cat([_clip.tokenize(p) for p in prompts_sketch]).to(original_device),
             )
+        elif self.use_text_visual_exchange:
+            # Per-branch bidirectional text<->visual exchange -- ONLY text and
+            # visual of the SAME domain ever interact. Two fully independent
+            # instances (separate weights, no shared modules, no coupling):
+            # text_visual_learner_photo only ever sees photo text + photo
+            # visual; text_visual_learner_sketch only ever sees sketch text +
+            # sketch visual. Neither instance references the other, and
+            # visual_visual_learner/text_prompt_photo/text_prompt_sketch are
+            # NOT constructed in this branch at all.
+            print("Initializing Photo Text<->Visual Exchange Learner...")
+            cfg_photo = copy.copy(cfg)
+            cfg_photo.ctx_init = getattr(cfg, 'ctx_init', 'a photo of a')
+            self.text_visual_learner_photo = CrossModalPromptLearner(
+                cfg_photo, classnames, self.clip, sample_images=sample_photo_images
+            )
+
+            print("Initializing Sketch Text<->Visual Exchange Learner...")
+            cfg_sketch = copy.copy(cfg)
+            cfg_sketch.ctx_init = getattr(cfg, 'ctx_init_sketch', 'a sketch of a')
+            self.text_visual_learner_sketch = CrossModalPromptLearner(
+                cfg_sketch, classnames, self.clip, sample_images=sample_sketch_images
+            )
+
+            self.text_encoder_photo = TextEncoder(self.clip)
+            self.text_encoder_sketch = TextEncoder(self.clip)
+            self.visual_encoder_photo = VisualEncoder(self.clip)
+            self.visual_encoder_sketch = VisualEncoder(self.clip)
         else:
             # -- Prompt Learners --
             # Initialize Visual-Visual learner + simple text learners + adapters
@@ -157,6 +192,19 @@ class CustomCLIP(nn.Module):
             image_features_neg = self.clip.encode_image(neg_tensor.type(self.dtype))
             text_features_all_photo = self.clip.encode_text(self.tokenized_prompts_photo)
             text_features_all_sketch = self.clip.encode_text(self.tokenized_prompts_sketch)
+        elif self.use_text_visual_exchange:
+            # Each branch's learner performs its OWN bidirectional text<->visual
+            # exchange -- no coupling between the two learners/branches.
+            text_input_photo_all, vis_shallow_photo, cross_prompts_text_deeper_photo, vis_deeper_photo = self.text_visual_learner_photo()
+            text_features_all_photo = self.text_encoder_photo(text_input_photo_all, self.text_visual_learner_photo.tokenized_prompts, cross_prompts_text_deeper_photo)
+            image_features_photo = self.visual_encoder_photo(photo_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
+
+            text_input_sketch_all, vis_shallow_sketch, cross_prompts_text_deeper_sketch, vis_deeper_sketch = self.text_visual_learner_sketch()
+            text_features_all_sketch = self.text_encoder_sketch(text_input_sketch_all, self.text_visual_learner_sketch.tokenized_prompts, cross_prompts_text_deeper_sketch)
+            image_features_sketch = self.visual_encoder_sketch(sk_tensor.type(self.dtype), vis_shallow_sketch, vis_deeper_sketch)
+
+            # Negative branch (uses photo encoder + photo visual prompts)
+            image_features_neg = self.visual_encoder_photo(neg_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
         else:
             # 1. Call visual-visual learner ONCE (shared by both branches)
             photo_shallow, sketch_shallow, photo_deeper, sketch_deeper = self.visual_visual_learner()
@@ -226,23 +274,34 @@ class HiCroPL_SBIR(pl.LightningModule):
         - `tokens_text_photo`
         - `tokens_text_sketch`
         """
-        try:
-            vv = self.model.visual_visual_learner
-            # visual tokens: number of prompt vectors (prompt_depth * n_ctx)
-            tokens_visual_photo = len(vv.cross_prompts_photo) * vv.n_ctx
-            tokens_visual_sketch = len(vv.cross_prompts_sketch) * vv.n_ctx
-        except Exception:
-            tokens_visual_photo = 0
-            tokens_visual_sketch = 0
+        if self.model.use_text_visual_exchange:
+            try:
+                lp = self.model.text_visual_learner_photo
+                ls = self.model.text_visual_learner_sketch
+                tokens_visual_photo = len(lp.cross_prompts_visual) * lp.n_ctx
+                tokens_visual_sketch = len(ls.cross_prompts_visual) * ls.n_ctx
+                tokens_text_photo = len(lp.cross_prompts_text) * lp.n_ctx
+                tokens_text_sketch = len(ls.cross_prompts_text) * ls.n_ctx
+            except Exception:
+                tokens_visual_photo = tokens_visual_sketch = tokens_text_photo = tokens_text_sketch = 0
+        else:
+            try:
+                vv = self.model.visual_visual_learner
+                # visual tokens: number of prompt vectors (prompt_depth * n_ctx)
+                tokens_visual_photo = len(vv.cross_prompts_photo) * vv.n_ctx
+                tokens_visual_sketch = len(vv.cross_prompts_sketch) * vv.n_ctx
+            except Exception:
+                tokens_visual_photo = 0
+                tokens_visual_sketch = 0
 
-        try:
-            tp = self.model.text_prompt_photo
-            ts = self.model.text_prompt_sketch
-            tokens_text_photo = len(tp.cross_prompts_text) * tp.cross_prompts_text[0].shape[0]
-            tokens_text_sketch = len(ts.cross_prompts_text) * ts.cross_prompts_text[0].shape[0]
-        except Exception:
-            tokens_text_photo = 0
-            tokens_text_sketch = 0
+            try:
+                tp = self.model.text_prompt_photo
+                ts = self.model.text_prompt_sketch
+                tokens_text_photo = len(tp.cross_prompts_text) * tp.cross_prompts_text[0].shape[0]
+                tokens_text_sketch = len(ts.cross_prompts_text) * ts.cross_prompts_text[0].shape[0]
+            except Exception:
+                tokens_text_photo = 0
+                tokens_text_sketch = 0
 
         # Log to Lightning logger and print for immediate visibility
         self.print(f"Learnable tokens - visual/photo: {tokens_visual_photo}, visual/sketch: {tokens_visual_sketch}, text/photo: {tokens_text_photo}, text/sketch: {tokens_text_sketch}")
@@ -267,20 +326,24 @@ class HiCroPL_SBIR(pl.LightningModule):
         seen_ids = set()
 
         prompt_params = []
-        # Collect from shared visual learner + per-branch text learners
+        # Collect from whichever learner set is active (mutually exclusive).
         # These include all their internal params (CrossPromptAttention, AttentionPooling, etc.)
-        # None of these submodules exist when no_prompt_learning=True (only
-        # LayerNorm is trainable in that mode) -- guarded accordingly.
-        if not self.model.no_prompt_learning:
+        # No learner submodules exist when no_prompt_learning=True (only
+        # LayerNorm is trainable in that mode).
+        if self.model.no_prompt_learning:
+            learner_modules = set()
+        elif self.model.use_text_visual_exchange:
+            add_unique_params(self.model.text_visual_learner_photo.parameters(), prompt_params, seen_ids)
+            add_unique_params(self.model.text_visual_learner_sketch.parameters(), prompt_params, seen_ids)
+            learner_modules = {'text_visual_learner_photo', 'text_visual_learner_sketch'}
+        else:
             add_unique_params(self.model.visual_visual_learner.parameters(), prompt_params, seen_ids)
             add_unique_params(self.model.text_prompt_photo.parameters(), prompt_params, seen_ids)
             add_unique_params(self.model.text_prompt_sketch.parameters(), prompt_params, seen_ids)
+            learner_modules = {'visual_visual_learner', 'text_prompt_photo', 'text_prompt_sketch'}
 
         ln_params = []
         # Only collect LayerNorms from clip encoders (NOT from learners, already included above)
-        learner_modules = {
-            'visual_visual_learner', 'text_prompt_photo', 'text_prompt_sketch'
-        }
         for name, module in self.model.named_modules():
             if isinstance(module, torch.nn.LayerNorm):
                 # Skip if inside a learner module (already included with learner params)
@@ -319,11 +382,16 @@ class HiCroPL_SBIR(pl.LightningModule):
         (grad non-zero, expected -- not a bug).
 
         No-op when no_prompt_learning=True -- ctx_photo doesn't exist in that
-        mode (no prompts at all).
+        mode (no prompts at all). When use_text_visual_exchange=True, checks
+        the photo branch's own layer-0 text ctx instead (its closest analogue
+        -- visual_visual_learner.ctx_photo doesn't exist in that mode either).
         """
         if self.model.no_prompt_learning:
             return
-        ctx_photo = self.model.visual_visual_learner.ctx_photo
+        if self.model.use_text_visual_exchange:
+            ctx_photo = self.model.text_visual_learner_photo.ctx
+        else:
+            ctx_photo = self.model.visual_visual_learner.ctx_photo
         grad_norm = ctx_photo.grad.norm().item() if ctx_photo.grad is not None else 0.0
         param_norm = ctx_photo.detach().norm().item()
         self.log('ctx_photo_grad_norm', grad_norm, on_step=True, on_epoch=True, prog_bar=False, logger=True)
@@ -343,6 +411,19 @@ class HiCroPL_SBIR(pl.LightningModule):
         """Extract visual features (prompted only, no distill mixing)."""
         if self.model.no_prompt_learning:
             feat = self.model.clip.encode_image(tensor.type(self.model.dtype))
+            return feat / feat.norm(dim=-1, keepdim=True)
+
+        if self.model.use_text_visual_exchange:
+            learner = (
+                self.model.text_visual_learner_photo if modality == 'photo'
+                else self.model.text_visual_learner_sketch
+            )
+            visual_encoder = (
+                self.model.visual_encoder_photo if modality == 'photo'
+                else self.model.visual_encoder_sketch
+            )
+            _, vis_shallow, _, vis_deeper = learner()
+            feat = visual_encoder(tensor.type(self.model.dtype), vis_shallow, vis_deeper)
             return feat / feat.norm(dim=-1, keepdim=True)
 
         # Call visual learner once, cache outputs
