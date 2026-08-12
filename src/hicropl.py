@@ -473,11 +473,19 @@ class VisualVisualPromptLearner(nn.Module):
         ######## sketch prompt initialization end ########
 
         ######## Knowledge mapper networks (orig: text2visual_net / visual2text_net) ########
+        # LKP (attn_pooling_*) is a SINGLE instance shared across every layer
+        # in its direction -- NOT `_get_clones`-ed per layer. Per the original
+        # LKP design, the layer-specific part is the proxy TOKEN (a distinct
+        # learnable query per layer, `photo_proxy_token[i]`/`sketch_proxy_token[i]`),
+        # not the pooling network itself; the network is the same
+        # cross-attention operator applied with a different query each layer.
+        # Cuts trainable params from ~46.2M to ~22.5M (LKP was 61% of the
+        # total at cross_layer=6/prompt_depth=12, entirely from per-layer
+        # cloning -- see param-decomposition audit).
         if self.cross_layer > 0:
             self.photo2sketch_net = CrossPromptAttention(hidden_size=s_dim, encoder_hidden_size=p_dim, num_attention_heads=8)
 
-            attn_pooling_photo = AttentionPooling(hidden_size=p_dim, num_attention_heads=8)
-            self.attn_pooling_photo_nets = _get_clones(attn_pooling_photo, self.cross_layer)
+            self.attn_pooling_photo_net = AttentionPooling(hidden_size=p_dim, num_attention_heads=8)
 
             photo_proxy_token = torch.randn(1, p_dim, dtype=dtype)
             self.photo_proxy_token = nn.ParameterList(
@@ -488,8 +496,7 @@ class VisualVisualPromptLearner(nn.Module):
         if n_deep > 0:
             self.sketch2photo_net = CrossPromptAttention(hidden_size=p_dim, encoder_hidden_size=s_dim, num_attention_heads=8)
 
-            attn_pooling_sketch = AttentionPooling(hidden_size=s_dim, num_attention_heads=8)
-            self.attn_pooling_sketch_nets = _get_clones(attn_pooling_sketch, n_deep)
+            self.attn_pooling_sketch_net = AttentionPooling(hidden_size=s_dim, num_attention_heads=8)
 
             sketch_proxy_token = torch.randn(1, s_dim, dtype=dtype)
             self.sketch_proxy_token = nn.ParameterList(
@@ -508,7 +515,7 @@ class VisualVisualPromptLearner(nn.Module):
         if not self.disable_exchange and self.cross_layer > 0:
             proxy_photo_tokens = []
             for i in range(self.cross_layer):
-                photo_proxy_token = self.attn_pooling_photo_nets[i](
+                photo_proxy_token = self.attn_pooling_photo_net(
                     token_query=self.photo_proxy_token[i],
                     sequence_key=current_photo_prompts[i],
                     sequence_value=current_photo_prompts[i],
@@ -535,7 +542,7 @@ class VisualVisualPromptLearner(nn.Module):
         if not self.disable_exchange and n_deep > 0:
             proxy_sketch_tokens = []
             for i in range(self.cross_layer, self.prompt_depth):
-                sketch_proxy_token = self.attn_pooling_sketch_nets[i - self.cross_layer](
+                sketch_proxy_token = self.attn_pooling_sketch_net(
                     token_query=self.sketch_proxy_token[i - self.cross_layer],
                     sequence_key=current_sketch_prompts[i],
                     sequence_value=current_sketch_prompts[i],
