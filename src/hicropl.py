@@ -375,6 +375,18 @@ class VisualVisualPromptLearner(nn.Module):
         # cross_prompts_photo/sketch just stay as their own independently
         # -trained values (matches ducta/baseline's no-exchange design).
         self.disable_exchange = getattr(cfg, 'disable_exchange', False)
+        # Branch A: cut the gradient path from the sketch-side loss back into
+        # ctx_photo/attn_pooling_photo through the Mapper, without changing
+        # any numeric value (P~_photo.detach() as k/v). Isolates whether that
+        # gradient feedback matters for the photo branch.
+        self.exchange_detach_source = getattr(cfg, 'exchange_detach_source', False)
+        # Branch B: replace P~_photo itself (the k/v fed to photo2sketch_net)
+        # with an independent learned nn.Parameter unrelated to photo -- see
+        # self.free_source below. Isolates whether photo-derived content is
+        # what matters, or any learnable source into the Mapper suffices.
+        self.exchange_free_source = getattr(cfg, 'exchange_free_source', False)
+        assert not (self.exchange_detach_source and self.exchange_free_source), \
+            "--exchange_detach_source and --exchange_free_source are mutually exclusive"
 
         assert self.prompt_depth >= 1
         assert 0 <= self.cross_layer <= self.prompt_depth, "cross_layer must be in [0, prompt_depth]"
@@ -484,6 +496,14 @@ class VisualVisualPromptLearner(nn.Module):
                 [nn.Parameter(photo_proxy_token.clone()) for _ in range(self.cross_layer)]
             )
 
+            if self.exchange_free_source:
+                # Same shape as proxy_photo_prompts (P~_photo) after torch.cat:
+                # (cross_layer, p_dim). Independent of ctx_photo/attn_pooling_photo
+                # -- Mapper param count (photo2sketch_net) is unaffected.
+                free_source = torch.empty(self.cross_layer, p_dim, dtype=dtype)
+                nn.init.normal_(free_source, std=0.02)
+                self.free_source = nn.Parameter(free_source)
+
         n_deep = self.prompt_depth - self.cross_layer
         if n_deep > 0:
             self.sketch2photo_net = CrossPromptAttention(hidden_size=p_dim, encoder_hidden_size=s_dim, num_attention_heads=8)
@@ -506,21 +526,30 @@ class VisualVisualPromptLearner(nn.Module):
 
         ######## Photo -> Sketch mapping (shallow layers [0, cross_layer)) ########
         if not self.disable_exchange and self.cross_layer > 0:
-            proxy_photo_tokens = []
-            for i in range(self.cross_layer):
-                photo_proxy_token = self.attn_pooling_photo_nets[i](
-                    token_query=self.photo_proxy_token[i],
-                    sequence_key=current_photo_prompts[i],
-                    sequence_value=current_photo_prompts[i],
-                )
-                proxy_photo_tokens.append(photo_proxy_token)
-            proxy_photo_prompts = torch.cat(proxy_photo_tokens, dim=0)
+            if self.exchange_free_source:
+                # Branch B: source k/v is an independent learned parameter,
+                # unrelated to photo -- attn_pooling_photo is skipped entirely
+                # (its output would be discarded anyway).
+                proxy_photo_flat = self.free_source
+            else:
+                proxy_photo_tokens = []
+                for i in range(self.cross_layer):
+                    photo_proxy_token = self.attn_pooling_photo_nets[i](
+                        token_query=self.photo_proxy_token[i],
+                        sequence_key=current_photo_prompts[i],
+                        sequence_value=current_photo_prompts[i],
+                    )
+                    proxy_photo_tokens.append(photo_proxy_token)
+                proxy_photo_prompts = torch.cat(proxy_photo_tokens, dim=0)
+                proxy_photo_flat = proxy_photo_prompts.view(-1, proxy_photo_prompts.shape[-1])
+                if self.exchange_detach_source:
+                    # Branch A: same numeric value, gradient cut before the Mapper.
+                    proxy_photo_flat = proxy_photo_flat.detach()
 
             sketch_prompts_range = torch.cat(
                 [current_sketch_prompts[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0
             )
             sketch_prompts_flat = sketch_prompts_range.view(-1, sketch_prompts_range.shape[-1])
-            proxy_photo_flat = proxy_photo_prompts.view(-1, proxy_photo_prompts.shape[-1])
 
             updated_sketch_prompts = self.photo2sketch_net(sketch_prompts_flat, proxy_photo_flat, proxy_photo_flat)
             updated_sketch_prompts = updated_sketch_prompts.view(
