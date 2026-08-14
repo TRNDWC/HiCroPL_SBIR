@@ -402,13 +402,23 @@ class VisualVisualPromptLearner(nn.Module):
         # layer's own proxy p~^i instead of the full concatenated proxy set.
         # Orthogonal to the exchange_* flags above -- freely combinable.
         self.mapper_single_scale = getattr(cfg, 'mapper_single_scale', False)
-        # Capacity-matched no-exchange control: reuses photo2sketch_net as a
-        # pure per-layer self-attention refine on cross_prompts_sketch[i]
-        # (q=k=v=cross_prompts_sketch[i]) -- no LKP, no proxy, no photo
-        # tensor at all. Only meaningful when the exchange itself is off.
+        # Capacity-matched no-exchange control (Run C): reuses photo2sketch_net
+        # as a per-layer self-attention refine on cross_prompts_sketch[i] --
+        # q=sk (full gradient), k=v=sk.detach() (no LKP, no proxy, no photo
+        # tensor, no normalization on k/v, k/v detached). Only meaningful
+        # when the exchange itself is off.
         self.sketch_self_refine = getattr(cfg, 'sketch_self_refine', False)
         assert not self.sketch_self_refine or self.disable_exchange, \
             "--sketch_self_refine requires --disable_exchange"
+        # Run D: same as Run C but k/v = LayerNorm(sk).detach() -- adds
+        # normalization on the k/v side only, still detached, still no
+        # compression (no LKP/proxy). Mutually exclusive with Run C (both
+        # reuse the same forward slot -- pick exactly one self-refine scheme).
+        self.sketch_self_refine_ln = getattr(cfg, 'sketch_self_refine_ln', False)
+        assert not self.sketch_self_refine_ln or self.disable_exchange, \
+            "--sketch_self_refine_ln requires --disable_exchange"
+        assert not (self.sketch_self_refine and self.sketch_self_refine_ln), \
+            "--sketch_self_refine and --sketch_self_refine_ln are mutually exclusive"
 
         assert self.prompt_depth >= 1
         assert 0 <= self.cross_layer <= self.prompt_depth, "cross_layer must be in [0, prompt_depth]"
@@ -526,6 +536,11 @@ class VisualVisualPromptLearner(nn.Module):
                 nn.init.normal_(free_source, std=0.02)
                 self.free_source = nn.Parameter(free_source)
 
+            if self.sketch_self_refine_ln:
+                # Run D: LayerNorm applied to the k/v side only, standard init
+                # (weight=1, bias=0 -- nn.LayerNorm default, no custom init).
+                self.ln_selfrefine = nn.LayerNorm(s_dim)
+
         n_deep = self.prompt_depth - self.cross_layer
         if n_deep > 0:
             self.sketch2photo_net = CrossPromptAttention(hidden_size=p_dim, encoder_hidden_size=s_dim, num_attention_heads=8)
@@ -597,14 +612,22 @@ class VisualVisualPromptLearner(nn.Module):
             for i in range(self.cross_layer):
                 current_sketch_prompts[i] = updated_sketch_prompts[i]
         elif self.sketch_self_refine and self.cross_layer > 0:
-            # Capacity-matched no-exchange control: photo2sketch_net as a
-            # pure per-layer self-attention refine, q=k=v=cross_prompts_sketch[i].
-            # No LKP, no proxy, nothing from photo -- but photo2sketch_net now
-            # sits in the forward graph and receives real gradient, unlike
+            # Run C: photo2sketch_net as a per-layer self-attention refine,
+            # q=sk (undetached), k=v=sk.detach() -- no LKP, no proxy, no
+            # normalization, nothing from photo. photo2sketch_net still sits
+            # in the forward graph and receives real gradient (via q), unlike
             # plain --disable_exchange where it is idle/dead weight.
             for i in range(self.cross_layer):
                 sk = current_sketch_prompts[i]
-                current_sketch_prompts[i] = self.photo2sketch_net(sk, sk, sk)
+                current_sketch_prompts[i] = self.photo2sketch_net(sk, sk.detach(), sk.detach())
+        elif self.sketch_self_refine_ln and self.cross_layer > 0:
+            # Run D: same as Run C, but k/v = LayerNorm(sk).detach() --
+            # normalization added on the k/v side only, still detached, still
+            # no compression (no LKP/proxy).
+            for i in range(self.cross_layer):
+                sk = current_sketch_prompts[i]
+                sk_kv = self.ln_selfrefine(sk).detach()
+                current_sketch_prompts[i] = self.photo2sketch_net(sk, sk_kv, sk_kv)
         ######## Photo -> Sketch end ########
 
         ######## Sketch -> Photo mapping (deep layers [cross_layer, prompt_depth)) ########
