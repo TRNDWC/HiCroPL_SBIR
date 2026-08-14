@@ -385,8 +385,18 @@ class VisualVisualPromptLearner(nn.Module):
         # self.free_source below. Isolates whether photo-derived content is
         # what matters, or any learnable source into the Mapper suffices.
         self.exchange_free_source = getattr(cfg, 'exchange_free_source', False)
-        assert not (self.exchange_detach_source and self.exchange_free_source), \
-            "--exchange_detach_source and --exchange_free_source are mutually exclusive"
+        # Control experiment: same pipeline as --exchange_detach_source
+        # (same LKP module attn_pooling_photo_nets[i], same Mapper, same
+        # detach before the Mapper) but the tensor fed into the LKP is
+        # cross_prompts_sketch[i] instead of cross_prompts_photo[i] -- no
+        # photo tensor participates in the Photo->Sketch block at all.
+        # Isolates whether the block's benefit comes from the source being
+        # PHOTO specifically, vs. any same-shape (detached) source flowing
+        # through this exact pipeline. Adds/removes no parameters relative
+        # to --exchange_detach_source.
+        self.exchange_self_source = getattr(cfg, 'exchange_self_source', False)
+        assert sum([self.exchange_detach_source, self.exchange_free_source, self.exchange_self_source]) <= 1, \
+            "--exchange_detach_source, --exchange_free_source, and --exchange_self_source are mutually exclusive"
 
         assert self.prompt_depth >= 1
         assert 0 <= self.cross_layer <= self.prompt_depth, "cross_layer must be in [0, prompt_depth]"
@@ -532,18 +542,24 @@ class VisualVisualPromptLearner(nn.Module):
                 # (its output would be discarded anyway).
                 proxy_photo_flat = self.free_source
             else:
+                # Control experiment: same LKP module (attn_pooling_photo_nets),
+                # same photo_proxy_token query, but the sequence fed in is
+                # cross_prompts_sketch[i] instead of cross_prompts_photo[i] --
+                # no photo tensor enters this block at all when self_source is on.
+                pooling_source = current_sketch_prompts if self.exchange_self_source else current_photo_prompts
                 proxy_photo_tokens = []
                 for i in range(self.cross_layer):
                     photo_proxy_token = self.attn_pooling_photo_nets[i](
                         token_query=self.photo_proxy_token[i],
-                        sequence_key=current_photo_prompts[i],
-                        sequence_value=current_photo_prompts[i],
+                        sequence_key=pooling_source[i],
+                        sequence_value=pooling_source[i],
                     )
                     proxy_photo_tokens.append(photo_proxy_token)
                 proxy_photo_prompts = torch.cat(proxy_photo_tokens, dim=0)
                 proxy_photo_flat = proxy_photo_prompts.view(-1, proxy_photo_prompts.shape[-1])
-                if self.exchange_detach_source:
-                    # Branch A: same numeric value, gradient cut before the Mapper.
+                if self.exchange_detach_source or self.exchange_self_source:
+                    # Branch A (or self_source control): same numeric value,
+                    # gradient cut before the Mapper.
                     proxy_photo_flat = proxy_photo_flat.detach()
 
             sketch_prompts_range = torch.cat(
