@@ -58,6 +58,35 @@ def _kmeans(x, k, n_iters=25):
         centroids = new_centroids
     return centroids
 
+
+def _make_proxy_tokens(proxy_init, n_proxy, dim, dtype, source_layers):
+    """Build one nn.Parameter [n_proxy, dim] per entry in source_layers -- the
+    LKP query tokens (photo_proxy_token / sketch_proxy_token).
+
+    'randn' replicates the original code path exactly: ONE torch.randn(1, dim)
+    draw, cloned across layers (not one independent draw per layer) -- so
+    --proxy_init randn --n_proxy 1 (the default) is bit-for-bit identical to
+    the pre-ablation code under the same seed. 'small' and 'mean' draw/derive
+    independently per layer, matching how every other std=0.02 tensor in this
+    file is initialized (see cross_prompts_photo[1:]/cross_prompts_sketch[1:]).
+    """
+    num_layers = len(source_layers)
+    if proxy_init == 'randn':
+        base = torch.randn(n_proxy, dim, dtype=dtype)
+        return nn.ParameterList([nn.Parameter(base.clone()) for _ in range(num_layers)])
+    tokens = []
+    for src in source_layers:
+        if proxy_init == 'small':
+            t = torch.empty(n_proxy, dim, dtype=dtype)
+            nn.init.normal_(t, std=0.02)
+        elif proxy_init == 'mean':
+            mean_vec = src.mean(dim=0, keepdim=True).detach()  # [1, dim], this layer's own cross_prompts
+            t = mean_vec.expand(n_proxy, dim).clone()  # independent storage, all n_proxy rows equal at init
+        else:
+            raise ValueError(f"Unknown --proxy_init: {proxy_init!r}")
+        tokens.append(nn.Parameter(t))
+    return nn.ParameterList(tokens)
+
 class TextEncoder(nn.Module):
     # GIỮ NGUYÊN 100% TỪ BẢN GỐC HICROPL
     def __init__(self, clip_model):
@@ -419,6 +448,19 @@ class VisualVisualPromptLearner(nn.Module):
             "--sketch_self_refine_ln requires --disable_exchange"
         assert not (self.sketch_self_refine and self.sketch_self_refine_ln), \
             "--sketch_self_refine and --sketch_self_refine_ln are mutually exclusive"
+        # L1: init scheme for photo_proxy_token/sketch_proxy_token (the LKP
+        # query). 'randn' = std=1.0 (original code, kept as default for exact
+        # backward compat), 'small' = std=0.02 (matches every other tensor in
+        # this file), 'mean' = per-layer mean of that layer's own cross_prompts
+        # at init time (see _make_proxy_tokens).
+        self.proxy_init = getattr(cfg, 'proxy_init', 'randn')
+        assert self.proxy_init in ('randn', 'small', 'mean'), \
+            f"--proxy_init must be one of randn/small/mean, got {self.proxy_init!r}"
+        # L2': number of proxy tokens produced per layer by the LKP (default 1
+        # = original behavior). Mapper then sees cross_layer * n_proxy tokens
+        # as k/v instead of cross_layer. Orthogonal to proxy_init.
+        self.n_proxy = getattr(cfg, 'n_proxy', 1)
+        assert self.n_proxy >= 1, "--n_proxy must be >= 1"
 
         assert self.prompt_depth >= 1
         assert 0 <= self.cross_layer <= self.prompt_depth, "cross_layer must be in [0, prompt_depth]"
@@ -523,9 +565,9 @@ class VisualVisualPromptLearner(nn.Module):
             attn_pooling_photo = AttentionPooling(hidden_size=p_dim, num_attention_heads=8)
             self.attn_pooling_photo_nets = _get_clones(attn_pooling_photo, self.cross_layer)
 
-            photo_proxy_token = torch.randn(1, p_dim, dtype=dtype)
-            self.photo_proxy_token = nn.ParameterList(
-                [nn.Parameter(photo_proxy_token.clone()) for _ in range(self.cross_layer)]
+            self.photo_proxy_token = _make_proxy_tokens(
+                self.proxy_init, self.n_proxy, p_dim, dtype,
+                [self.cross_prompts_photo[i] for i in range(self.cross_layer)],
             )
 
             if self.exchange_free_source:
@@ -548,9 +590,9 @@ class VisualVisualPromptLearner(nn.Module):
             attn_pooling_sketch = AttentionPooling(hidden_size=s_dim, num_attention_heads=8)
             self.attn_pooling_sketch_nets = _get_clones(attn_pooling_sketch, n_deep)
 
-            sketch_proxy_token = torch.randn(1, s_dim, dtype=dtype)
-            self.sketch_proxy_token = nn.ParameterList(
-                [nn.Parameter(sketch_proxy_token.clone()) for _ in range(self.cross_layer, self.prompt_depth)]
+            self.sketch_proxy_token = _make_proxy_tokens(
+                self.proxy_init, self.n_proxy, s_dim, dtype,
+                [self.cross_prompts_sketch[i] for i in range(self.cross_layer, self.prompt_depth)],
             )
         ######## Knowledge mapper end ########
 
