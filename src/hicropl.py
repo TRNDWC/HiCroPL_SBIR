@@ -397,6 +397,11 @@ class VisualVisualPromptLearner(nn.Module):
         self.exchange_self_source = getattr(cfg, 'exchange_self_source', False)
         assert sum([self.exchange_detach_source, self.exchange_free_source, self.exchange_self_source]) <= 1, \
             "--exchange_detach_source, --exchange_free_source, and --exchange_self_source are mutually exclusive"
+        # Control experiment (paper Table 6, single-scale vs multi-scale):
+        # restricts photo2sketch_net's key/value at layer i to only that
+        # layer's own proxy p~^i instead of the full concatenated proxy set.
+        # Orthogonal to the exchange_* flags above -- freely combinable.
+        self.mapper_single_scale = getattr(cfg, 'mapper_single_scale', False)
 
         assert self.prompt_depth >= 1
         assert 0 <= self.cross_layer <= self.prompt_depth, "cross_layer must be in [0, prompt_depth]"
@@ -562,15 +567,26 @@ class VisualVisualPromptLearner(nn.Module):
                     # gradient cut before the Mapper.
                     proxy_photo_flat = proxy_photo_flat.detach()
 
-            sketch_prompts_range = torch.cat(
-                [current_sketch_prompts[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0
-            )
-            sketch_prompts_flat = sketch_prompts_range.view(-1, sketch_prompts_range.shape[-1])
+            if self.mapper_single_scale:
+                # Single-scale: same photo2sketch_net module, same query per
+                # layer, but key/value restricted to that layer's own proxy
+                # p~^i only (shape [1, dim]) -- no cross-layer proxy scope.
+                updated_sketch_prompts = []
+                for i in range(self.cross_layer):
+                    layer_kv = proxy_photo_flat[i:i + 1]  # [1, dim]
+                    updated_sketch_prompts.append(
+                        self.photo2sketch_net(current_sketch_prompts[i], layer_kv, layer_kv)
+                    )
+            else:
+                sketch_prompts_range = torch.cat(
+                    [current_sketch_prompts[i].unsqueeze(0) for i in range(self.cross_layer)], dim=0
+                )
+                sketch_prompts_flat = sketch_prompts_range.view(-1, sketch_prompts_range.shape[-1])
 
-            updated_sketch_prompts = self.photo2sketch_net(sketch_prompts_flat, proxy_photo_flat, proxy_photo_flat)
-            updated_sketch_prompts = updated_sketch_prompts.view(
-                self.cross_layer, -1, updated_sketch_prompts.shape[-1]
-            )
+                updated_sketch_prompts = self.photo2sketch_net(sketch_prompts_flat, proxy_photo_flat, proxy_photo_flat)
+                updated_sketch_prompts = updated_sketch_prompts.view(
+                    self.cross_layer, -1, updated_sketch_prompts.shape[-1]
+                )
             for i in range(self.cross_layer):
                 current_sketch_prompts[i] = updated_sketch_prompts[i]
         ######## Photo -> Sketch end ########
