@@ -402,6 +402,13 @@ class VisualVisualPromptLearner(nn.Module):
         # layer's own proxy p~^i instead of the full concatenated proxy set.
         # Orthogonal to the exchange_* flags above -- freely combinable.
         self.mapper_single_scale = getattr(cfg, 'mapper_single_scale', False)
+        # Capacity-matched no-exchange control: reuses photo2sketch_net as a
+        # pure per-layer self-attention refine on cross_prompts_sketch[i]
+        # (q=k=v=cross_prompts_sketch[i]) -- no LKP, no proxy, no photo
+        # tensor at all. Only meaningful when the exchange itself is off.
+        self.sketch_self_refine = getattr(cfg, 'sketch_self_refine', False)
+        assert not self.sketch_self_refine or self.disable_exchange, \
+            "--sketch_self_refine requires --disable_exchange"
 
         assert self.prompt_depth >= 1
         assert 0 <= self.cross_layer <= self.prompt_depth, "cross_layer must be in [0, prompt_depth]"
@@ -589,6 +596,15 @@ class VisualVisualPromptLearner(nn.Module):
                 )
             for i in range(self.cross_layer):
                 current_sketch_prompts[i] = updated_sketch_prompts[i]
+        elif self.sketch_self_refine and self.cross_layer > 0:
+            # Capacity-matched no-exchange control: photo2sketch_net as a
+            # pure per-layer self-attention refine, q=k=v=cross_prompts_sketch[i].
+            # No LKP, no proxy, nothing from photo -- but photo2sketch_net now
+            # sits in the forward graph and receives real gradient, unlike
+            # plain --disable_exchange where it is idle/dead weight.
+            for i in range(self.cross_layer):
+                sk = current_sketch_prompts[i]
+                current_sketch_prompts[i] = self.photo2sketch_net(sk, sk, sk)
         ######## Photo -> Sketch end ########
 
         ######## Sketch -> Photo mapping (deep layers [cross_layer, prompt_depth)) ########
