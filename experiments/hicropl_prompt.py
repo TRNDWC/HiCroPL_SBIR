@@ -188,6 +188,16 @@ if __name__ == '__main__':
         leave=True
     )
 
+    callbacks = [checkpoint_callback, rich_progress_bar]
+    # Opt-in-only diagnostic: gradient/param-norm CSV logger (tools/diag_gradlog.py).
+    # No effect unless HICROPL_GRADLOG_CSV is set -- does not touch loss, optimizer,
+    # seed, lr, or any other hyperparameter; read-only, one Lightning hook.
+    gradlog_csv = os.environ.get('HICROPL_GRADLOG_CSV')
+    if gradlog_csv:
+        from tools.diag_gradlog import GradLogCallback
+        callbacks.append(GradLogCallback(gradlog_csv))
+        print(f"[CONFIG] HICROPL_GRADLOG_CSV set: logging grad/param norms to {gradlog_csv}")
+
     trainer = Trainer(accelerator="gpu" if torch.cuda.is_available() else "cpu", devices=1,
         min_epochs=1, max_epochs=opts.epochs,
         benchmark=False,  # Set False for reproducibility (True causes CUDNN non-determinism)
@@ -195,7 +205,7 @@ if __name__ == '__main__':
         logger=logger,
         check_val_every_n_epoch=1,
         enable_progress_bar=True,
-        callbacks=[checkpoint_callback, rich_progress_bar]
+        callbacks=callbacks
     )
 
     # 6. Initialize Model
