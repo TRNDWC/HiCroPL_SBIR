@@ -5,8 +5,5 @@ src/clip/__pycache__/
 claude.md
 .gitignore
 REPORT_ducta_attr_signal.md
-data/attr_bare.npy
-data/neg_emb.npy
-data/attr_emb.npy
 tools/gen_attributes.py
 tools/gen_neg_bank.py
