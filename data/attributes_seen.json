@@ -1,0 +1,1085 @@
+{
+  "_meta": {
+    "source": "gpt_file/sketchy_ext.json class list, verified disjoint from UNSEEN_CLASSES['sketchy_ext'] -- NOT a live os.listdir(data_dir) read, see tools/gen_attributes.py module docstring and project report.",
+    "M": 8,
+    "stoplist": [
+      "color",
+      "colour",
+      "red",
+      "blue",
+      "green",
+      "yellow",
+      "brown",
+      "black",
+      "white",
+      "gray",
+      "grey",
+      "orange",
+      "purple",
+      "pink",
+      "golden",
+      "silver",
+      "shiny",
+      "glossy",
+      "matte",
+      "metallic",
+      "wooden",
+      "plastic",
+      "glass",
+      "fur",
+      "furry",
+      "hairy",
+      "smooth",
+      "rough",
+      "texture",
+      "soft",
+      "hard",
+      "warm",
+      "cold",
+      "transparent",
+      "opaque"
+    ]
+  },
+  "attributes": {
+    "airplane": [
+      "long tapered fuselage tube",
+      "pair of straight swept wings",
+      "small vertical tail fin",
+      "horizontal tail stabilizers",
+      "rounded nose cone",
+      "row of small oval hull openings",
+      "wing-mounted engine pods",
+      "narrow pointed tail cone"
+    ],
+    "alarm_clock": [
+      "round flat body outline",
+      "twin bell domes on top",
+      "small clapper knob between bells",
+      "thin clock hands radiating from center",
+      "circular numbered face",
+      "short support legs at base",
+      "side winding knob",
+      "narrow rim ring around face"
+    ],
+    "ant": [
+      "three-segment body outline",
+      "narrow pinched waist between segments",
+      "pair of bent antennae",
+      "six thin jointed legs",
+      "small rounded head capsule",
+      "large bulbous rear abdomen",
+      "curved mandible jaws",
+      "oval thorax segment"
+    ],
+    "ape": [
+      "long dangling arm outline",
+      "rounded barrel-shaped torso",
+      "protruding brow ridge",
+      "short bent legs",
+      "hand with long curled fingers",
+      "hunched shoulder line",
+      "flat wide nose shape",
+      "small rounded ears"
+    ],
+    "apple": [
+      "round bulbous body outline",
+      "small top indentation",
+      "short curved stem line",
+      "faint vertical body crease",
+      "single leaf shape near stem",
+      "slightly flattened bottom curve",
+      "continuous unbroken outer contour",
+      "small blossom dimple at base"
+    ],
+    "armor": [
+      "segmented chest plate outline",
+      "curved shoulder pauldrons",
+      "jointed arm plating",
+      "narrow waist cinch line",
+      "riveted plate seams",
+      "helmet with face slit",
+      "layered plate overlaps",
+      "greave plates on legs"
+    ],
+    "axe": [
+      "long straight handle shaft",
+      "wide curved blade edge",
+      "flat rectangular blade back",
+      "narrow handle grip taper",
+      "wedge-shaped cutting head",
+      "small handle end knob",
+      "blade socket collar",
+      "single sharp cutting curve"
+    ],
+    "banana": [
+      "long curved tapering body",
+      "pointed stem tip",
+      "blunt rounded bottom end",
+      "subtle ridged body lines",
+      "gentle crescent silhouette",
+      "narrow neck near stem",
+      "slight twist along the length",
+      "elongated cylindrical form"
+    ],
+    "bear": [
+      "stocky rounded torso outline",
+      "short thick legs",
+      "small rounded ears on head",
+      "broad snout shape",
+      "heavy paw with short claws",
+      "small stub tail",
+      "hunched back curve",
+      "wide rounded head silhouette"
+    ],
+    "bee": [
+      "oval segmented body outline",
+      "pair of translucent wing shapes",
+      "narrow waist between segments",
+      "short bent antennae",
+      "banded body segment lines",
+      "six thin legs",
+      "rounded head with large eyes",
+      "small tapered stinger tip"
+    ],
+    "beetle": [
+      "domed oval shell outline",
+      "split wing-case line down the back",
+      "six short jointed legs",
+      "small rounded head",
+      "short bent antennae",
+      "flat underside silhouette",
+      "curved shell ridge lines",
+      "compact rounded body segments"
+    ],
+    "bell": [
+      "wide flared bottom rim",
+      "evenly domed top",
+      "small hanging clapper inside",
+      "narrow neck below the hanging loop",
+      "top mounting loop",
+      "gentle outward curve to the rim",
+      "symmetrical bulb silhouette",
+      "thin rim edge line"
+    ],
+    "bench": [
+      "long flat horizontal seat plank",
+      "straight back rest slats",
+      "four vertical support legs",
+      "armrests at each end",
+      "cross brace between legs",
+      "evenly spaced seat slats",
+      "rectangular overall footprint",
+      "simple right-angle joints"
+    ],
+    "bicycle": [
+      "two large round wheels",
+      "diamond-shaped frame outline",
+      "curved handlebar shape",
+      "narrow seat perched on a post",
+      "pedal crank with two arms",
+      "thin spoke lines radiating from hubs",
+      "chain loop between gears",
+      "front fork holding the wheel"
+    ],
+    "blimp": [
+      "elongated oval envelope shape",
+      "small tail fins at rear",
+      "gondola compartment slung underneath",
+      "tapered nose point",
+      "tapered blunt tail end",
+      "continuous unbroken body curve",
+      "short mooring line at nose",
+      "rounded cross-section silhouette"
+    ],
+    "bread": [
+      "rounded loaf hump outline",
+      "flat wide base",
+      "diagonal slash marks on top",
+      "gently domed top curve",
+      "elongated oval footprint",
+      "tapered rounded ends",
+      "irregular loaf-like outer contour",
+      "slightly uneven top ridge"
+    ],
+    "butterfly": [
+      "two pairs of large wing shapes",
+      "symmetrical wing outline on both sides",
+      "thin curled antennae",
+      "narrow segmented body between wings",
+      "scalloped wing edge curves",
+      "rounded upper wing lobes",
+      "tapered lower wing points",
+      "thin body segments"
+    ],
+    "camel": [
+      "single or double back hump",
+      "long curved neck",
+      "small head with rounded snout",
+      "four long thin legs",
+      "short tufted tail",
+      "narrow chest line",
+      "gently sloping back profile",
+      "small rounded ears"
+    ],
+    "candle": [
+      "tall straight cylindrical body",
+      "small wick line at top",
+      "teardrop flame shape above wick",
+      "flat circular base",
+      "slight wax drip lines down the side",
+      "rounded top rim",
+      "narrow uniform body width",
+      "small melted-edge curve at top"
+    ],
+    "cannon": [
+      "long cylindrical barrel",
+      "wide flared muzzle end",
+      "two large wheel shapes",
+      "angled support carriage",
+      "narrow breech block at rear",
+      "trunnion pivot bumps on the barrel",
+      "straight axle between wheels",
+      "tapered barrel profile"
+    ],
+    "car_(sedan)": [
+      "long low rectangular body",
+      "four round wheel arches",
+      "sloped windshield line",
+      "horizontal beltline crease along the side",
+      "curved roofline arc",
+      "short front and rear overhangs",
+      "vertical panel seam lines",
+      "raised hood and trunk lines"
+    ],
+    "castle": [
+      "tall rectangular tower shapes",
+      "notched battlement edge along the top",
+      "pointed conical roof caps",
+      "narrow arched entrance",
+      "small square wall openings",
+      "thick straight wall lines",
+      "flag pole atop a turret",
+      "stepped crenellation outline"
+    ],
+    "cat": [
+      "pointed triangular ears",
+      "long thin tail curling at the tip",
+      "slender elongated body",
+      "small rounded head with whisker dots",
+      "four short slim legs",
+      "arched back curve",
+      "narrow tapering face shape",
+      "paw outline with small toes"
+    ],
+    "chair": [
+      "flat rectangular seat",
+      "straight vertical back rest",
+      "four slender legs",
+      "horizontal back rest slats",
+      "right-angle seat-to-back joint",
+      "cross brace between legs",
+      "armrest arcs on the sides",
+      "simple boxy silhouette"
+    ],
+    "chicken": [
+      "small rounded body outline",
+      "short curved beak",
+      "jagged comb shape on top of the head",
+      "two thin stick legs",
+      "fan-shaped tail feathers",
+      "rounded wing bump on the side",
+      "small wattle hanging under the beak",
+      "plump oval body silhouette"
+    ],
+    "church": [
+      "tall narrow spire",
+      "pointed roof triangle",
+      "arched entrance opening",
+      "rectangular nave body",
+      "small cross shape atop the spire",
+      "narrow arched wall openings",
+      "stepped roofline",
+      "large circular facade opening"
+    ],
+    "couch": [
+      "long low rectangular seat cushion",
+      "raised armrests on both ends",
+      "straight back cushion line",
+      "short stubby legs",
+      "horizontal seam between cushions",
+      "rounded armrest curves",
+      "wide flat seating surface",
+      "boxy overall silhouette"
+    ],
+    "crab": [
+      "wide flat oval shell",
+      "pair of large front pincer claws",
+      "eight thin jointed side legs",
+      "small stalked eyes on top",
+      "segmented claw joints",
+      "rounded shell edge",
+      "symmetrical side-to-side leg spread",
+      "narrow tapering claw tips"
+    ],
+    "crocodilian": [
+      "long low elongated body",
+      "narrow snout with jagged tooth line",
+      "short thick legs",
+      "long tapering tail",
+      "ridge of bumps along the back",
+      "small eyes atop the head",
+      "wide flat head shape",
+      "armored plate segments down the spine"
+    ],
+    "cup": [
+      "cylindrical body outline",
+      "curved handle loop on one side",
+      "flat circular base",
+      "rounded rim at the top",
+      "slightly tapered body walls",
+      "narrow foot ring at the bottom",
+      "simple continuous side curve",
+      "small handle attachment points"
+    ],
+    "deer": [
+      "slender long-legged body",
+      "branching antler shapes",
+      "short upright tail",
+      "narrow pointed snout",
+      "large upright ears",
+      "thin graceful neck",
+      "delicate hoofed feet",
+      "arched back line"
+    ],
+    "dog": [
+      "floppy or pointed ear shapes",
+      "wagging curved tail",
+      "elongated snout",
+      "four sturdy legs",
+      "rounded paw outlines",
+      "arched back curve",
+      "narrow chest tapering to the waist",
+      "small round nose tip"
+    ],
+    "duck": [
+      "flat wide bill shape",
+      "rounded plump body",
+      "short webbed feet",
+      "curved neck line",
+      "small rounded head",
+      "short tail feather tuft",
+      "compact wing outline folded at the side",
+      "rounded oval body silhouette"
+    ],
+    "elephant": [
+      "long curling trunk",
+      "large fan-shaped ears",
+      "thick column-like legs",
+      "small tail with a tuft at the end",
+      "curved tusks flanking the trunk",
+      "massive rounded body",
+      "wrinkled skin fold lines",
+      "domed head shape"
+    ],
+    "eyeglasses": [
+      "two round or oval lens rims",
+      "narrow bridge connecting the lenses",
+      "thin folding temple arms",
+      "hinge joints at the lens corners",
+      "symmetrical lens outline",
+      "curved ear pieces at the ends",
+      "thin rim frame line",
+      "small nose pad bumps"
+    ],
+    "fan": [
+      "pleated radiating panel shape",
+      "narrow pivot point at the base",
+      "wide arcing spread when open",
+      "thin rib lines fanning outward",
+      "curved outer edge",
+      "small handle or guard rivet",
+      "symmetrical folding segments",
+      "rounded edge scallops"
+    ],
+    "fish": [
+      "streamlined tapering body",
+      "triangular dorsal fin on the back",
+      "forked tail fin",
+      "small side fins",
+      "pointed snout tapering to a mouth",
+      "gill slit line behind the head",
+      "streamlined elongated oval silhouette",
+      "narrow tail stalk"
+    ],
+    "flower": [
+      "radiating petal shapes around a center",
+      "round central disc",
+      "long thin stem line",
+      "narrow pointed leaves along the stem",
+      "layered overlapping petal edges",
+      "symmetrical petal arrangement",
+      "slightly curled petal tips",
+      "small bud bump near the stem"
+    ],
+    "frog": [
+      "wide flat head shape",
+      "bulging round eyes on top of the head",
+      "long folded hind legs",
+      "webbed foot outline",
+      "squat rounded body",
+      "short front legs",
+      "wide mouth line across the face",
+      "evenly curved back"
+    ],
+    "geyser": [
+      "narrow rocky vent opening",
+      "tall irregular spray plume",
+      "mound-shaped rocky base",
+      "jagged rim edges around the vent",
+      "tapering upward spray lines",
+      "uneven rocky terrace steps",
+      "billowing cloud shape at the top of the spray",
+      "narrow base cone"
+    ],
+    "guitar": [
+      "figure-eight body outline",
+      "long narrow neck",
+      "circular sound hole",
+      "row of thin string lines",
+      "headstock with tuning pegs",
+      "curved waist indentation",
+      "bridge line near the base of the body",
+      "fret lines across the neck"
+    ],
+    "hamburger": [
+      "stacked layered disc shapes",
+      "domed top bun curve",
+      "flat bottom bun",
+      "wavy layer line between fillings",
+      "round overall silhouette",
+      "textured seed dots on the top bun",
+      "thick patty layer in the middle",
+      "slightly uneven stacked edges"
+    ],
+    "hammer": [
+      "long straight handle",
+      "rectangular block head",
+      "flat striking face",
+      "curved claw prongs on the back",
+      "narrow handle-to-head joint",
+      "wide flat head top",
+      "tapered handle grip",
+      "small eye hole where handle meets head"
+    ],
+    "harp": [
+      "tall curved frame",
+      "triangular overall silhouette",
+      "row of vertical parallel strings",
+      "curved neck arching to the top",
+      "wide flat soundboard base",
+      "thin pillar column on one side",
+      "graceful sweeping outer curve",
+      "tapering top finial"
+    ],
+    "hat": [
+      "rounded or flat crown dome",
+      "wide brim ring around the base",
+      "narrow band line around the crown",
+      "flat or curved brim edge",
+      "gradual crown-to-brim transition",
+      "symmetrical circular brim outline",
+      "small top button or dimple",
+      "gentle brim curl at the edges"
+    ],
+    "hedgehog": [
+      "compact rounded body outline",
+      "dense radiating spike lines",
+      "small pointed snout",
+      "tiny short legs peeking from underneath",
+      "small round ears",
+      "domed back silhouette",
+      "tapered spike tips covering the back",
+      "narrow face compared to body"
+    ],
+    "hermit_crab": [
+      "spiral shell outline",
+      "pair of front pincer claws",
+      "several thin jointed legs",
+      "small stalked eyes",
+      "coiled shell ridge lines",
+      "body partly tucked into the shell opening",
+      "narrow antennae",
+      "rounded shell aperture"
+    ],
+    "horse": [
+      "long muscular legs",
+      "flowing mane line along the neck",
+      "elongated narrow snout",
+      "arched neck curve",
+      "long tail with flowing strands",
+      "pointed upright ears",
+      "hoofed feet",
+      "sleek arched back"
+    ],
+    "hot-air_balloon": [
+      "large round envelope shape",
+      "vertical gore panel seam lines",
+      "small basket hanging underneath",
+      "ropes connecting basket to envelope",
+      "narrow neck where envelope meets basket lines",
+      "rounded balloon top",
+      "slightly tapered lower envelope curve",
+      "rectangular basket outline"
+    ],
+    "hotdog": [
+      "long cylindrical sausage shape",
+      "elongated bun wrapping around it",
+      "rounded tapered ends",
+      "narrow split line where bun meets filling",
+      "slightly curved overall silhouette",
+      "parallel top and bottom bun ridges",
+      "uniform tube-like body",
+      "continuous unbroken outer curve"
+    ],
+    "hourglass": [
+      "two symmetrical bulb shapes",
+      "narrow pinched neck in the middle",
+      "flat circular top and bottom caps",
+      "mirrored upper and lower curves",
+      "thin connecting stem at the waist",
+      "rounded bulb silhouettes",
+      "vertical support posts on the sides",
+      "symmetrical hourglass waist"
+    ],
+    "jack-o-lantern": [
+      "round ridged pumpkin body",
+      "triangular eye cutouts",
+      "jagged zigzag mouth cutout",
+      "short curled stem on top",
+      "vertical ridge lines around the body",
+      "triangular nose cutout",
+      "flattened bottom curve",
+      "irregular jagged tooth shapes in the mouth"
+    ],
+    "jellyfish": [
+      "domed rounded bell shape",
+      "long trailing tentacle lines",
+      "evenly curved bell outline",
+      "thin wavy tentacle strands",
+      "scalloped bell edge",
+      "radial lines inside the bell",
+      "bulbous top silhouette",
+      "tapering tentacle tips"
+    ],
+    "kangaroo": [
+      "large powerful hind legs",
+      "long thick tail for balance",
+      "small front paws",
+      "upright pointed ears",
+      "pouch fold on the belly",
+      "narrow elongated snout",
+      "hunched upright posture",
+      "long narrow feet"
+    ],
+    "knife": [
+      "long straight blade edge",
+      "pointed blade tip",
+      "narrow handle grip",
+      "flat blade spine",
+      "small hilt guard between blade and handle",
+      "tapering blade width toward the tip",
+      "straight cutting edge line",
+      "simple elongated silhouette"
+    ],
+    "lion": [
+      "thick rounded mane framing the head",
+      "muscular stocky body",
+      "tufted tail tip",
+      "wide rounded paws",
+      "short rounded ears within the mane",
+      "broad face shape",
+      "sturdy front legs",
+      "arched back curve"
+    ],
+    "lizard": [
+      "long low elongated body",
+      "four short splayed legs",
+      "long tapering tail",
+      "small triangular head",
+      "narrow snout",
+      "row of small toes on each foot",
+      "slightly curved body posture",
+      "gradual continuous tail taper"
+    ],
+    "lobster": [
+      "long segmented tail",
+      "pair of large asymmetric claws",
+      "narrow jointed legs",
+      "long antennae extending forward",
+      "segmented body plates",
+      "fan-shaped tail flippers at the end",
+      "curved body posture",
+      "small stalked eyes"
+    ],
+    "motorcycle": [
+      "two round wheels",
+      "narrow frame between the wheels",
+      "curved handlebar shape",
+      "single seat perched above the rear wheel",
+      "front fork angled toward the front wheel",
+      "engine block bulge between the wheels",
+      "exhaust pipe line along the side",
+      "narrow tapering rear end"
+    ],
+    "mushroom": [
+      "rounded cap dome on top",
+      "straight narrow stem",
+      "flared cap edge curving downward",
+      "thin ring line around the stem",
+      "fine cap underside gill lines",
+      "symmetrical stem-to-cap junction",
+      "slightly bulbous stem base",
+      "gently curved cap silhouette"
+    ],
+    "owl": [
+      "large round facial disc",
+      "big circular eyes",
+      "short hooked beak",
+      "tufted ear-like feather points on the head",
+      "rounded compact body",
+      "folded wing outline at the sides",
+      "sharp curved talons",
+      "short wide tail feathers"
+    ],
+    "parrot": [
+      "large curved hooked beak",
+      "long tapering tail feathers",
+      "rounded compact body",
+      "short strong legs with gripping toes",
+      "crest feathers atop the head",
+      "folded wing shape along the side",
+      "round head with a small eye",
+      "curved claw toes"
+    ],
+    "penguin": [
+      "upright rounded torso",
+      "short flipper-like wings",
+      "small pointed beak",
+      "waddling short legs",
+      "evenly tapering body silhouette",
+      "rounded head atop a short neck",
+      "flat webbed feet",
+      "compact egg-shaped body outline"
+    ],
+    "piano": [
+      "large rectangular body",
+      "row of thin parallel keys",
+      "curved lid edge on a grand piano",
+      "three thin leg supports",
+      "long straight keyboard line",
+      "hinged lid propped open",
+      "boxy upright silhouette for an upright piano",
+      "pedal levers near the base"
+    ],
+    "pickup_truck": [
+      "long open cargo bed at the rear",
+      "boxy cab at the front",
+      "four round wheel arches",
+      "flat cargo bed walls",
+      "short front hood line",
+      "tailgate panel at the rear",
+      "raised side rails along the bed",
+      "rectangular cab openings"
+    ],
+    "pig": [
+      "rounded plump body",
+      "short stubby legs",
+      "flat wide snout disc",
+      "small curled tail",
+      "small triangular ears",
+      "evenly rounded belly curve",
+      "short thick neck",
+      "compact oval body silhouette"
+    ],
+    "pineapple": [
+      "cylindrical ridged body",
+      "crown of long spiky leaves on top",
+      "diamond-patterned surface segments",
+      "tapering leaf points",
+      "slightly rounded top and bottom",
+      "criss-cross ridge lines around the body",
+      "narrow leaf cluster silhouette",
+      "textured segment bumps"
+    ],
+    "pistol": [
+      "short angled grip",
+      "narrow rectangular barrel slide",
+      "small trigger guard loop",
+      "short stubby muzzle end",
+      "hammer bump at the rear of the slide",
+      "sight bumps along the top of the slide",
+      "compact L-shaped silhouette",
+      "narrow trigger inside the guard"
+    ],
+    "pizza": [
+      "wide flat circular disc",
+      "triangular slice divisions",
+      "raised crust ring around the edge",
+      "scattered topping dots across the surface",
+      "wedge-shaped slice outline",
+      "slightly uneven crust edge",
+      "radiating slice cut lines from the center",
+      "flat thin body silhouette"
+    ],
+    "pretzel": [
+      "twisted looping knot shape",
+      "two crossing loop curves",
+      "symmetrical looped silhouette",
+      "narrow twisted body strands",
+      "closed loop at the top",
+      "tapering ends where the twist meets the loop",
+      "continuous curling line",
+      "figure-eight-like twist pattern"
+    ],
+    "rabbit": [
+      "long upright ear shapes",
+      "short fluffy tail pom",
+      "rounded compact body",
+      "long hind legs bent for hopping",
+      "short front paws",
+      "small round nose tip",
+      "arched crouching posture",
+      "narrow face tapering to the nose"
+    ],
+    "racket": [
+      "oval or round head frame",
+      "crisscrossing string grid inside the frame",
+      "long narrow handle",
+      "narrow throat connecting head to handle",
+      "symmetrical frame outline",
+      "grip wrap lines along the handle",
+      "thin frame rim",
+      "elongated overall silhouette"
+    ],
+    "ray": [
+      "wide flat diamond-shaped body",
+      "long thin whip-like tail",
+      "pointed wing-tip corners",
+      "evenly curved body edges",
+      "narrow tapering tail stalk",
+      "flattened disc silhouette",
+      "small eye bumps on top of the body",
+      "gently undulating fin edge"
+    ],
+    "rifle": [
+      "long straight barrel",
+      "narrow stock at the rear",
+      "small trigger guard loop",
+      "raised sight bumps along the barrel",
+      "narrow forestock beneath the barrel",
+      "angled grip behind the trigger",
+      "elongated slender silhouette",
+      "curved shoulder stock end"
+    ],
+    "rocket": [
+      "long cylindrical body",
+      "pointed nose cone",
+      "fin shapes at the tail end",
+      "narrow body taper near the nose",
+      "exhaust nozzle at the base",
+      "straight body panel seams",
+      "symmetrical tail fin arrangement",
+      "evenly tapering silhouette"
+    ],
+    "sailboat": [
+      "tall triangular sail shape",
+      "narrow curved hull",
+      "vertical mast line",
+      "pointed bow tapering forward",
+      "diagonal boom line at the base of the sail",
+      "flat wide stern",
+      "curved hull bottom line",
+      "taut rigging lines from mast to deck"
+    ],
+    "saxophone": [
+      "curved S-shaped tube body",
+      "wide flared bell at the bottom",
+      "row of round finger key pads",
+      "narrow mouthpiece at the top",
+      "long looping neck curve",
+      "tapering conical body width",
+      "small key rod lines along the body",
+      "upward curling bell edge"
+    ],
+    "scorpion": [
+      "pair of large front pincer claws",
+      "long segmented curling tail",
+      "curved stinger tip at the tail end",
+      "eight thin jointed legs",
+      "flattened oval body outline",
+      "narrow segmented body plates",
+      "small clustered eyes on the head",
+      "arched tail posture over the back"
+    ],
+    "snake": [
+      "long slender tubular body",
+      "narrow tapering tail",
+      "forked tongue line at the head",
+      "flattened triangular head shape",
+      "coiled looping body posture",
+      "continuous unbroken body curve line",
+      "small rounded snout tip",
+      "elongated undulating silhouette"
+    ],
+    "sea_turtle": [
+      "wide domed shell outline",
+      "four flat paddle-like flippers",
+      "small pointed head extending forward",
+      "short stubby tail",
+      "segmented shell plate lines",
+      "rounded shell edge",
+      "flattened streamlined body silhouette",
+      "narrow neck tapering to the head"
+    ],
+    "seal": [
+      "elongated torpedo-shaped body",
+      "small flipper limbs",
+      "rounded head with whisker dots",
+      "tapering rear flippers",
+      "continuous unbroken body curve",
+      "short neck blending into the body",
+      "narrow snout",
+      "streamlined oval silhouette"
+    ],
+    "shark": [
+      "streamlined torpedo body",
+      "large triangular dorsal fin",
+      "crescent-shaped tail fin",
+      "pointed conical snout",
+      "gill slit lines behind the head",
+      "small pectoral fins on the sides",
+      "tapering narrow tail stalk",
+      "row of small teeth in the jaw line"
+    ],
+    "sheep": [
+      "rounded fluffy body outline",
+      "short thin legs",
+      "small rounded head with curved horns",
+      "short stub tail",
+      "compact oval body silhouette",
+      "narrow snout below the eyes",
+      "small pointed ears",
+      "dense bumpy body contour"
+    ],
+    "shoe": [
+      "curved sole outline",
+      "rounded toe box",
+      "narrow heel counter",
+      "row of lace holes along the tongue",
+      "tongue flap at the opening",
+      "raised sole ridge along the bottom",
+      "arched instep curve",
+      "flat elongated footprint silhouette"
+    ],
+    "snail": [
+      "spiral coiled shell",
+      "long body trailing from the shell",
+      "two long upper tentacles with eye tips",
+      "two shorter lower tentacles",
+      "rounded shell whorl lines",
+      "flat wide foot base",
+      "tapering body toward the tail",
+      "curved shell aperture opening"
+    ],
+    "spider": [
+      "eight thin jointed legs radiating outward",
+      "rounded body split into two segments",
+      "small clustered eyes on the head segment",
+      "narrow waist between body segments",
+      "symmetrical leg arrangement on both sides",
+      "bulbous rear abdomen",
+      "short pincer-like mouthparts",
+      "compact central body silhouette"
+    ],
+    "spoon": [
+      "oval concave bowl shape",
+      "long narrow handle",
+      "evenly curved bowl edge",
+      "gentle handle-to-bowl transition",
+      "elongated handle taper",
+      "shallow bowl depression",
+      "rounded bowl tip",
+      "thin flat handle profile"
+    ],
+    "squirrel": [
+      "large bushy curled tail",
+      "small rounded body",
+      "short front paws held up",
+      "large upright ears",
+      "narrow pointed snout",
+      "long hind legs for perching",
+      "arched crouching posture",
+      "tail curving over the back"
+    ],
+    "starfish": [
+      "five radiating pointed arms",
+      "central rounded body disc",
+      "symmetrical arm arrangement",
+      "tapering arm tips",
+      "textured bumpy surface dots",
+      "flat star-shaped silhouette",
+      "evenly curved arm edges",
+      "narrow arm-to-body junctions"
+    ],
+    "strawberry": [
+      "rounded heart-shaped body",
+      "small pointed tip at the bottom",
+      "star-shaped leafy cap on top",
+      "scattered seed dots across the surface",
+      "slightly tapering body toward the tip",
+      "gentle curved body sides",
+      "short stem above the leafy cap",
+      "continuous unbroken outer contour"
+    ],
+    "swan": [
+      "long curved S-shaped neck",
+      "rounded plump body",
+      "short webbed feet",
+      "small flat bill",
+      "folded wing outline along the back",
+      "evenly tapering tail",
+      "graceful arched neck posture",
+      "compact rounded head"
+    ],
+    "table": [
+      "flat rectangular or round top surface",
+      "four straight support legs",
+      "horizontal cross braces between legs",
+      "thin flat tabletop edge",
+      "right-angle leg-to-top joints",
+      "evenly spaced leg placement",
+      "simple boxy silhouette",
+      "narrow leg taper toward the floor"
+    ],
+    "tank": [
+      "long cylindrical turret barrel",
+      "wide boxy hull body",
+      "continuous track tread along the sides",
+      "rounded or angular turret dome",
+      "series of small road wheels under the tread",
+      "flat armored hull plates",
+      "narrow barrel tapering to the muzzle",
+      "low wide silhouette"
+    ],
+    "teapot": [
+      "rounded bulbous body",
+      "curved spout extending outward",
+      "arched handle loop on the opposite side",
+      "small lid knob on top",
+      "narrow spout tip",
+      "flat circular base",
+      "evenly rounded body curve",
+      "short neck below the lid"
+    ],
+    "teddy_bear": [
+      "rounded stubby limbs",
+      "small rounded ears",
+      "large round head",
+      "plump rounded body",
+      "short stitched-looking seam lines",
+      "small button-like eyes",
+      "wide rounded snout area",
+      "stubby flat feet"
+    ],
+    "tiger": [
+      "long striped body lines",
+      "muscular elongated torso",
+      "long tail with a curled tip",
+      "rounded head with short ears",
+      "wide padded paws",
+      "narrow tapering snout",
+      "arched back curve",
+      "sturdy short legs"
+    ],
+    "trumpet": [
+      "long looping coiled tubing",
+      "wide flared bell at the end",
+      "three round finger valves on top",
+      "narrow mouthpiece at the opposite end",
+      "curved tubing loops",
+      "cylindrical valve casings",
+      "tapering bell flare",
+      "slender tube cross-section"
+    ],
+    "turtle": [
+      "domed rounded shell",
+      "four short stubby legs",
+      "small pointed head extending from the shell",
+      "short tail at the rear",
+      "segmented shell plate pattern",
+      "rounded shell edge",
+      "narrow neck tapering to the head",
+      "compact oval body silhouette"
+    ],
+    "umbrella": [
+      "wide domed canopy shape",
+      "radiating rib lines from the center",
+      "long straight shaft",
+      "curved hook handle at the bottom",
+      "scalloped canopy edge between ribs",
+      "small tip point at the top of the canopy",
+      "symmetrical panel divisions",
+      "narrow shaft-to-canopy junction"
+    ],
+    "violin": [
+      "curved hourglass body outline",
+      "long narrow neck",
+      "f-shaped sound holes on the body",
+      "four thin string lines",
+      "scroll curl at the top of the neck",
+      "curved waist indentation",
+      "flat chin rest edge near the base",
+      "tapering bridge line across the body"
+    ],
+    "volcano": [
+      "wide triangular mountain silhouette",
+      "narrow crater opening at the peak",
+      "sloped sides tapering to a point",
+      "jagged rim edges around the crater",
+      "irregular base contour",
+      "steep upper slope lines",
+      "rounded crater rim",
+      "broad sweeping base outline"
+    ],
+    "wading_bird": [
+      "long thin stilt-like legs",
+      "long narrow pointed beak",
+      "slender curved neck",
+      "compact oval body",
+      "narrow tapering tail feathers",
+      "small rounded head",
+      "thin toes spread for wading",
+      "elongated leg-to-body proportion"
+    ],
+    "wine_bottle": [
+      "tall cylindrical body",
+      "narrow tapering neck",
+      "flat circular base",
+      "small rim lip at the top of the neck",
+      "gentle shoulder curve where body meets neck",
+      "uniform straight body walls",
+      "slightly indented base punt",
+      "elongated slender silhouette"
+    ],
+    "zebra": [
+      "bold striped body pattern lines",
+      "slender long legs",
+      "short upright mane",
+      "narrow elongated snout",
+      "long thin tail with a tufted tip",
+      "upright pointed ears",
+      "arched neck line",
+      "sturdy hoofed feet"
+    ]
+  }
+}

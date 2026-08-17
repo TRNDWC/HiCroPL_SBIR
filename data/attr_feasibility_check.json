@@ -1,0 +1,37 @@
+[
+  {
+    "class_a": "sea_turtle",
+    "class_b": "turtle",
+    "name_cosine": 0.9444265961647034,
+    "attr_cosine_mean": 0.9076489210128784,
+    "improved": true
+  },
+  {
+    "class_a": "bear",
+    "class_b": "teddy_bear",
+    "name_cosine": 0.9385403394699097,
+    "attr_cosine_mean": 0.8745611906051636,
+    "improved": true
+  },
+  {
+    "class_a": "cat",
+    "class_b": "dog",
+    "name_cosine": 0.9328964948654175,
+    "attr_cosine_mean": 0.8533854484558105,
+    "improved": true
+  },
+  {
+    "class_a": "bicycle",
+    "class_b": "motorcycle",
+    "name_cosine": 0.9287737607955933,
+    "attr_cosine_mean": 0.8894185423851013,
+    "improved": true
+  },
+  {
+    "class_a": "pistol",
+    "class_b": "rifle",
+    "name_cosine": 0.9279797077178955,
+    "attr_cosine_mean": 0.8934329152107239,
+    "improved": true
+  }
+]

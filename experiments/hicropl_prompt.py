@@ -177,6 +177,19 @@ if __name__ == '__main__':
         mode='max',
         save_last=False)
 
+    # Repo never calls self.save_hyperparameters() (see project audit), so a
+    # checkpoint alone cannot reveal the run's config/argv later -- write it
+    # out explicitly, once, next to the checkpoint dir. Always written
+    # (not gated behind any flag): every run needs this, not just
+    # --use_attr_loss ones.
+    import sys as _sys
+    import json as _json
+    _config_dir = 'saved_models/%s' % opts.exp_name
+    os.makedirs(_config_dir, exist_ok=True)
+    with open(os.path.join(_config_dir, 'config.json'), 'w') as _f:
+        _json.dump({'argv': _sys.argv, 'opts': vars(opts)}, _f, indent=2, default=str)
+    print(f"[CONFIG] Wrote full argv + opts to {os.path.join(_config_dir, 'config.json')}")
+
     ckpt_path = os.path.join('saved_models/%s'%opts.exp_name, 'last.ckpt')
     if not os.path.exists(ckpt_path):
         ckpt_path = None

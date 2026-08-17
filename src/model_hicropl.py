@@ -1,4 +1,6 @@
 import copy
+import os
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -170,6 +172,66 @@ class CustomCLIP(nn.Module):
             self.visual_encoder_photo = VisualEncoder(self.clip)
             self.visual_encoder_sketch = VisualEncoder(self.clip)
 
+        # -- Attribute-guided auxiliary loss (ArGue-inspired, see report) --
+        # A (attr_emb) and N (neg_emb) are frozen, pre-computed, class-name
+        # aligned tensors loaded once here as non-persistent buffers (not
+        # nn.Parameter -- never trainable, never added to any optimizer
+        # param group, and .detach()'d again at the point of use in
+        # losses_hicropl.py as a second, redundant safety net per project
+        # constraint #3). No new learnable parameter is added to the photo
+        # branch or anywhere else by this block.
+        self.use_attr_loss = getattr(cfg, 'use_attr_loss', False)
+        if self.use_attr_loss:
+            import json as _json
+            attr_file = getattr(cfg, 'attr_file', 'data/attr_emb.npy')
+            neg_file = getattr(cfg, 'neg_file', 'data/neg_emb.npy')
+            attr_random = getattr(cfg, 'attr_random', False)
+
+            attr_json_path = os.path.join(os.path.dirname(attr_file), 'attributes_seen.json') \
+                if os.path.dirname(attr_file) else 'data/attributes_seen.json'
+            if not os.path.exists(attr_json_path):
+                raise FileNotFoundError(
+                    f"--use_attr_loss requires '{attr_json_path}' (produced by "
+                    f"tools/gen_attributes.py) to verify class-index alignment between "
+                    f"attr_emb.npy's rows and classnames -- file not found."
+                )
+            with open(attr_json_path) as f:
+                attr_json = _json.load(f)
+            attr_classnames = sorted(attr_json['attributes'].keys())
+            if list(classnames) != attr_classnames:
+                raise RuntimeError(
+                    f"--use_attr_loss: classnames passed to CustomCLIP "
+                    f"(n={len(classnames)}) do not exactly match the class list/order in "
+                    f"'{attr_json_path}' (n={len(attr_classnames)}) -- attr_emb.npy's rows "
+                    f"would silently misalign with logits_attr's columns (wrong CE target "
+                    f"per class) if allowed to proceed. First mismatch: "
+                    f"{[c for c in classnames if c not in attr_classnames][:5]} not in attr "
+                    f"file / {[c for c in attr_classnames if c not in list(classnames)][:5]} "
+                    f"not in classnames."
+                )
+
+            attr_np = np.load(attr_file)  # (104, 8, 512), L2-normalized, see tools/gen_attributes.py
+            neg_np = np.load(neg_file)    # (32, 512), L2-normalized, see tools/gen_neg_bank.py
+            attr_tensor = torch.from_numpy(attr_np).to(dtype=self.dtype)
+            neg_tensor = torch.from_numpy(neg_np).to(dtype=self.dtype)
+
+            if attr_random:
+                # Fixed, DEDICATED generator -- does not consume/perturb the
+                # global RNG stream used by the rest of training (constraint:
+                # "không đổi seed"). Same shape as the real attr_emb, also
+                # L2-normalized for a fair, scale-matched ablation.
+                gen = torch.Generator().manual_seed(20240101)
+                attr_tensor = torch.randn(attr_tensor.shape, generator=gen, dtype=self.dtype)
+                attr_tensor = attr_tensor / attr_tensor.norm(dim=-1, keepdim=True)
+                print("[ABLATION] --attr_random: A replaced with a fixed-seed random tensor "
+                      "of identical shape (content ablation, see report Run R4).")
+
+            self.register_buffer("attr_emb", attr_tensor, persistent=False)
+            self.register_buffer("neg_emb", neg_tensor, persistent=False)
+            print(f"[CONFIG] --use_attr_loss: loaded attr_emb {tuple(attr_tensor.shape)} from "
+                  f"'{attr_file}' (attr_random={attr_random}), neg_emb {tuple(neg_tensor.shape)} "
+                  f"from '{neg_file}'.")
+
     def normalize_features(self, feat_prenorm):
         """L2-normalize feature tensors."""
         return feat_prenorm / feat_prenorm.norm(dim=-1, keepdim=True)
@@ -241,6 +303,7 @@ class CustomCLIP(nn.Module):
             sketch_feat, logits_sketch,
             neg_feat, label,
             text_feat_photo, text_feat_sketch,
+            logit_scale,
         )
 
 
@@ -400,7 +463,7 @@ class HiCroPL_SBIR(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         from src.losses_hicropl import loss_fn_hicropl
         features = self.model(batch, self.classnames)
-        loss = loss_fn_hicropl(self.args, features)
+        loss = loss_fn_hicropl(self.args, features, model=self.model)
 
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
         self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False, logger=False)

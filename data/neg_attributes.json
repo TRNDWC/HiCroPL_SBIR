@@ -1,0 +1,514 @@
+{
+  "_meta": {
+    "method": "entropy-of-softmax-similarity-to-classnames (D), T=0.05, NOT string-repetition clustering (see module docstring for why the original cosine>0.9 approach was abandoned)",
+    "temperature": 0.05,
+    "n_candidates_after_root_word_filter": 757,
+    "n_candidates_dropped_by_root_word_filter": 29,
+    "dropped_texts_full": [
+      {
+        "text": "boxy upright silhouette for an upright piano",
+        "matched_root_words": [
+          "piano"
+        ]
+      },
+      {
+        "text": "curved hourglass body outline",
+        "matched_root_words": [
+          "hourglass"
+        ]
+      },
+      {
+        "text": "curved lid edge on a grand piano",
+        "matched_root_words": [
+          "piano"
+        ]
+      },
+      {
+        "text": "diagonal boom line at the base of the sail",
+        "matched_root_words": [
+          "sail"
+        ]
+      },
+      {
+        "text": "domed rounded bell shape",
+        "matched_root_words": [
+          "bell"
+        ]
+      },
+      {
+        "text": "evenly curved bell outline",
+        "matched_root_words": [
+          "bell"
+        ]
+      },
+      {
+        "text": "fan-shaped tail feathers",
+        "matched_root_words": [
+          "fan"
+        ]
+      },
+      {
+        "text": "fan-shaped tail flippers at the end",
+        "matched_root_words": [
+          "fan"
+        ]
+      },
+      {
+        "text": "flat star-shaped silhouette",
+        "matched_root_words": [
+          "star"
+        ]
+      },
+      {
+        "text": "hammer bump at the rear of the slide",
+        "matched_root_words": [
+          "hammer"
+        ]
+      },
+      {
+        "text": "large fan-shaped ears",
+        "matched_root_words": [
+          "fan"
+        ]
+      },
+      {
+        "text": "radial lines inside the bell",
+        "matched_root_words": [
+          "bell"
+        ]
+      },
+      {
+        "text": "round head with a small eye",
+        "matched_root_words": [
+          "eye"
+        ]
+      },
+      {
+        "text": "rounded balloon top",
+        "matched_root_words": [
+          "balloon"
+        ]
+      },
+      {
+        "text": "scalloped bell edge",
+        "matched_root_words": [
+          "bell"
+        ]
+      },
+      {
+        "text": "small eye bumps on top of the body",
+        "matched_root_words": [
+          "eye"
+        ]
+      },
+      {
+        "text": "small eye hole where handle meets head",
+        "matched_root_words": [
+          "eye"
+        ]
+      },
+      {
+        "text": "star-shaped leafy cap on top",
+        "matched_root_words": [
+          "star"
+        ]
+      },
+      {
+        "text": "symmetrical hourglass waist",
+        "matched_root_words": [
+          "hourglass"
+        ]
+      },
+      {
+        "text": "tall triangular sail shape",
+        "matched_root_words": [
+          "sail"
+        ]
+      },
+      {
+        "text": "tapering bell flare",
+        "matched_root_words": [
+          "bell"
+        ]
+      },
+      {
+        "text": "thin clock hands radiating from center",
+        "matched_root_words": [
+          "clock"
+        ]
+      },
+      {
+        "text": "thin toes spread for wading",
+        "matched_root_words": [
+          "wading"
+        ]
+      },
+      {
+        "text": "triangular eye cutouts",
+        "matched_root_words": [
+          "eye"
+        ]
+      },
+      {
+        "text": "twin bell domes on top",
+        "matched_root_words": [
+          "bell"
+        ]
+      },
+      {
+        "text": "two long upper tentacles with eye tips",
+        "matched_root_words": [
+          "eye"
+        ]
+      },
+      {
+        "text": "upward curling bell edge",
+        "matched_root_words": [
+          "bell"
+        ]
+      },
+      {
+        "text": "wide flared bell at the bottom",
+        "matched_root_words": [
+          "bell"
+        ]
+      },
+      {
+        "text": "wide flared bell at the end",
+        "matched_root_words": [
+          "bell"
+        ]
+      }
+    ],
+    "stability_check": {
+      "overlap_top32_D_vs_bottom32_V": 17,
+      "threshold": 20,
+      "stable": false,
+      "bottom32_V": [
+        "oval thorax segment",
+        "jagged rim edges around the crater",
+        "rounded crater rim",
+        "thin wavy tentacle strands",
+        "two shorter lower tentacles",
+        "rounded edge scallops",
+        "long trailing tentacle lines",
+        "wrinkled skin fold lines",
+        "tapering tentacle tips",
+        "symmetrical bulb silhouette",
+        "row of small teeth in the jaw line",
+        "parallel top and bottom bun ridges",
+        "rounded bulb silhouettes",
+        "bulbous rear abdomen",
+        "vertical gore panel seam lines",
+        "rounded shell whorl lines",
+        "mound-shaped rocky base",
+        "large bulbous rear abdomen",
+        "billowing cloud shape at the top of the spray",
+        "crown of long spiky leaves on top",
+        "dense radiating spike lines",
+        "rounded cross-section silhouette",
+        "irregular jagged tooth shapes in the mouth",
+        "small pectoral fins on the sides",
+        "narrow rocky vent opening",
+        "curved tusks flanking the trunk",
+        "round bulbous body outline",
+        "pleated radiating panel shape",
+        "slender tube cross-section",
+        "diamond-patterned surface segments",
+        "narrow leaf cluster silhouette",
+        "pouch fold on the belly"
+      ]
+    }
+  },
+  "bank": [
+    {
+      "rank": 0,
+      "text": "oval thorax segment",
+      "D": 4.5185041427612305,
+      "V": 0.02802356891334057,
+      "source_classes": [
+        "ant"
+      ]
+    },
+    {
+      "rank": 1,
+      "text": "rounded crater rim",
+      "D": 4.496700763702393,
+      "V": 0.02924436144530773,
+      "source_classes": [
+        "volcano"
+      ]
+    },
+    {
+      "rank": 2,
+      "text": "row of small teeth in the jaw line",
+      "D": 4.495443344116211,
+      "V": 0.031111927703022957,
+      "source_classes": [
+        "shark"
+      ]
+    },
+    {
+      "rank": 3,
+      "text": "jagged rim edges around the crater",
+      "D": 4.490803241729736,
+      "V": 0.028371727094054222,
+      "source_classes": [
+        "volcano"
+      ]
+    },
+    {
+      "rank": 4,
+      "text": "billowing cloud shape at the top of the spray",
+      "D": 4.48477840423584,
+      "V": 0.0316312275826931,
+      "source_classes": [
+        "geyser"
+      ]
+    },
+    {
+      "rank": 5,
+      "text": "two shorter lower tentacles",
+      "D": 4.4835662841796875,
+      "V": 0.03055560030043125,
+      "source_classes": [
+        "snail"
+      ]
+    },
+    {
+      "rank": 6,
+      "text": "graceful arched neck posture",
+      "D": 4.482838153839111,
+      "V": 0.034982237964868546,
+      "source_classes": [
+        "swan"
+      ]
+    },
+    {
+      "rank": 7,
+      "text": "wrinkled skin fold lines",
+      "D": 4.482145309448242,
+      "V": 0.030803779140114784,
+      "source_classes": [
+        "elephant"
+      ]
+    },
+    {
+      "rank": 8,
+      "text": "two crossing loop curves",
+      "D": 4.481680870056152,
+      "V": 0.032498158514499664,
+      "source_classes": [
+        "pretzel"
+      ]
+    },
+    {
+      "rank": 9,
+      "text": "rounded upper wing lobes",
+      "D": 4.4788594245910645,
+      "V": 0.0324467197060585,
+      "source_classes": [
+        "butterfly"
+      ]
+    },
+    {
+      "rank": 10,
+      "text": "arched crouching posture",
+      "D": 4.478606224060059,
+      "V": 0.035247765481472015,
+      "source_classes": [
+        "rabbit",
+        "squirrel"
+      ]
+    },
+    {
+      "rank": 11,
+      "text": "rounded edge scallops",
+      "D": 4.4780683517456055,
+      "V": 0.030588291585445404,
+      "source_classes": [
+        "fan"
+      ]
+    },
+    {
+      "rank": 12,
+      "text": "curved mandible jaws",
+      "D": 4.477766036987305,
+      "V": 0.03330357000231743,
+      "source_classes": [
+        "ant"
+      ]
+    },
+    {
+      "rank": 13,
+      "text": "irregular jagged tooth shapes in the mouth",
+      "D": 4.477322578430176,
+      "V": 0.03200850263237953,
+      "source_classes": [
+        "jack-o-lantern"
+      ]
+    },
+    {
+      "rank": 14,
+      "text": "mound-shaped rocky base",
+      "D": 4.477149963378906,
+      "V": 0.03160328045487404,
+      "source_classes": [
+        "geyser"
+      ]
+    },
+    {
+      "rank": 15,
+      "text": "hunched upright posture",
+      "D": 4.477146625518799,
+      "V": 0.03489454463124275,
+      "source_classes": [
+        "kangaroo"
+      ]
+    },
+    {
+      "rank": 16,
+      "text": "arched tail posture over the back",
+      "D": 4.476675510406494,
+      "V": 0.033601343631744385,
+      "source_classes": [
+        "scorpion"
+      ]
+    },
+    {
+      "rank": 17,
+      "text": "tapering tentacle tips",
+      "D": 4.4763641357421875,
+      "V": 0.030978919938206673,
+      "source_classes": [
+        "jellyfish"
+      ]
+    },
+    {
+      "rank": 18,
+      "text": "rounded cross-section silhouette",
+      "D": 4.474768161773682,
+      "V": 0.031987909227609634,
+      "source_classes": [
+        "blimp"
+      ]
+    },
+    {
+      "rank": 19,
+      "text": "long antennae extending forward",
+      "D": 4.474588394165039,
+      "V": 0.03390106186270714,
+      "source_classes": [
+        "lobster"
+      ]
+    },
+    {
+      "rank": 20,
+      "text": "bulbous rear abdomen",
+      "D": 4.473985195159912,
+      "V": 0.03136666491627693,
+      "source_classes": [
+        "spider"
+      ]
+    },
+    {
+      "rank": 21,
+      "text": "slender long-legged body",
+      "D": 4.4733567237854,
+      "V": 0.033566202968358994,
+      "source_classes": [
+        "deer"
+      ]
+    },
+    {
+      "rank": 22,
+      "text": "large bulbous rear abdomen",
+      "D": 4.472904205322266,
+      "V": 0.0316130667924881,
+      "source_classes": [
+        "ant"
+      ]
+    },
+    {
+      "rank": 23,
+      "text": "wide triangular mountain silhouette",
+      "D": 4.472668647766113,
+      "V": 0.03245113417506218,
+      "source_classes": [
+        "volcano"
+      ]
+    },
+    {
+      "rank": 24,
+      "text": "round bulbous body outline",
+      "D": 4.4725117683410645,
+      "V": 0.03206518292427063,
+      "source_classes": [
+        "apple"
+      ]
+    },
+    {
+      "rank": 25,
+      "text": "narrow rocky vent opening",
+      "D": 4.4720354080200195,
+      "V": 0.032029688358306885,
+      "source_classes": [
+        "geyser"
+      ]
+    },
+    {
+      "rank": 26,
+      "text": "slightly tapered lower envelope curve",
+      "D": 4.471906661987305,
+      "V": 0.03355146944522858,
+      "source_classes": [
+        "hot-air_balloon"
+      ]
+    },
+    {
+      "rank": 27,
+      "text": "branching antler shapes",
+      "D": 4.471798896789551,
+      "V": 0.03476006165146828,
+      "source_classes": [
+        "deer"
+      ]
+    },
+    {
+      "rank": 28,
+      "text": "diamond-shaped frame outline",
+      "D": 4.471334934234619,
+      "V": 0.03457054868340492,
+      "source_classes": [
+        "bicycle"
+      ]
+    },
+    {
+      "rank": 29,
+      "text": "slender long legs",
+      "D": 4.47072696685791,
+      "V": 0.03361675515770912,
+      "source_classes": [
+        "zebra"
+      ]
+    },
+    {
+      "rank": 30,
+      "text": "long trailing tentacle lines",
+      "D": 4.470700263977051,
+      "V": 0.030752474442124367,
+      "source_classes": [
+        "jellyfish"
+      ]
+    },
+    {
+      "rank": 31,
+      "text": "small wattle hanging under the beak",
+      "D": 4.469797134399414,
+      "V": 0.032779209315776825,
+      "source_classes": [
+        "chicken"
+      ]
+    }
+  ]
+}
