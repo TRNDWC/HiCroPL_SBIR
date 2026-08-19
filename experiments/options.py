@@ -77,4 +77,6 @@ parser.add_argument('--eval_mode', type=str, default='category',
                     choices=['category', 'fine_grained'],
                     help='Evaluation mode: category-level retrieval or fine-grained instance-level retrieval')
 
+parser.add_argument('--disable_aug_branch', action='store_true', help='Ablation: fully remove the augmentation branch, which is ON by default. The branch is a SECOND CLIP backbone (self.clip_aug), built vanilla (clip_trainer=CoOp, no prompt injection) and frozen COMPLETELY -- including LayerNorm, unlike the main backbone -- so it contributes 0 trainable params and acts as a fixed pretrained-CLIP reference. It encodes an augmented view of the photo and of the sketch, and two InfoNCE terms (weight 1.0 each, no separate lambda flags) pull the main prompted features toward those frozen targets. Setting this flag is a CLEAN ablation in the same sense as --disable_exchange: clip_aug is never constructed, the dataset stops emitting the two augmented tensors, and the two loss terms are skipped -- nothing is built-then-idled. Note the branch costs ~605MB VRAM and ~151M frozen params when enabled.')
+
 opts = parser.parse_args()

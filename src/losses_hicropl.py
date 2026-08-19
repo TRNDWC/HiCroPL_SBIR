@@ -44,6 +44,7 @@ def loss_fn_hicropl(args, features):
         sketch_feat, logits_sketch,
         neg_feat, label,
         text_feat_photo, text_feat_sketch,
+        photo_aug_feat, sketch_aug_feat,
     ) = features
 
     device = logits_photo.device
@@ -71,4 +72,16 @@ def loss_fn_hicropl(args, features):
     loss_ce_sketch = F.cross_entropy(logits_sketch, label)
     loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
-    return loss_cross_modal + loss_ce
+    # --- L5: augmentation branch, InfoNCE(view goc, view augmented) ---
+    # photo_feat / sketch_feat come from the trainable prompted branch;
+    # *_aug_feat come from the frozen vanilla CLIP and carry no gradient. All
+    # gradient therefore flows through the first argument only -- the frozen
+    # features act as fixed positives. Weight is a fixed 1.0 by design: there
+    # is no lambda flag, only --disable_aug_branch, which removes the branch
+    # entirely (both features arrive as None).
+    loss_aug = 0.0
+    if photo_aug_feat is not None:
+        loss_aug = (cross_loss(photo_feat, photo_aug_feat, temperature)
+                    + cross_loss(sketch_feat, sketch_aug_feat, temperature))
+
+    return loss_cross_modal + loss_ce + loss_aug

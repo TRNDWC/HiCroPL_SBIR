@@ -61,7 +61,16 @@ if __name__ == '__main__':
         val_dataset = SketchyDatasetFG(opts, mode='test')
     else:
         dataset_transforms = Sketchy.data_transform(opts)
-        train_dataset = Sketchy(opts, dataset_transforms, mode='train', return_orig=False)
+        # Augmentation branch is ON by default; --disable_aug_branch removes it
+        # entirely (no aug tensors emitted, no clip_aug built, no aug loss).
+        if opts.disable_aug_branch:
+            aug_photo = aug_sketch = None
+            print("[ABLATION] --disable_aug_branch: augmentation branch fully removed.")
+        else:
+            aug_photo = Sketchy.data_transform_aug_photo(opts)
+            aug_sketch = Sketchy.data_transform_aug_sketch(opts)
+        train_dataset = Sketchy(opts, dataset_transforms, mode='train', return_orig=False,
+                                transform_aug_photo=aug_photo, transform_aug_sketch=aug_sketch)
         print(f"[CONFIG] Loading validation data in category mode")
         val_sketch = ValidDataset(opts, mode='sketch')
         val_photo = ValidDataset(opts, mode='photo')

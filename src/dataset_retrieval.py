@@ -51,11 +51,17 @@ UNSEEN_CLASSES = {
 
 class Sketchy(torch.utils.data.Dataset):
 
-    def __init__(self, opts, transform, mode='train', used_cat=None, return_orig=False):
+    def __init__(self, opts, transform, mode='train', used_cat=None, return_orig=False,
+                 transform_aug_photo=None, transform_aug_sketch=None):
 
         self.opts = opts
         self.transform = transform
         self.return_orig = return_orig
+        # Augmentation branch (on unless --disable_aug_branch). Both must be
+        # supplied together; when absent __getitem__ keeps its original arity so
+        # every existing unpack site is unaffected.
+        self.transform_aug_photo = transform_aug_photo
+        self.transform_aug_sketch = transform_aug_sketch
 
         dataset_key = self.opts.dataset if hasattr(self.opts, 'dataset') else 'sketchy'
         unseen_classes = UNSEEN_CLASSES.get(dataset_key, UNSEEN_CLASSES['sketchy'])
@@ -135,8 +141,19 @@ class Sketchy(torch.utils.data.Dataset):
         if self.return_orig:
             return sk_tensor, img_tensor, neg_tensor, self.all_categories.index(category), filename, \
                 sk_data, img_data, neg_data
-        else:
+
+        if self.transform_aug_photo is None:
             return sk_tensor, img_tensor, neg_tensor, self.all_categories.index(category), filename
+
+        # Augmented views go LAST so the leading 5 entries keep their meaning.
+        # They are also drawn AFTER every deterministic transform above, so the
+        # extra RNG they consume cannot shift anything that came before -- the
+        # non-augmented part of the sample is bit-identical to a run with
+        # --disable_aug_branch under the same seed.
+        sk_aug_tensor = self.transform_aug_sketch(sk_data)
+        img_aug_tensor = self.transform_aug_photo(img_data)
+        return sk_tensor, img_tensor, neg_tensor, self.all_categories.index(category), filename, \
+            sk_aug_tensor, img_aug_tensor
 
     @staticmethod
     def data_transform(opts):
@@ -146,6 +163,55 @@ class Sketchy(torch.utils.data.Dataset):
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
         return dataset_transforms
+
+    @staticmethod
+    def data_transform_aug_photo(opts):
+        """Augmented view for the photo branch -- close to the MoCo v2 / DINO recipe.
+
+        Crop scale is 0.4 (not MoCo's 0.2) on purpose: the target of the InfoNCE
+        term is a FROZEN CLIP, not a co-adapting encoder. A crop so aggressive
+        that the subject is gone still produces a confident frozen feature, and
+        the loss would drag the trainable branch toward that noise. In SSL both
+        views adapt together, so the failure mode does not arise there.
+
+        GaussianBlur/Solarization are dropped: the backbone is ViT-B/32, whose
+        32x32 patches barely register mild blur.
+        """
+        return transforms.Compose([
+            transforms.RandomResizedCrop(opts.max_size, scale=(0.4, 1.0)),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+    @staticmethod
+    def data_transform_aug_sketch(opts):
+        """Augmented view for the sketch branch -- deliberately NOT the photo recipe.
+
+        Sketches are black strokes on white with R==G==B, which makes three of
+        the five standard colour ops mathematically no-ops (measured on a
+        synthetic sketch: saturation 0.000%, hue 0.000%, RandomGrayscale 0.000%
+        pixel change). Only brightness/contrast do anything, so the rest is
+        replaced by geometric jitter -- the direction the sketch literature
+        takes instead of colour.
+
+        GaussianBlur is excluded outright: at sigma=2.0 (the top of MoCo's
+        [0.1, 2.0] range) 99% of stroke pixels fall below the ink threshold.
+        Crop scale is milder than photo's since strokes are sparse and an
+        aggressive crop easily lands on blank canvas. fill=255 keeps the
+        canvas white where RandomAffine exposes new area.
+        """
+        return transforms.Compose([
+            transforms.RandomResizedCrop(opts.max_size, scale=(0.6, 1.0)),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomAffine(degrees=10, translate=(0.08, 0.08),
+                                    scale=(0.9, 1.1), fill=255),
+            transforms.RandomApply([transforms.ColorJitter(brightness=0.4, contrast=0.4)], p=0.8),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
 
 def normal_transform():
     dataset_transforms = transforms.Compose([

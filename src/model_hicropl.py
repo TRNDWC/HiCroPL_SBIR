@@ -45,7 +45,7 @@ def freeze_all_but_bn(model):
 _MAPPER_NAMES = ('photo2sketch_net', 'sketch2photo_net', 'text2visual_net', 'visual2text_net')
 
 
-def _classify_group(name, is_layernorm):
+def _classify_group(name):
     """Partition every parameter into exactly one of 4 reporting groups.
 
     Returns (group, subgroup). Mutually exclusive and jointly exhaustive:
@@ -61,9 +61,18 @@ def _classify_group(name, is_layernorm):
     and `attn_pooling_photo_nets` contain 'photo' and would otherwise be
     misread as photo prompt tokens.
     """
+    # Second backbone first -- 'clip_aug.' would also match the 'clip' checks
+    # below if they were reordered.
+    #
+    # Backbone subgroups are just which backbone it is. What KIND of param it is
+    # is not encoded here: the design says a trainable backbone param must be a
+    # LayerNorm, so that is an invariant to assert, not a category to tabulate.
+    # log_param_breakdown checks it and warns by name.
+    if name.startswith('clip_aug.'):
+        return ('backbone', 'aug')
     if name.startswith('clip.') or '_encoder_photo.' in name or '_encoder_sketch.' in name \
             or name == 'logit_scale':
-        return ('backbone', 'layernorm' if is_layernorm else 'LEAK')
+        return ('backbone', 'main')
 
     if 'attn_pooling' in name:
         return ('exchange', 'lkp')
@@ -173,10 +182,10 @@ def log_param_breakdown(model, printer=print):
         if not p.requires_grad or id(p) in seen:
             continue
         seen.add(id(p))
-        group, sub = _classify_group(name, id(p) in ln_ids)
+        group, sub = _classify_group(name)
         idle = _is_idle(name, cfg) if group == 'exchange' else None
         recs.append({'name': name, 'numel': p.numel(), 'group': group,
-                     'sub': sub, 'idle': idle})
+                     'sub': sub, 'idle': idle, 'is_ln': id(p) in ln_ids})
 
     printer("")
     printer("=" * 78)
@@ -225,9 +234,34 @@ def log_param_breakdown(model, printer=print):
         printer(f"    WARNING -- {totals['ungrouped']:,} params khong thuoc nhom nao:")
         for r in [x for x in recs if x['group'] == 'ungrouped'][:20]:
             printer(f"        {r['name']}  {r['numel']:,}")
-    leak = sum(r['numel'] for r in recs if r['group'] == 'backbone' and r['sub'] == 'LEAK')
-    if leak:
-        printer(f"    WARNING -- BACKBONE LEAK: {leak:,} params ngoai LayerNorm dang trainable")
+    # Invariant: a trainable backbone param must belong to a LayerNorm. The main
+    # backbone is LN-only by CLIP-AT design (freeze_all_but_bn); the aug backbone
+    # is frozen outright, so it should have no trainable param at all. Anything
+    # else is a leak -- name it rather than let it sit inside a subtotal.
+    leaks = [r for r in recs if r['group'] == 'backbone' and not r['is_ln']]
+    if leaks:
+        printer(f"    WARNING -- BACKBONE LEAK: {sum(r['numel'] for r in leaks):,} params "
+                f"ngoai LayerNorm dang trainable ({len(leaks)} tensors):")
+        for r in leaks[:20]:
+            printer(f"        [{r['sub']}] {r['name']}  {r['numel']:,}")
+        if len(leaks) > 20:
+            printer(f"        ... {len(leaks) - 20} more")
+    aug_trainable = [r for r in recs if r['group'] == 'backbone' and r['sub'] == 'aug']
+    if aug_trainable:
+        printer(f"    WARNING -- AUG BACKBONE co {sum(r['numel'] for r in aug_trainable):,} "
+                f"params trainable; nhanh nay phai dong bang hoan toan")
+
+    # The aug backbone contributes 0 trainable params by construction, so it
+    # never shows up in the table above. Report it separately -- otherwise a
+    # 151M-param module would be entirely invisible in the only param log.
+    clip_aug = getattr(model, 'clip_aug', None)
+    if clip_aug is None:
+        printer("    aug backbone: absent (--disable_aug_branch)")
+    else:
+        tot = sum(p.numel() for p in clip_aug.parameters())
+        tr = sum(p.numel() for p in clip_aug.parameters() if p.requires_grad)
+        printer(f"    aug backbone: {tot:,} params, {tr:,} trainable"
+                f"{' -- fully frozen' if tr == 0 else '  <-- WARNING: expected 0'}")
     printer(f"GROUP_FP | backbone={totals['backbone']} | tokens={totals['tokens']} | "
             f"exchange={totals['exchange']} | ungrouped={totals['ungrouped']} | "
             f"declared={grand} | effective={live}")
@@ -363,6 +397,45 @@ class CustomCLIP(nn.Module):
             self.visual_encoder_photo = VisualEncoder(self.clip)
             self.visual_encoder_sketch = VisualEncoder(self.clip)
 
+        # -- Augmentation branch: second backbone, built LAST on purpose --
+        #
+        # ORDER IS LOad-BEARING. load_clip_to_cpu constructs a CLIP with random
+        # init before loading pretrained weights, so it consumes the global RNG.
+        # Building it earlier would shift the stream for every prompt learner
+        # above and silently reroll their init -- exactly the confound that
+        # --disable_exchange hit before (see VisualVisualPromptLearner's
+        # build-then-discard comment). Built last, enabling or disabling this
+        # branch leaves every other parameter bit-identical under a given seed.
+        #
+        # Vanilla build (clip_trainer='CoOp'): self.clip is a
+        # VisionTransformer_HiCroPL whose forward() REQUIRES prompt arguments,
+        # so encode_image() raises on it. A prompt-free reference genuinely
+        # needs its own non-prompted build; sharing self.clip is not an option.
+        self.disable_aug_branch = getattr(cfg, 'disable_aug_branch', False)
+        if not self.disable_aug_branch:
+            from src.utils import load_clip_to_cpu
+            cfg_aug = copy.copy(cfg)
+            cfg_aug.clip_trainer = 'CoOp'
+            self.clip_aug = load_clip_to_cpu(cfg_aug).to(original_device)
+            # freeze_model, NOT freeze_all_but_bn: the reference must be a fixed
+            # snapshot of pretrained CLIP. Leaving LayerNorm trainable would let
+            # the target drift every step, which is a moving teacher, not a
+            # frozen one.
+            freeze_model(self.clip_aug)
+            self.clip_aug.eval()
+
+    def train(self, mode=True):
+        """Keep clip_aug in eval mode permanently.
+
+        nn.Module.train() recurses into children, so without this override
+        Lightning would flip the frozen reference into train mode at every
+        epoch start. It has no dropout/BN, but eval() also documents intent.
+        """
+        super().train(mode)
+        if getattr(self, 'clip_aug', None) is not None:
+            self.clip_aug.eval()
+        return self
+
     def normalize_features(self, feat_prenorm):
         """L2-normalize feature tensors."""
         return feat_prenorm / feat_prenorm.norm(dim=-1, keepdim=True)
@@ -372,7 +445,12 @@ class CustomCLIP(nn.Module):
         Forward pass for training with optimized redundancy.
         Calls visual learner ONCE and routes prompts by branch.
         """
-        if len(x) == 5:
+        # 7 entries = augmentation branch on; the two augmented views are
+        # appended last so this stays backward compatible with the 4/5 forms.
+        sk_aug_tensor = photo_aug_tensor = None
+        if len(x) == 7:
+            sk_tensor, photo_tensor, neg_tensor, label, _filename, sk_aug_tensor, photo_aug_tensor = x
+        elif len(x) == 5:
             sk_tensor, photo_tensor, neg_tensor, label, _filename = x
         else:
             sk_tensor, photo_tensor, neg_tensor, label = x[:4]
@@ -429,11 +507,24 @@ class CustomCLIP(nn.Module):
         logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
         logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
 
+        # 7. Augmentation branch: frozen vanilla CLIP over the augmented views.
+        # no_grad is belt-and-braces (every param is already requires_grad=False)
+        # but it also keeps the activations out of the autograd graph, which is
+        # what actually saves the memory.
+        photo_aug_feat = sketch_aug_feat = None
+        if photo_aug_tensor is not None and getattr(self, 'clip_aug', None) is not None:
+            with torch.no_grad():
+                f_p = self.clip_aug.encode_image(photo_aug_tensor.type(self.dtype))
+                f_s = self.clip_aug.encode_image(sk_aug_tensor.type(self.dtype))
+            photo_aug_feat = f_p / f_p.norm(dim=-1, keepdim=True)
+            sketch_aug_feat = f_s / f_s.norm(dim=-1, keepdim=True)
+
         return (
             photo_feat, logits_photo,
             sketch_feat, logits_sketch,
             neg_feat, label,
             text_feat_photo, text_feat_sketch,
+            photo_aug_feat, sketch_aug_feat,
         )
 
 
