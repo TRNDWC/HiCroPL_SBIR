@@ -559,24 +559,69 @@ class VisualVisualPromptLearner(nn.Module):
         ######## sketch prompt initialization end ########
 
         ######## Knowledge mapper networks (orig: text2visual_net / visual2text_net) ########
+        # --disable_exchange is a CLEAN ablation: the exchange modules are not
+        # built at all, so they never reach the optimizer and never appear in
+        # the checkpoint. Building-but-not-calling them (the old behaviour) left
+        # ~39M params with .grad permanently None -- they inflated every
+        # "trainable params" count while contributing nothing, and Adam still
+        # allocated moment buffers for them.
+        #
+        # The only exception is photo2sketch_net under the self-refine runs:
+        # forward() still calls it there (see the sketch_self_refine branches),
+        # so it must exist even though disable_exchange is set.
+        build_exchange = not self.disable_exchange
+        needs_selfrefine_mapper = self.sketch_self_refine or self.sketch_self_refine_ln
+
+        # BUILD-THEN-DISCARD. Every module below is CONSTRUCTED unconditionally,
+        # in the original order, but only ASSIGNED to self when this run really
+        # uses it. Two properties must hold at once and they pull against each
+        # other:
+        #
+        #   clean ablation -- an unassigned module is not an attribute, so it
+        #       never reaches named_parameters(), the optimizer, or the
+        #       checkpoint. --disable_exchange really does train 0 exchange
+        #       params, not "39M params that happen to get no gradient".
+        #
+        #   seed parity -- construction consumes the global RNG (Linear /
+        #       MultiheadAttention init, _make_proxy_tokens' randn). Skipping it
+        #       would shift the stream for everything built afterwards, and
+        #       text_prompt_photo / text_prompt_sketch are built AFTER this
+        #       learner: their cross_prompts_text[1:] (32,768 params) would get
+        #       a different draw. --disable_exchange would then differ from its
+        #       baseline by BOTH the ablation and a reroll of 20% of the
+        #       trainable params -- a confounded comparison. Constructing and
+        #       dropping costs a few ms and keeps the two runs seed-identical.
+        #
+        # _get_clones uses deepcopy, so only the prototype draws from the RNG.
         if self.cross_layer > 0:
-            self.photo2sketch_net = CrossPromptAttention(hidden_size=s_dim, encoder_hidden_size=p_dim, num_attention_heads=8)
+            photo2sketch_net = CrossPromptAttention(hidden_size=s_dim, encoder_hidden_size=p_dim, num_attention_heads=8)
 
             attn_pooling_photo = AttentionPooling(hidden_size=p_dim, num_attention_heads=8)
-            self.attn_pooling_photo_nets = _get_clones(attn_pooling_photo, self.cross_layer)
+            attn_pooling_photo_nets = _get_clones(attn_pooling_photo, self.cross_layer)
 
-            self.photo_proxy_token = _make_proxy_tokens(
+            photo_proxy_token = _make_proxy_tokens(
                 self.proxy_init, self.n_proxy, p_dim, dtype,
                 [self.cross_prompts_photo[i] for i in range(self.cross_layer)],
             )
 
+            free_source = None
             if self.exchange_free_source:
                 # Same shape as proxy_photo_prompts (P~_photo) after torch.cat:
                 # (cross_layer, p_dim). Independent of ctx_photo/attn_pooling_photo
                 # -- Mapper param count (photo2sketch_net) is unaffected.
-                free_source = torch.empty(self.cross_layer, p_dim, dtype=dtype)
-                nn.init.normal_(free_source, std=0.02)
-                self.free_source = nn.Parameter(free_source)
+                free_source_init = torch.empty(self.cross_layer, p_dim, dtype=dtype)
+                nn.init.normal_(free_source_init, std=0.02)
+                free_source = nn.Parameter(free_source_init)
+
+            # forward() still calls photo2sketch_net in the self-refine branches,
+            # so it survives --disable_exchange there.
+            if build_exchange or needs_selfrefine_mapper:
+                self.photo2sketch_net = photo2sketch_net
+            if build_exchange:
+                self.attn_pooling_photo_nets = attn_pooling_photo_nets
+                self.photo_proxy_token = photo_proxy_token
+                if free_source is not None:
+                    self.free_source = free_source
 
             if self.sketch_self_refine_ln:
                 # Run D: LayerNorm applied to the k/v side only, standard init
@@ -585,16 +630,52 @@ class VisualVisualPromptLearner(nn.Module):
 
         n_deep = self.prompt_depth - self.cross_layer
         if n_deep > 0:
-            self.sketch2photo_net = CrossPromptAttention(hidden_size=p_dim, encoder_hidden_size=s_dim, num_attention_heads=8)
+            sketch2photo_net = CrossPromptAttention(hidden_size=p_dim, encoder_hidden_size=s_dim, num_attention_heads=8)
 
             attn_pooling_sketch = AttentionPooling(hidden_size=s_dim, num_attention_heads=8)
-            self.attn_pooling_sketch_nets = _get_clones(attn_pooling_sketch, n_deep)
+            attn_pooling_sketch_nets = _get_clones(attn_pooling_sketch, n_deep)
 
-            self.sketch_proxy_token = _make_proxy_tokens(
+            sketch_proxy_token = _make_proxy_tokens(
                 self.proxy_init, self.n_proxy, s_dim, dtype,
                 [self.cross_prompts_sketch[i] for i in range(self.cross_layer, self.prompt_depth)],
             )
+
+            if build_exchange:
+                self.sketch2photo_net = sketch2photo_net
+                self.attn_pooling_sketch_nets = attn_pooling_sketch_nets
+                self.sketch_proxy_token = sketch_proxy_token
         ######## Knowledge mapper end ########
+
+        self._freeze_gradientless_params()
+
+    def _freeze_gradientless_params(self):
+        """Mark every parameter that provably cannot receive gradient as frozen.
+
+        Companion to the --disable_exchange "clean ablation" above, for the flags
+        where the module CANNOT simply be dropped: --exchange_detach_source /
+        --exchange_self_source still CALL attn_pooling_photo_nets and feed its
+        output into the Mapper (only .detach() cuts the gradient), and
+        --sketch_self_refine_ln still applies ln_selfrefine to the k/v side.
+        Deleting those modules would change the numerics, i.e. a different
+        experiment -- so they stay in the graph, but requires_grad=False keeps
+        them out of the optimizer and out of every "trainable params" count.
+
+        Net effect across all flags: declared trainable == actually trained.
+        """
+        dead = []
+        if self.cross_layer > 0 and (self.exchange_detach_source
+                                     or self.exchange_self_source
+                                     or self.exchange_free_source):
+            # Output detached before the Mapper (src/hicropl.py:644-647), or the
+            # module is bypassed entirely under --exchange_free_source.
+            dead += [self.attn_pooling_photo_nets, self.photo_proxy_token]
+        if self.sketch_self_refine_ln:
+            # Applied only on the k/v side, which is detached.
+            dead.append(self.ln_selfrefine)
+
+        for module in dead:
+            for p in module.parameters():
+                p.requires_grad_(False)
 
     def forward(self):
         # Local mutable copies -- entries get REPLACED here, never the stored

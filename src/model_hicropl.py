@@ -1,4 +1,5 @@
 import copy
+import re
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -38,6 +39,201 @@ def freeze_all_but_bn(model):
     for p in model.parameters():
         if id(p) not in ln_param_ids:
             p.requires_grad_(False)
+
+
+
+_MAPPER_NAMES = ('photo2sketch_net', 'sketch2photo_net', 'text2visual_net', 'visual2text_net')
+
+
+def _classify_group(name, is_layernorm):
+    """Partition every parameter into exactly one of 4 reporting groups.
+
+    Returns (group, subgroup). Mutually exclusive and jointly exhaustive:
+    anything unmatched lands in 'ungrouped', which is printed by name so a new
+    module can never be silently absorbed into a total.
+
+        backbone  -- CLIP itself: LayerNorm (intended) + anything else (LEAK)
+        tokens    -- learnable prompt tokens, split modality x domain
+        exchange  -- LKP / Mapper / proxy tokens / cross-exchange extras
+        ungrouped -- everything else (should always be empty)
+
+    Order matters: exchange is tested BEFORE tokens because `photo_proxy_token`
+    and `attn_pooling_photo_nets` contain 'photo' and would otherwise be
+    misread as photo prompt tokens.
+    """
+    if name.startswith('clip.') or '_encoder_photo.' in name or '_encoder_sketch.' in name \
+            or name == 'logit_scale':
+        return ('backbone', 'layernorm' if is_layernorm else 'LEAK')
+
+    if 'attn_pooling' in name:
+        return ('exchange', 'lkp')
+    if any(k in name for k in _MAPPER_NAMES):
+        return ('exchange', 'mapper')
+    if 'proxy_token' in name:
+        return ('exchange', 'proxy_token')
+    if 'free_source' in name or 'ln_selfrefine' in name:
+        return ('exchange', 'other')
+
+    if 'cross_prompts_text' in name or name.endswith('.ctx'):
+        modality = 'text'
+    elif ('cross_prompts_visual' in name or 'cross_prompts_photo' in name
+          or 'cross_prompts_sketch' in name or '.ctx_photo' in name or '.ctx_sketch' in name):
+        modality = 'visual'
+    else:
+        return ('ungrouped', '?')
+    owner = name.split('.')[0]
+    if 'photo' in owner or '_photo' in name or 'ctx_photo' in name:
+        domain = 'photo'
+    elif 'sketch' in owner or '_sketch' in name or 'ctx_sketch' in name:
+        domain = 'sketch'
+    else:
+        domain = '?'
+    return ('tokens', f'{modality}/{domain}')
+
+
+def _is_idle(name, cfg):
+    """Is this exchange parameter guaranteed to receive NO gradient this run?
+
+    requires_grad=True only means "the optimizer holds it" -- the ablation flags
+    cut gradient paths without removing modules, so a flag like
+    --disable_exchange leaves ~37M params in the optimizer whose .grad stays
+    None forever. Counting those as trainable capacity is the exact misreading
+    this column exists to prevent.
+
+    Derived statically from the forward() branches in src/hicropl.py:614-676.
+    Returns a short reason string, or None if the parameter is live.
+    """
+    if getattr(cfg, 'use_text_visual_exchange', False):
+        return None  # --disable_exchange has no effect on this architecture
+
+    if getattr(cfg, 'disable_exchange', False):
+        # Both mapping blocks are skipped entirely. The only survivors are the
+        # modules the self-refine branches still call (src/hicropl.py:657-672).
+        if 'photo2sketch_net' in name and (getattr(cfg, 'sketch_self_refine', False)
+                                           or getattr(cfg, 'sketch_self_refine_ln', False)):
+            return None  # still live via the query side (src/hicropl.py:672)
+        if 'ln_selfrefine' in name:
+            # Run D applies it ONLY on the k/v side, which is detached at
+            # src/hicropl.py:671 -- so this LayerNorm never trains and stays at
+            # its init (weight=1, bias=0) for the whole run.
+            return 'sketch_self_refine_ln (k/v detached)'
+        return 'disable_exchange'
+
+    # Photo->Sketch block: the photo-side LKP output is detached (or skipped),
+    # so attn_pooling_photo_nets + photo_proxy_token never get gradient.
+    photo_lkp = 'attn_pooling_photo_nets' in name or 'photo_proxy_token' in name
+    if photo_lkp:
+        if getattr(cfg, 'exchange_free_source', False):
+            return 'exchange_free_source'   # module not even called
+        if getattr(cfg, 'exchange_detach_source', False):
+            return 'exchange_detach_source'
+        if getattr(cfg, 'exchange_self_source', False):
+            return 'exchange_self_source'
+    return None
+
+
+def _fmt_table(headers, rows, printer):
+    """Minimal ASCII table -- no external deps, right-aligns numeric columns."""
+    if not rows:
+        printer("    (empty)")
+        return
+    cols = list(zip(*([headers] + [[str(c) for c in r] for r in rows])))
+    widths = [max(len(c) for c in col) for col in cols]
+    numeric = [all(c.replace(',', '').replace('-', '').isdigit() or c == ''
+                   for c in col[1:]) for col in cols]
+
+    def line(cells):
+        return "    " + "  ".join(
+            c.rjust(widths[i]) if numeric[i] else c.ljust(widths[i])
+            for i, c in enumerate(cells)
+        )
+
+    printer(line(headers))
+    printer("    " + "  ".join('-' * w for w in widths))
+    for r in rows:
+        printer(line([str(c) for c in r]))
+
+
+def log_param_breakdown(model, printer=print):
+    """Print trainable params grouped as backbone / tokens / exchange.
+
+    Every total is deduped by id(p). named_parameters(remove_duplicate=False) is
+    used deliberately: the single shared backbone makes each CLIP tensor
+    reachable under 3 names, so double counting is a live hazard here.
+
+    The `state` column separates DECLARED capacity (requires_grad=True, in the
+    optimizer) from EFFECTIVE capacity (actually reachable by gradient). Under
+    --disable_exchange the two differ by ~37M params.
+    """
+    cfg = getattr(model, 'cfg', None)
+    ln_ids = {id(p) for m in model.modules() if isinstance(m, nn.LayerNorm) for p in m.parameters()}
+
+    seen, recs = set(), []
+    for name, p in model.named_parameters(remove_duplicate=False):
+        if not p.requires_grad or id(p) in seen:
+            continue
+        seen.add(id(p))
+        group, sub = _classify_group(name, id(p) in ln_ids)
+        idle = _is_idle(name, cfg) if group == 'exchange' else None
+        recs.append({'name': name, 'numel': p.numel(), 'group': group,
+                     'sub': sub, 'idle': idle})
+
+    printer("")
+    printer("=" * 78)
+    printer("[2] TRAINABLE BY GROUP (backbone / tokens / exchange)")
+    printer("=" * 78)
+
+    agg = {}
+    for r in recs:
+        key = (r['group'], r['sub'], r['idle'] or '')
+        n, s = agg.get(key, (0, 0))
+        agg[key] = (n + 1, s + r['numel'])
+
+    rows, totals, live_totals = [], {}, {}
+    for g in ['backbone', 'tokens', 'exchange', 'ungrouped']:
+        subs = sorted([kv for kv in agg.items() if kv[0][0] == g], key=lambda kv: -kv[1][1])
+        totals[g] = sum(v[1] for _, v in subs)
+        live_totals[g] = sum(v[1] for k, v in subs if not k[2])
+        if not subs:
+            continue
+        for (_, sub, idle), (n, s) in subs:
+            rows.append([g, sub, 'IDLE' if idle else 'active', n, f"{s:,}"])
+        rows.append([f"-> {g} TOTAL", "", "", sum(v[0] for _, v in subs), f"{totals[g]:,}"])
+    grand = sum(totals.values())
+    live = sum(live_totals.values())
+    rows.append(["== GRAND TOTAL", "", "", len(recs), f"{grand:,}"])
+    _fmt_table(["group", "subgroup", "state", "n_tensors", "numel"], rows, printer)
+
+    printer(f"    DECLARED  (requires_grad, in optimizer): {grand:,}")
+    if live != grand:
+        idle_by_reason = {}
+        for r in recs:
+            if r['idle']:
+                n, s = idle_by_reason.get(r['idle'], (0, 0))
+                idle_by_reason[r['idle']] = (n + 1, s + r['numel'])
+        printer(f"    EFFECTIVE (gradient actually reaches):  {live:,}")
+        for reason, (n, s) in sorted(idle_by_reason.items(), key=lambda kv: -kv[1][1]):
+            printer(f"    IDLE -- --{reason}: {n} tensors, {s:,} params "
+                    f"({100.0 * s / grand:.1f}% of declared) never receive gradient")
+    else:
+        printer(f"    EFFECTIVE (gradient actually reaches):  {live:,}  -- no idle params")
+
+    printer(f"    check: backbone {totals['backbone']:,} + tokens {totals['tokens']:,} + "
+            f"exchange {totals['exchange']:,} + ungrouped {totals['ungrouped']:,} = {grand:,} -> "
+            f"{'OK' if grand == sum(r['numel'] for r in recs) else 'MISMATCH'}")
+    if totals['ungrouped']:
+        printer(f"    WARNING -- {totals['ungrouped']:,} params khong thuoc nhom nao:")
+        for r in [x for x in recs if x['group'] == 'ungrouped'][:20]:
+            printer(f"        {r['name']}  {r['numel']:,}")
+    leak = sum(r['numel'] for r in recs if r['group'] == 'backbone' and r['sub'] == 'LEAK')
+    if leak:
+        printer(f"    WARNING -- BACKBONE LEAK: {leak:,} params ngoai LayerNorm dang trainable")
+    printer(f"GROUP_FP | backbone={totals['backbone']} | tokens={totals['tokens']} | "
+            f"exchange={totals['exchange']} | ungrouped={totals['ungrouped']} | "
+            f"declared={grand} | effective={live}")
+    printer("=" * 78)
+    printer("")
+
 
 
 def unfreeze_ln(m):
@@ -90,11 +286,8 @@ class CustomCLIP(nn.Module):
         # one CLIP copy, same LayerNorm weights updated by gradients from both modalities).
         self.clip = copy.deepcopy(clip_model).to(original_device)
         freeze_all_but_bn(self.clip)
-
-        # Print trainable param counts for verification
-        total = sum(p.numel() for p in self.clip.parameters())
-        trainable = sum(p.numel() for p in self.clip.parameters() if p.requires_grad)
-        print(f"clip (shared): trainable {trainable:,} / total {total:,} params")
+        # Param counts are reported once by log_param_breakdown() in
+        # configure_optimizers -- the single source of truth.
 
         # Single shared logit scale (matches ducta/baseline)
         self.logit_scale = self.clip.logit_scale
@@ -266,55 +459,13 @@ class HiCroPL_SBIR(pl.LightningModule):
         pass
 
     def on_fit_start(self):
-        """Log the number of learnable prompt tokens per branch once at fit start.
+        """Intentionally empty.
 
-        Logs four scalars (tokens count):
-        - `tokens_visual_photo`
-        - `tokens_visual_sketch`
-        - `tokens_text_photo`
-        - `tokens_text_sketch`
+        Used to print per-branch learnable-token counts; that information is now
+        covered (in params, not token counts) by log_param_breakdown() in
+        configure_optimizers, which is the single source of truth.
         """
-        if self.model.use_text_visual_exchange:
-            try:
-                lp = self.model.text_visual_learner_photo
-                ls = self.model.text_visual_learner_sketch
-                tokens_visual_photo = len(lp.cross_prompts_visual) * lp.n_ctx
-                tokens_visual_sketch = len(ls.cross_prompts_visual) * ls.n_ctx
-                tokens_text_photo = len(lp.cross_prompts_text) * lp.n_ctx
-                tokens_text_sketch = len(ls.cross_prompts_text) * ls.n_ctx
-            except Exception:
-                tokens_visual_photo = tokens_visual_sketch = tokens_text_photo = tokens_text_sketch = 0
-        else:
-            try:
-                vv = self.model.visual_visual_learner
-                # visual tokens: number of prompt vectors (prompt_depth * n_ctx)
-                tokens_visual_photo = len(vv.cross_prompts_photo) * vv.n_ctx
-                tokens_visual_sketch = len(vv.cross_prompts_sketch) * vv.n_ctx
-            except Exception:
-                tokens_visual_photo = 0
-                tokens_visual_sketch = 0
-
-            try:
-                tp = self.model.text_prompt_photo
-                ts = self.model.text_prompt_sketch
-                tokens_text_photo = len(tp.cross_prompts_text) * tp.cross_prompts_text[0].shape[0]
-                tokens_text_sketch = len(ts.cross_prompts_text) * ts.cross_prompts_text[0].shape[0]
-            except Exception:
-                tokens_text_photo = 0
-                tokens_text_sketch = 0
-
-        # Log to Lightning logger and print for immediate visibility
-        self.print(f"Learnable tokens - visual/photo: {tokens_visual_photo}, visual/sketch: {tokens_visual_sketch}, text/photo: {tokens_text_photo}, text/sketch: {tokens_text_sketch}")
-        # Use self.log so TensorBoard/other loggers capture these scalars
-        # Use rank_zero_only to avoid duplicate logs in distributed runs
-        try:
-            self.log('tokens_visual_photo', tokens_visual_photo, prog_bar=True, logger=True)
-            self.log('tokens_visual_sketch', tokens_visual_sketch, prog_bar=True, logger=True)
-            self.log('tokens_text_photo', tokens_text_photo, prog_bar=True, logger=True)
-            self.log('tokens_text_sketch', tokens_text_sketch, prog_bar=True, logger=True)
-        except Exception:
-            # Fallback to print-only if logger not ready
-            pass
+        pass
 
     def configure_optimizers(self):
         def add_unique_params(candidates, out_list, seen_ids):
@@ -358,9 +509,6 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         non_prompt_params = ln_params + extra_trainable_params
 
-        self.print(f"Number of trainable prompt params: {sum(p.numel() for p in prompt_params):,}")
-        self.print(f"Number of trainable non-prompt params: {sum(p.numel() for p in non_prompt_params):,}")
-
         prompt_lr = getattr(self.cfg, 'prompt_lr', 1e-5)
         clip_ln_lr = getattr(self.cfg, 'clip_LN_lr', 1e-5)
 
@@ -369,6 +517,10 @@ class HiCroPL_SBIR(pl.LightningModule):
             param_groups.append({'params': prompt_params, 'lr': prompt_lr})
         if non_prompt_params:
             param_groups.append({'params': non_prompt_params, 'lr': clip_ln_lr})
+
+        # Full diagnostic table (replaces the old two "Number of trainable ...
+        # params" prints, whose exact numbers are reproduced in section [1]).
+        log_param_breakdown(self.model, printer=self.print)
 
         # No weight_decay (matches ducta/baseline's Adam call, which also omits it -> default 0).
         return torch.optim.Adam(param_groups)

@@ -121,6 +121,20 @@ def infer_visual_visual_arch(state_dict):
         if m:
             cross_layer_idx.add(int(m.group(1)))
     cross_layer = (max(cross_layer_idx) + 1) if cross_layer_idx else 0
+    if cross_layer == 0:
+        # --disable_exchange no longer builds attn_pooling_photo_nets at all
+        # (see src/hicropl.py, "CLEAN ablation" comment), so their absence is
+        # ambiguous: it means EITHER cross_layer really was 0, OR the run used
+        # --disable_exchange with any cross_layer. Inferring 0 would silently
+        # rebuild a different architecture, so refuse instead.
+        raise RuntimeError(
+            f"No '{prefix}attn_pooling_photo_nets.<i>.*' keys found, so cross_layer "
+            f"cannot be inferred from this checkpoint. If it was trained with "
+            f"--disable_exchange, those modules were never built; re-run this tool "
+            f"with the cross_layer used at training time passed explicitly "
+            f"(this tool has no --cross_layer flag yet -- add one, or export from a "
+            f"checkpoint trained without --disable_exchange)."
+        )
 
     n_proxy = 1
     proxy_key0 = prefix + "photo_proxy_token.0"
