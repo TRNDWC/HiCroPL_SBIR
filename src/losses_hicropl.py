@@ -73,12 +73,15 @@ def loss_fn_hicropl(args, features):
     loss_ce = lambda_ce * (loss_ce_photo + loss_ce_sketch)
 
     # --- L5: augmentation branch, InfoNCE(view goc, view augmented) ---
-    # photo_feat / sketch_feat come from the trainable prompted branch;
-    # *_aug_feat come from the frozen vanilla CLIP and carry no gradient. All
-    # gradient therefore flows through the first argument only -- the frozen
-    # features act as fixed positives. Weight is a fixed 1.0 by design: there
-    # is no lambda flag, only --disable_aug_branch, which removes the branch
-    # entirely (both features arrive as None).
+    # photo_feat / sketch_feat come from the trainable prompted branch.
+    # *_aug_feat come from clip_aug, which is frozen by freeze_all_but_bn --
+    # its LayerNorm IS trainable and CustomCLIP.forward deliberately does not
+    # wrap that encoder in no_grad, so gradient flows into BOTH arguments here.
+    # cross_loss is symmetric (it concatenates the two views), so the aug
+    # backbone's LayerNorm is trained by these terms rather than acting as a
+    # fixed target. Weight is a fixed 1.0 by design: there is no lambda flag,
+    # only --disable_aug_branch, which removes the branch entirely (both
+    # features arrive as None).
     loss_aug = 0.0
     if photo_aug_feat is not None:
         loss_aug = (cross_loss(photo_feat, photo_aug_feat, temperature)

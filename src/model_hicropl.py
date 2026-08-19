@@ -100,18 +100,46 @@ def _classify_group(name):
     return ('tokens', f'{modality}/{domain}')
 
 
-def _is_idle(name, cfg):
-    """Is this exchange parameter guaranteed to receive NO gradient this run?
+# Whether CustomCLIP.forward runs the clip_aug encoder with autograd enabled.
+# Flip this to False if a torch.no_grad() is ever put back around that call --
+# on_after_backward compares this prediction against real gradients and warns
+# if they disagree, so a stale value cannot go unnoticed for long.
+_AUG_FORWARD_BUILDS_GRAPH = True
 
-    requires_grad=True only means "the optimizer holds it" -- the ablation flags
-    cut gradient paths without removing modules, so a flag like
+
+def _is_idle(name, cfg, group):
+    """Is this parameter guaranteed to receive NO gradient this run?
+
+    requires_grad=True only means "the optimizer holds it" -- flags and forward
+    branches cut gradient paths without removing modules, so a flag like
     --disable_exchange leaves ~37M params in the optimizer whose .grad stays
     None forever. Counting those as trainable capacity is the exact misreading
     this column exists to prevent.
 
-    Derived statically from the forward() branches in src/hicropl.py:614-676.
-    Returns a short reason string, or None if the parameter is live.
+    Covers both the exchange group (derived from the forward() branches in
+    src/hicropl.py:614-676) and the backbone group. Returns a short reason
+    string, or None if the parameter is live.
     """
+    if group == 'backbone':
+        # main: LayerNorm sits on the path of every loss term -- always live.
+        # aug: live only because the clip_aug call is NOT wrapped in no_grad.
+        #      Under no_grad these 65,536 params would be pure dead weight in
+        #      the optimizer while still reporting requires_grad=True.
+        if name.startswith('clip_aug.'):
+            if not _AUG_FORWARD_BUILDS_GRAPH:
+                return 'clip_aug forward under no_grad'
+            # Canary. The aug branch calls encode_image only, so a trainable
+            # text-tower LayerNorm here could never receive gradient. __init__
+            # scopes the unfreeze to clip_aug.visual precisely so this cannot
+            # happen -- reaching this line means someone widened it back to
+            # freeze_all_but_bn(self.clip_aug).
+            if not name.startswith('clip_aug.visual.'):
+                return 'clip_aug text tower never called (encode_image only)'
+        return None
+
+    if group != 'exchange':
+        return None
+
     if getattr(cfg, 'use_text_visual_exchange', False):
         return None  # --disable_exchange has no effect on this architecture
 
@@ -183,7 +211,7 @@ def log_param_breakdown(model, printer=print):
             continue
         seen.add(id(p))
         group, sub = _classify_group(name)
-        idle = _is_idle(name, cfg) if group == 'exchange' else None
+        idle = _is_idle(name, cfg, group)
         recs.append({'name': name, 'numel': p.numel(), 'group': group,
                      'sub': sub, 'idle': idle, 'is_ln': id(p) in ln_ids})
 
@@ -246,22 +274,19 @@ def log_param_breakdown(model, printer=print):
             printer(f"        [{r['sub']}] {r['name']}  {r['numel']:,}")
         if len(leaks) > 20:
             printer(f"        ... {len(leaks) - 20} more")
-    aug_trainable = [r for r in recs if r['group'] == 'backbone' and r['sub'] == 'aug']
-    if aug_trainable:
-        printer(f"    WARNING -- AUG BACKBONE co {sum(r['numel'] for r in aug_trainable):,} "
-                f"params trainable; nhanh nay phai dong bang hoan toan")
-
-    # The aug backbone contributes 0 trainable params by construction, so it
-    # never shows up in the table above. Report it separately -- otherwise a
-    # 151M-param module would be entirely invisible in the only param log.
+    # The table only lists trainable params, so the aug backbone's ~151M frozen
+    # weights would otherwise be invisible in the only param log there is.
     clip_aug = getattr(model, 'clip_aug', None)
     if clip_aug is None:
         printer("    aug backbone: absent (--disable_aug_branch)")
     else:
         tot = sum(p.numel() for p in clip_aug.parameters())
         tr = sum(p.numel() for p in clip_aug.parameters() if p.requires_grad)
-        printer(f"    aug backbone: {tot:,} params, {tr:,} trainable"
-                f"{' -- fully frozen' if tr == 0 else '  <-- WARNING: expected 0'}")
+        note = ' -- visual-tower LayerNorm trainable' if tr else ' -- fully frozen'
+        printer(f"    aug backbone: {tot:,} params, {tr:,} trainable{note}")
+        if tr and not _AUG_FORWARD_BUILDS_GRAPH:
+            printer("        WARNING: forward runs clip_aug under no_grad, so these "
+                    "never update -- freeze_all_but_bn has no effect")
     printer(f"GROUP_FP | backbone={totals['backbone']} | tokens={totals['tokens']} | "
             f"exchange={totals['exchange']} | ungrouped={totals['ungrouped']} | "
             f"declared={grand} | effective={live}")
@@ -417,11 +442,18 @@ class CustomCLIP(nn.Module):
             cfg_aug = copy.copy(cfg)
             cfg_aug.clip_trainer = 'CoOp'
             self.clip_aug = load_clip_to_cpu(cfg_aug).to(original_device)
-            # freeze_model, NOT freeze_all_but_bn: the reference must be a fixed
-            # snapshot of pretrained CLIP. Leaving LayerNorm trainable would let
-            # the target drift every step, which is a moving teacher, not a
-            # frozen one.
+            # Freeze everything, then reopen LayerNorm in the VISUAL TOWER ONLY.
+            #
+            # freeze_all_but_bn(self.clip_aug) would be the obvious call, but it
+            # opens LayerNorm in both towers -- and this branch only ever calls
+            # encode_image(). The 50 text-tower LayerNorms (25,600 params) would
+            # sit in the optimizer with .grad = None for the entire run: real
+            # dead weight, and enough to put an IDLE row in the param log of
+            # every experiment, including the exchange ablations that are
+            # otherwise clean. Scoping the unfreeze to .visual keeps declared ==
+            # effective everywhere.
             freeze_model(self.clip_aug)
+            self.clip_aug.visual.apply(unfreeze_ln)
             self.clip_aug.eval()
 
     def train(self, mode=True):
@@ -507,15 +539,25 @@ class CustomCLIP(nn.Module):
         logits_photo = logit_scale * photo_feat @ text_feat_photo.t()
         logits_sketch = logit_scale * sketch_feat @ text_feat_sketch.t()
 
-        # 7. Augmentation branch: frozen vanilla CLIP over the augmented views.
-        # no_grad is belt-and-braces (every param is already requires_grad=False)
-        # but it also keeps the activations out of the autograd graph, which is
-        # what actually saves the memory.
+        # 7. Augmentation branch: vanilla CLIP over the augmented views.
+        #
+        # NO torch.no_grad() HERE -- deliberately. clip_aug is frozen by
+        # freeze_all_but_bn, so its LayerNorm (65,536 params) is trainable and
+        # the InfoNCE terms are meant to train it. Wrapping this in no_grad
+        # would build no autograd graph, those params would get .grad = None,
+        # and Adam would skip them: the branch would look trainable in the log
+        # while being numerically identical to a fully frozen one. That is
+        # exactly what commits fbe44ad and 58c05d6 produced -- identical
+        # results despite the flag change.
+        #
+        # Cost of keeping the graph: activations for two full ViT forwards are
+        # retained until backward. _is_idle() encodes the no_grad-free
+        # assumption for the log, and on_after_backward re-checks it against
+        # real gradients once, so the two can never drift apart silently.
         photo_aug_feat = sketch_aug_feat = None
         if photo_aug_tensor is not None and getattr(self, 'clip_aug', None) is not None:
-            with torch.no_grad():
-                f_p = self.clip_aug.encode_image(photo_aug_tensor.type(self.dtype))
-                f_s = self.clip_aug.encode_image(sk_aug_tensor.type(self.dtype))
+            f_p = self.clip_aug.encode_image(photo_aug_tensor.type(self.dtype))
+            f_s = self.clip_aug.encode_image(sk_aug_tensor.type(self.dtype))
             photo_aug_feat = f_p / f_p.norm(dim=-1, keepdim=True)
             sketch_aug_feat = f_s / f_s.norm(dim=-1, keepdim=True)
 
@@ -616,6 +658,41 @@ class HiCroPL_SBIR(pl.LightningModule):
         # No weight_decay (matches ducta/baseline's Adam call, which also omits it -> default 0).
         return torch.optim.Adam(param_groups)
 
+    def _audit_predicted_vs_actual_grads(self):
+        """Compare log_param_breakdown's static idle prediction with real grads.
+
+        Silent when they agree. When they disagree it names the offenders, so a
+        stale _AUG_FORWARD_BUILDS_GRAPH or a new ablation flag that nobody
+        taught _is_idle about surfaces on the first step instead of quietly
+        inflating the reported trainable count for a whole run.
+        """
+        wrong_live, wrong_idle = [], []
+        seen = set()
+        for name, p in self.model.named_parameters():
+            if not p.requires_grad or id(p) in seen:
+                continue
+            seen.add(id(p))
+            group, _sub = _classify_group(name)
+            predicted_idle = _is_idle(name, self.cfg, group) is not None
+            actually_idle = p.grad is None or p.grad.abs().sum().item() == 0.0
+            if predicted_idle and not actually_idle:
+                wrong_idle.append((name, p.numel()))
+            elif actually_idle and not predicted_idle:
+                wrong_live.append((name, p.numel()))
+
+        if not wrong_live and not wrong_idle:
+            return
+        self.print("WARNING -- param log sai so voi gradient thuc te:")
+        for tag, rows in (("log noi LIVE nhung khong co grad", wrong_live),
+                          ("log noi IDLE nhung co grad", wrong_idle)):
+            if rows:
+                self.print(f"    {tag}: {len(rows)} tensors, "
+                           f"{sum(c for _, c in rows):,} params")
+                for n, c in rows[:10]:
+                    self.print(f"        {n}  {c:,}")
+                if len(rows) > 10:
+                    self.print(f"        ... {len(rows) - 10} more")
+
     def on_after_backward(self):
         """Diagnostic: does gradient actually reach ctx_photo (layer-0 photo
         prompt)? If grad_norm prints ~0.000000 despite training, this tells us
@@ -628,7 +705,17 @@ class HiCroPL_SBIR(pl.LightningModule):
         mode (no prompts at all). When use_text_visual_exchange=True, checks
         the photo branch's own layer-0 text ctx instead (its closest analogue
         -- visual_visual_learner.ctx_photo doesn't exist in that mode either).
+
+        Also runs a one-shot audit that every parameter log_param_breakdown
+        called live really did receive gradient. That log predicts idleness
+        statically (from flags and from _AUG_FORWARD_BUILDS_GRAPH) before any
+        backward has happened, so this is the only place the prediction can be
+        checked against reality.
         """
+        if not getattr(self, '_grad_audit_done', False):
+            self._grad_audit_done = True
+            self._audit_predicted_vs_actual_grads()
+
         if self.model.no_prompt_learning:
             return
         if self.model.use_text_visual_exchange:
