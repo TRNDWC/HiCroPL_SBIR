@@ -54,6 +54,7 @@ def loss_fn_hicropl(args, features):
     temperature = getattr(args, 'temperature', 0.07)
     lambda_cross_modal = getattr(args, 'lambda_cross_modal', 1.0)
     lambda_ce = getattr(args, 'lambda_ce', 1.0)
+    lambda_aug = getattr(args, 'lambda_aug', 1.0)
     triplet_margin = getattr(args, 'triplet_margin', 0.3)
     use_triplet_l1 = getattr(args, 'eval_mode', 'category') == 'fine_grained' or getattr(args, 'use_triplet_l1', False)
 
@@ -79,12 +80,15 @@ def loss_fn_hicropl(args, features):
     # wrap that encoder in no_grad, so gradient flows into BOTH arguments here.
     # cross_loss is symmetric (it concatenates the two views), so the aug
     # backbone's LayerNorm is trained by these terms rather than acting as a
-    # fixed target. Weight is a fixed 1.0 by design: there is no lambda flag,
-    # only --disable_aug_branch, which removes the branch entirely (both
-    # features arrive as None).
+    # fixed target.
+    #
+    # --lambda_aug scales BOTH terms together. It only scales: at 0.0 the branch
+    # is still built and still runs two ViT forwards per step, and its params
+    # stay in the optimizer with zero gradient. --disable_aug_branch is the
+    # clean removal (features arrive as None, nothing is constructed).
     loss_aug = 0.0
     if photo_aug_feat is not None:
-        loss_aug = (cross_loss(photo_feat, photo_aug_feat, temperature)
-                    + cross_loss(sketch_feat, sketch_aug_feat, temperature))
+        loss_aug = lambda_aug * (cross_loss(photo_feat, photo_aug_feat, temperature)
+                                 + cross_loss(sketch_feat, sketch_aug_feat, temperature))
 
     return loss_cross_modal + loss_ce + loss_aug
