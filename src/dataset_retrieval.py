@@ -176,7 +176,14 @@ class Sketchy(torch.utils.data.Dataset):
 
         GaussianBlur/Solarization are dropped: the backbone is ViT-B/32, whose
         32x32 patches barely register mild blur.
+
+        --aug_identity_transform (Run B) short-circuits all of that and returns
+        data_transform itself -- reused, not re-declared, so photo_aug comes out
+        bit-wise equal to photo. That leaves clip_aug in place while removing the
+        perturbation, isolating the second encoder as the only variable.
         """
+        if getattr(opts, 'aug_identity_transform', False):
+            return Sketchy.data_transform(opts)
         return transforms.Compose([
             transforms.RandomResizedCrop(opts.max_size, scale=(0.4, 1.0)),
             transforms.RandomHorizontalFlip(p=0.5),
@@ -202,7 +209,12 @@ class Sketchy(torch.utils.data.Dataset):
         Crop scale is milder than photo's since strokes are sparse and an
         aggressive crop easily lands on blank canvas. fill=255 keeps the
         canvas white where RandomAffine exposes new area.
+
+        --aug_identity_transform (Run B): same short-circuit as the photo side,
+        sketch_aug comes out bit-wise equal to sketch.
         """
+        if getattr(opts, 'aug_identity_transform', False):
+            return Sketchy.data_transform(opts)
         return transforms.Compose([
             transforms.RandomResizedCrop(opts.max_size, scale=(0.6, 1.0)),
             transforms.RandomHorizontalFlip(p=0.5),

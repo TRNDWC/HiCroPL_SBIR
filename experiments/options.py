@@ -78,6 +78,41 @@ parser.add_argument('--eval_mode', type=str, default='category',
                     choices=['category', 'fine_grained'],
                     help='Evaluation mode: category-level retrieval or fine-grained instance-level retrieval')
 
-parser.add_argument('--disable_aug_branch', action='store_true', help='Ablation: fully remove the augmentation branch, which is ON by default. The branch is a SECOND CLIP backbone (self.clip_aug), built vanilla (clip_trainer=CoOp, no prompt injection) and frozen COMPLETELY -- including LayerNorm, unlike the main backbone -- so it contributes 0 trainable params and acts as a fixed pretrained-CLIP reference. It encodes an augmented view of the photo and of the sketch, and two InfoNCE terms, jointly weighted by --lambda_aug (default 1.0), pull the main prompted features toward those targets. Setting this flag is a CLEAN ablation in the same sense as --disable_exchange: clip_aug is never constructed, the dataset stops emitting the two augmented tensors, and the two loss terms are skipped -- nothing is built-then-idled. Note the branch costs ~605MB VRAM and ~151M frozen params when enabled.')
+parser.add_argument('--disable_aug_branch', action='store_true', help='Ablation: fully remove the augmentation branch, which is ON by default. The branch is a SECOND CLIP backbone (self.clip_aug), built vanilla (clip_trainer=CoOp, no prompt injection) and frozen except for the LayerNorms of its VISUAL tower (39,936 params, opened at src/model_hicropl.py:456 and trained by the aug InfoNCE terms -- the forward is deliberately not under no_grad). It encodes an augmented view of the photo and of the sketch, and two InfoNCE terms, jointly weighted by --lambda_aug (default 1.0), pull the main prompted features toward those targets. Setting this flag is a CLEAN ablation in the same sense as --disable_exchange: clip_aug is never constructed, the dataset stops emitting the two augmented tensors, and the two loss terms are skipped -- nothing is built-then-idled. Note the branch costs ~605MB VRAM and ~151M params when enabled.')
+
+# ----------------------
+# Augmentation-branch decomposition (Run A / Run B)
+#
+# The default aug branch confounds TWO variables: (i) a second encoder exists
+# (clip_aug: its own 151M weights, its own 39,936 trainable visual LayerNorms),
+# and (ii) that encoder is fed a PERTURBED view. These two flags separate them,
+# one variable each. Both default False -- every pre-existing run reproduces
+# bit-identically. They are mutually exclusive (see the check below).
+# ----------------------
+parser.add_argument('--aug_shared_encoder', action='store_true', help='Run A -- isolates variable (ii), the augmented view, by deleting variable (i). clip_aug is NEVER constructed (no load_clip_to_cpu, so 151M params and ~605MB VRAM are saved and nothing of it can reach the optimizer or the checkpoint). The augmented views instead go through the EXACT main forward path: same backbone (self.clip), same visual_encoder_photo/sketch, same prompt tensors computed once in that same forward, same LayerNorms -- only the input tensor changes to photo_aug/sketch_aug. loss_aug keeps its exact structure and its 1.0 coefficient: cross_loss(photo_feat, photo_aug_feat, T) + cross_loss(sketch_feat, sketch_aug_feat, T). Mutually exclusive with --aug_identity_transform.')
+parser.add_argument('--aug_detach_view', action='store_true', help='Sub-flag of --aug_shared_encoder (no effect otherwise): .detach() the augmented-view features before cross_loss, turning the term into a one-way pull of the clean view toward a fixed augmented target. Default OFF = symmetric siamese, which is what the current clip_aug branch actually does (its visual LayerNorms receive gradient from loss_aug -- there is no no_grad on that path, src/model_hicropl.py:542-562), so OFF is the setting that keeps Run A comparable to the 80.13 reference.')
+parser.add_argument('--aug_identity_transform', action='store_true', help='Run B -- isolates variable (i), the second encoder, by neutralizing variable (ii). clip_aug is still built, still gets its visual LayerNorms opened, still runs its two forward passes, and loss_aug keeps its exact structure -- but the augmented transform for BOTH photo and sketch is replaced by Sketchy.data_transform (the very transform used for the clean view), so photo_aug is bit-wise equal to photo and sketch_aug to sketch. Verified once on the first batch with torch.allclose (prints IDENTITY TRANSFORM: OK). Any gain that survives here comes from the second encoder itself, not from the perturbation. Mutually exclusive with --aug_shared_encoder.')
 
 opts = parser.parse_args()
+
+# Guard nonsense combinations rather than letting them degrade into a silent
+# no-op that looks like a legitimate run in the logs.
+if opts.aug_shared_encoder and opts.aug_identity_transform:
+    raise ValueError(
+        "--aug_shared_encoder and --aug_identity_transform are mutually exclusive. "
+        "Run A removes clip_aug entirely, so an identity transform would only make the "
+        "main encoder see the same tensor twice: loss_aug would collapse to InfoNCE(f, f), "
+        "a constant with no gradient signal. Run A and Run B are two separate runs -- "
+        "pass exactly one of the two flags."
+    )
+if opts.aug_detach_view and not opts.aug_shared_encoder:
+    print("[WARN] --aug_detach_view has no effect without --aug_shared_encoder: the clip_aug "
+          "path does its own normalization and is left symmetric on purpose. Ignored.")
+if opts.disable_aug_branch and (opts.aug_shared_encoder or opts.aug_identity_transform):
+    flag = '--aug_shared_encoder' if opts.aug_shared_encoder else '--aug_identity_transform'
+    raise ValueError(
+        f"--disable_aug_branch cannot be combined with {flag}. --disable_aug_branch stops the "
+        "dataset from emitting the augmented tensors at all, so loss_aug is skipped and "
+        f"{flag} would be a silent no-op -- the run would be identical to a plain "
+        "--disable_aug_branch run while its name/log claims otherwise."
+    )

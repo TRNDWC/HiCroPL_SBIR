@@ -31,13 +31,21 @@ def cross_loss(feature_1, feature_2, temperature):
 
     return F.cross_entropy(logits, labels_target)
 
-def loss_fn_hicropl(args, features):
+def loss_fn_hicropl(args, features, return_components=False):
     """
     Combined Loss Function for HiCroPL-SBIR.
 
     Loss Components:
     L1: InfoNCE Loss (sketch - positive_photo) - Cross-modal alignment
     L4: Cross-Entropy Loss (text - photo) + (text - sketch) - Classification
+
+    return_components is REPORTING ONLY: it changes the return type, never the
+    arithmetic. The three terms handed back are the exact tensors that were
+    summed (post-lambda), so logging them cannot drift from the loss that is
+    actually backpropagated. Needed to read the aug term's share over training:
+    under --aug_shared_encoder both views come from one encoder, which makes the
+    InfoNCE term intrinsically easier, and a term that saturates near 0 is a
+    different explanation of a result than a missing second encoder.
     """
     (
         photo_feat, logits_photo,
@@ -75,7 +83,11 @@ def loss_fn_hicropl(args, features):
 
     # --- L5: augmentation branch, InfoNCE(view goc, view augmented) ---
     # photo_feat / sketch_feat come from the trainable prompted branch.
-    # *_aug_feat come from clip_aug, which is frozen by freeze_all_but_bn --
+    # *_aug_feat come from clip_aug by default -- or, under --aug_shared_encoder
+    # (Run A), from the SAME main encoder with the same prompts, in which case
+    # this term becomes a plain siamese consistency loss on two views. Either
+    # way the structure below is identical; only where the features came from
+    # differs. clip_aug is frozen by freeze_all_but_bn --
     # its LayerNorm IS trainable and CustomCLIP.forward deliberately does not
     # wrap that encoder in no_grad, so gradient flows into BOTH arguments here.
     # cross_loss is symmetric (it concatenates the two views), so the aug
@@ -91,4 +103,11 @@ def loss_fn_hicropl(args, features):
         loss_aug = lambda_aug * (cross_loss(photo_feat, photo_aug_feat, temperature)
                                  + cross_loss(sketch_feat, sketch_aug_feat, temperature))
 
-    return loss_cross_modal + loss_ce + loss_aug
+    total = loss_cross_modal + loss_ce + loss_aug
+    if return_components:
+        return total, {
+            'loss_cross_modal': loss_cross_modal,
+            'loss_ce': loss_ce,
+            'loss_aug': loss_aug,
+        }
+    return total

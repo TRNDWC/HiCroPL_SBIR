@@ -67,8 +67,19 @@ if __name__ == '__main__':
             aug_photo = aug_sketch = None
             print("[ABLATION] --disable_aug_branch: augmentation branch fully removed.")
         else:
+            # Run B routes both of these to Sketchy.data_transform internally, so
+            # the branch below is unchanged -- the flag is read inside the two
+            # static methods (src/dataset_retrieval.py).
             aug_photo = Sketchy.data_transform_aug_photo(opts)
             aug_sketch = Sketchy.data_transform_aug_sketch(opts)
+            if opts.aug_identity_transform:
+                print("[ABLATION] --aug_identity_transform (Run B): aug transforms replaced by "
+                      "Sketchy.data_transform for BOTH photo and sketch -- clip_aug still built, "
+                      "aug views must be bit-wise equal to the clean ones (checked on batch 0).")
+            if opts.aug_shared_encoder:
+                print("[ABLATION] --aug_shared_encoder (Run A): clip_aug NOT built; the augmented "
+                      "views go through the main encoder with the same prompts. "
+                      f"aug_detach_view={int(opts.aug_detach_view)}.")
         train_dataset = Sketchy(opts, dataset_transforms, mode='train', return_orig=False,
                                 transform_aug_photo=aug_photo, transform_aug_sketch=aug_sketch)
         print(f"[CONFIG] Loading validation data in category mode")

@@ -106,6 +106,13 @@ def _classify_group(name):
 # if they disagree, so a stale value cannot go unnoticed for long.
 _AUG_FORWARD_BUILDS_GRAPH = True
 
+# Trainable params clip_aug is supposed to expose: the LayerNorms of the
+# ViT-B/32 VISUAL tower only (__init__ scopes unfreeze_ln to .visual).
+#   12 blocks x (ln_1 + ln_2) x (weight + bias) x 768 = 36,864
+#   ln_pre + ln_post                x (weight + bias) x 768 =  3,072
+# Verified against a real build. Any other number means the freeze scope moved.
+_AUG_LN_EXPECTED = 39_936
+
 
 def _is_idle(name, cfg, group):
     """Is this parameter guaranteed to receive NO gradient this run?
@@ -277,8 +284,13 @@ def log_param_breakdown(model, printer=print):
     # The table only lists trainable params, so the aug backbone's ~151M frozen
     # weights would otherwise be invisible in the only param log there is.
     clip_aug = getattr(model, 'clip_aug', None)
+    shared_enc = bool(getattr(cfg, 'aug_shared_encoder', False))
+    ident_tf = bool(getattr(cfg, 'aug_identity_transform', False))
+    detach_view = bool(getattr(cfg, 'aug_detach_view', False))
     if clip_aug is None:
-        printer("    aug backbone: absent (--disable_aug_branch)")
+        reason = ('--aug_shared_encoder (Run A: aug views ride the main encoder)'
+                  if shared_enc else '--disable_aug_branch')
+        printer(f"    aug backbone: absent ({reason})")
     else:
         tot = sum(p.numel() for p in clip_aug.parameters())
         tr = sum(p.numel() for p in clip_aug.parameters() if p.requires_grad)
@@ -290,6 +302,50 @@ def log_param_breakdown(model, printer=print):
     printer(f"GROUP_FP | backbone={totals['backbone']} | tokens={totals['tokens']} | "
             f"exchange={totals['exchange']} | ungrouped={totals['ungrouped']} | "
             f"declared={grand} | effective={live}")
+
+    # ---- Run A / Run B fingerprint + hard reference checks -------------------
+    # Subtotals below are DISJOINT and sum back to `declared`, so a silent
+    # regrouping cannot hide params inside a total that still looks right.
+    def _sum(pred):
+        return sum(r['numel'] for r in recs if pred(r))
+
+    n_clip_aug = _sum(lambda r: r['group'] == 'backbone' and r['sub'] == 'aug')
+    n_ln = _sum(lambda r: r['group'] == 'backbone' and r['sub'] == 'main')
+    n_prompt = totals['tokens']
+    n_mapper = _sum(lambda r: r['group'] == 'exchange' and r['sub'] == 'mapper')
+    n_lkp = _sum(lambda r: r['group'] == 'exchange' and r['sub'] == 'lkp')
+    n_other = grand - (n_clip_aug + n_ln + n_prompt + n_mapper + n_lkp)
+
+    printer(f"RUN_MODE  | aug_shared_encoder={int(shared_enc)} | "
+            f"aug_identity_transform={int(ident_tf)} | "
+            f"aug_detach_view={int(detach_view)} | "
+            f"clip_aug_loaded={'yes' if clip_aug is not None else 'no'}")
+    printer(f"PARAM_FP  | trainable={grand} | ln={n_ln} | prompt={n_prompt} | "
+            f"mapper={n_mapper} | lkp={n_lkp} | clip_aug={n_clip_aug} | other={n_other}")
+
+    # Run A reference: the second backbone must not exist at all -- not built,
+    # not in the optimizer, not in the checkpoint.
+    if shared_enc:
+        if n_clip_aug == 0 and clip_aug is None:
+            printer("    CHECK Run A: clip_aug=0, clip_aug_loaded=no -- OK")
+        else:
+            printer(f"    ERROR Run A: expected clip_aug=0 and clip_aug_loaded=no, got "
+                    f"clip_aug={n_clip_aug} and clip_aug_loaded="
+                    f"{'yes' if clip_aug is not None else 'no'}")
+    # Run B (and the plain aug branch) reference: exactly the visual tower's
+    # LayerNorms -- 12 blocks x 2 LN x (weight+bias) x 768 = 36,864, plus
+    # ln_pre + ln_post = 3,072.
+    if clip_aug is not None:
+        if n_clip_aug == _AUG_LN_EXPECTED:
+            printer(f"    CHECK Run B: clip_aug trainable={n_clip_aug:,} -- OK "
+                    f"(visual-tower LayerNorm only)")
+        else:
+            printer(f"    WARNING Run B: clip_aug trainable={n_clip_aug:,}, expected "
+                    f"{_AUG_LN_EXPECTED:,} (ViT-B/32 visual tower: 12x2x2x768=36,864 "
+                    f"+ ln_pre/ln_post=3,072). Breakdown by tensor:")
+            for r in [x for x in recs if x['group'] == 'backbone' and x['sub'] == 'aug'][:60]:
+                printer(f"        {r['name']}  {r['numel']:,}  "
+                        f"{'LN' if r['is_ln'] else 'NOT-LN'}")
     printer("=" * 78)
     printer("")
 
@@ -437,7 +493,24 @@ class CustomCLIP(nn.Module):
         # so encode_image() raises on it. A prompt-free reference genuinely
         # needs its own non-prompted build; sharing self.clip is not an option.
         self.disable_aug_branch = getattr(cfg, 'disable_aug_branch', False)
-        if not self.disable_aug_branch:
+        # Run A (--aug_shared_encoder): the augmented views go through the MAIN
+        # encoder, so the second backbone is not merely idle -- it must not
+        # exist. Skipping load_clip_to_cpu here keeps its 151M params out of the
+        # optimizer, out of the checkpoint and out of VRAM. Safe to skip
+        # precisely because this block is built LAST (see above): the RNG it
+        # would have consumed comes after every other module's init, so every
+        # other parameter stays bit-identical to a run that builds it.
+        self.aug_shared_encoder = getattr(cfg, 'aug_shared_encoder', False)
+        self.aug_detach_view = getattr(cfg, 'aug_detach_view', False)
+        # Run B (--aug_identity_transform): clip_aug is built exactly as usual;
+        # only the dataset-side transform changes (src/dataset_retrieval.py).
+        # One-shot bit-equality check, armed here and fired on the first batch.
+        self.aug_identity_transform = getattr(cfg, 'aug_identity_transform', False)
+        self._identity_transform_checked = False
+        # Explicit None (rather than a missing attribute) so every consumer can
+        # use a plain `is not None` test.
+        self.clip_aug = None
+        if not self.disable_aug_branch and not self.aug_shared_encoder:
             from src.utils import load_clip_to_cpu
             cfg_aug = copy.copy(cfg)
             cfg_aug.clip_trainer = 'CoOp'
@@ -487,6 +560,28 @@ class CustomCLIP(nn.Module):
         else:
             sk_tensor, photo_tensor, neg_tensor, label = x[:4]
 
+        # Run B canary: fires once, on the first batch that carries aug tensors.
+        if (self.aug_identity_transform and not self._identity_transform_checked
+                and photo_aug_tensor is not None):
+            self._identity_transform_checked = True
+            same_photo = torch.allclose(photo_aug_tensor, photo_tensor)
+            same_sketch = torch.allclose(sk_aug_tensor, sk_tensor)
+            if same_photo and same_sketch:
+                print("IDENTITY TRANSFORM: OK")
+            else:
+                d_p = (photo_aug_tensor - photo_tensor).abs().max().item()
+                d_s = (sk_aug_tensor - sk_tensor).abs().max().item()
+                print(f"IDENTITY TRANSFORM: FAIL -- max abs diff photo={d_p:.6e} "
+                      f"sketch={d_s:.6e} (expected 0.0 for both)")
+
+        # Run A: the augmented views ride the main encoder. Computed inside each
+        # architecture branch below, because the prompt tensors they must reuse
+        # are branch-local -- recomputing them here would be a different (freshly
+        # called) learner output, and calling encode_image() instead would skip
+        # the prompts entirely.
+        image_features_photo_aug = image_features_sketch_aug = None
+        run_shared_aug = self.aug_shared_encoder and photo_aug_tensor is not None
+
         if self.no_prompt_learning:
             # Plain frozen CLIP forward (only LayerNorm trainable) -- no
             # prompt tensors of any kind, text uses the fixed template.
@@ -495,6 +590,9 @@ class CustomCLIP(nn.Module):
             image_features_neg = self.clip.encode_image(neg_tensor.type(self.dtype))
             text_features_all_photo = self.clip.encode_text(self.tokenized_prompts_photo)
             text_features_all_sketch = self.clip.encode_text(self.tokenized_prompts_sketch)
+            if run_shared_aug:
+                image_features_photo_aug = self.clip.encode_image(photo_aug_tensor.type(self.dtype))
+                image_features_sketch_aug = self.clip.encode_image(sk_aug_tensor.type(self.dtype))
         elif self.use_text_visual_exchange:
             # Each branch's learner performs its OWN bidirectional text<->visual
             # exchange -- no coupling between the two learners/branches.
@@ -508,6 +606,11 @@ class CustomCLIP(nn.Module):
 
             # Negative branch (uses photo encoder + photo visual prompts)
             image_features_neg = self.visual_encoder_photo(neg_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
+
+            if run_shared_aug:
+                # Same encoders, same prompt tensors as the clean views above.
+                image_features_photo_aug = self.visual_encoder_photo(photo_aug_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
+                image_features_sketch_aug = self.visual_encoder_sketch(sk_aug_tensor.type(self.dtype), vis_shallow_sketch, vis_deeper_sketch)
         else:
             # 1. Call visual-visual learner ONCE (shared by both branches)
             photo_shallow, sketch_shallow, photo_deeper, sketch_deeper = self.visual_visual_learner()
@@ -526,6 +629,14 @@ class CustomCLIP(nn.Module):
 
             # 4. Negative branch (uses photo encoder + photo visual prompts)
             image_features_neg = self.visual_encoder_photo(neg_tensor.type(self.dtype), photo_shallow, photo_deeper)
+
+            # 4b. Run A: augmented views, SAME encoders and SAME prompt tensors
+            # (photo_shallow/photo_deeper, sketch_shallow/sketch_deeper) as
+            # steps 2-3 -- the learner is not called a second time, so the only
+            # thing that differs from the clean pass is the input tensor.
+            if run_shared_aug:
+                image_features_photo_aug = self.visual_encoder_photo(photo_aug_tensor.type(self.dtype), photo_shallow, photo_deeper)
+                image_features_sketch_aug = self.visual_encoder_sketch(sk_aug_tensor.type(self.dtype), sketch_shallow, sketch_deeper)
 
         # 5. Normalize features
         photo_feat = image_features_photo / image_features_photo.norm(dim=-1, keepdim=True)
@@ -554,8 +665,24 @@ class CustomCLIP(nn.Module):
         # retained until backward. _is_idle() encodes the no_grad-free
         # assumption for the log, and on_after_backward re-checks it against
         # real gradients once, so the two can never drift apart silently.
+        #
+        # Run A (--aug_shared_encoder) replaces this block: the features were
+        # already produced above by the main encoder, so all that is left is the
+        # same L2 normalization. loss_fn_hicropl sees the identical tuple shape
+        # either way, so loss_aug keeps its exact structure and 1.0 coefficient.
         photo_aug_feat = sketch_aug_feat = None
-        if photo_aug_tensor is not None and getattr(self, 'clip_aug', None) is not None:
+        if image_features_photo_aug is not None:
+            photo_aug_feat = image_features_photo_aug / image_features_photo_aug.norm(dim=-1, keepdim=True)
+            sketch_aug_feat = image_features_sketch_aug / image_features_sketch_aug.norm(dim=-1, keepdim=True)
+            if self.aug_detach_view:
+                # One-way variant: the aug view becomes a fixed target, only the
+                # clean view is pulled. OFF by default -- the clip_aug branch it
+                # is being compared against is symmetric (its visual LayerNorms
+                # do receive gradient from loss_aug), so a symmetric Run A is the
+                # apples-to-apples setting.
+                photo_aug_feat = photo_aug_feat.detach()
+                sketch_aug_feat = sketch_aug_feat.detach()
+        elif photo_aug_tensor is not None and self.clip_aug is not None:
             f_p = self.clip_aug.encode_image(photo_aug_tensor.type(self.dtype))
             f_s = self.clip_aug.encode_image(sk_aug_tensor.type(self.dtype))
             photo_aug_feat = f_p / f_p.norm(dim=-1, keepdim=True)
@@ -589,7 +716,16 @@ class HiCroPL_SBIR(pl.LightningModule):
     def on_train_epoch_start(self):
         # NOTE: Encoders stay in training mode (required for LayerNorm to use batch statistics)
         # Setting eval() here would conflict with forward() expectation and break BN/LN behavior
-        pass
+        #
+        # Own accumulator for the loss breakdown. Reading it back out of
+        # trainer.callback_metrics is NOT equivalent: an un-suffixed key there
+        # holds whatever was written last, which for a metric logged
+        # on_step=True is the LAST STEP's value, while an on_epoch-only metric
+        # is written just once per epoch -- so the two are neither the same
+        # reduction nor the same epoch. Accumulating here keeps the three terms
+        # and their total on one clock.
+        self._loss_parts_sum = {}
+        self._loss_parts_n = 0
 
     def on_fit_start(self):
         """Intentionally empty.
@@ -730,12 +866,47 @@ class HiCroPL_SBIR(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         from src.losses_hicropl import loss_fn_hicropl
         features = self.model(batch, self.classnames)
-        loss = loss_fn_hicropl(self.args, features)
+        # Components are the very tensors summed into `loss` -- reporting only,
+        # the returned scalar and its graph are unchanged.
+        loss, parts = loss_fn_hicropl(self.args, features, return_components=True)
 
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=False, logger=True)
         self.log('loss', loss, on_step=False, on_epoch=True, prog_bar=False, logger=False)
+        # Per-term epoch curves. Reading a run's outcome needs the aug term's
+        # SHARE over time, not just the total: a term that saturates toward 0
+        # explains a result differently than a term that never mattered.
+        for k, v in parts.items():
+            t = v.detach() if torch.is_tensor(v) else torch.tensor(float(v), device=loss.device)
+            self.log(k, t, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+            # Summed on-device; .item() happens once per epoch, not per step.
+            self._loss_parts_sum[k] = self._loss_parts_sum.get(k, 0.0) + t
+        self._loss_parts_n += 1
 
         return loss
+
+    def on_train_epoch_end(self):
+        """Print the loss breakdown for THIS epoch, from this module's own sums.
+
+        total is the sum of the three terms by construction, so cross_modal +
+        ce + aug always reconciles exactly and aug_share is a share of a number
+        that really is the total. It will not match the "Train loss" line
+        printed during validation: that one reads an un-suffixed
+        callback_metrics key, and for a metric logged with on_step=True that key
+        holds the LAST STEP's value, not the epoch mean (validation also runs
+        before this epoch's train metrics are reduced). In a converging run the
+        last step sits below the epoch mean, so that line reads lower.
+        """
+        if not self._loss_parts_n:
+            return
+        n = self._loss_parts_n
+        vals = {k: (v / n).item() for k, v in self._loss_parts_sum.items()}
+        total = sum(vals.values())
+        share = 100.0 * vals.get('loss_aug', 0.0) / total if total else 0.0
+        self.print("LOSS_FP | epoch={} | cross_modal={:.6f} | ce={:.6f} | aug={:.6f} "
+                   "| total={:.6f} | aug_share={:.2f}% | steps={}".format(
+                       self.current_epoch, vals.get('loss_cross_modal', 0.0),
+                       vals.get('loss_ce', 0.0), vals.get('loss_aug', 0.0),
+                       total, share, n))
 
     def extract_eval_features(self, tensor, modality):
         """Extract visual features (prompted only, no distill mixing)."""
@@ -858,7 +1029,12 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         train_loss = self.trainer.callback_metrics.get("train_loss", None)
         if train_loss is not None:
-            self.print(f"Train loss (epoch avg): {train_loss.item():.6f}")
+            # Label corrected: this key is written on every step, so during
+            # validation it holds the LAST STEP of the epoch, not the mean.
+            # Measured: it matches step N-1's loss exactly. The epoch mean is
+            # the `total` field of the LOSS_FP line printed by
+            # on_train_epoch_end.
+            self.print(f"Train loss (last step): {train_loss.item():.6f}")
 
         grad_norm = self.trainer.callback_metrics.get("ctx_photo_grad_norm", None)
         param_norm = self.trainer.callback_metrics.get("ctx_photo_param_norm", None)
