@@ -726,6 +726,10 @@ class HiCroPL_SBIR(pl.LightningModule):
         # and their total on one clock.
         self._loss_parts_sum = {}
         self._loss_parts_n = 0
+        # ||d(loss_aug)/d(photo_feat)||, sampled at the first and last step of
+        # the epoch. None = the aug term is not a tensor this run (branch off).
+        self._aug_grad_first = None
+        self._aug_grad_last = None
 
     def on_fit_start(self):
         """Intentionally empty.
@@ -882,7 +886,38 @@ class HiCroPL_SBIR(pl.LightningModule):
             self._loss_parts_sum[k] = self._loss_parts_sum.get(k, 0.0) + t
         self._loss_parts_n += 1
 
+        # Life-or-death check for any run whose aug term is degenerate: does
+        # loss_aug still reach photo_feat at all? A saturated positive term with
+        # a live negative term still has non-zero gradient; a hidden detach has
+        # exactly zero. Only the total loss is observable otherwise, and those
+        # two cases are indistinguishable in it.
+        n_batches = self.trainer.num_training_batches
+        is_last = isinstance(n_batches, int) and batch_idx == n_batches - 1
+        if batch_idx == 0 or is_last:
+            self._probe_aug_grad(parts.get('loss_aug'), features[0],
+                                 first=(batch_idx == 0))
+
         return loss
+
+    def _probe_aug_grad(self, loss_aug, photo_feat, first):
+        """d(loss_aug)/d(photo_feat), L2 norm -- read-only.
+
+        torch.autograd.grad with an explicit `inputs` returns the gradient
+        instead of accumulating it into .grad, and retain_graph=True leaves the
+        graph intact for the real backward that Lightning runs afterwards. No
+        second backward(), no optimizer interaction, no RNG consumed -- verified
+        by comparing post-fit parameter checksums with and without this probe.
+        """
+        if not torch.is_tensor(loss_aug) or not loss_aug.requires_grad:
+            value = None
+        else:
+            g = torch.autograd.grad(loss_aug, photo_feat, retain_graph=True,
+                                    allow_unused=True)[0]
+            value = 0.0 if g is None else g.norm().item()
+        if first:
+            self._aug_grad_first = value
+        else:
+            self._aug_grad_last = value
 
     def on_train_epoch_end(self):
         """Print the loss breakdown for THIS epoch, from this module's own sums.
@@ -902,11 +937,19 @@ class HiCroPL_SBIR(pl.LightningModule):
         vals = {k: (v / n).item() for k, v in self._loss_parts_sum.items()}
         total = sum(vals.values())
         share = 100.0 * vals.get('loss_aug', 0.0) / total if total else 0.0
-        self.print("LOSS_FP | epoch={} | cross_modal={:.6f} | ce={:.6f} | aug={:.6f} "
-                   "| total={:.6f} | aug_share={:.2f}% | steps={}".format(
+        fmt = lambda x: 'n/a' if x is None else '{:.6e}'.format(x)
+        self.print("LOSS_FP | ep={} | cross_modal={:.6f} | ce={:.6f} | aug={:.6f} "
+                   "| total={:.6f} | aug_grad_norm={} | aug_grad_norm_first={} "
+                   "| aug_share={:.2f}% | steps={}".format(
                        self.current_epoch, vals.get('loss_cross_modal', 0.0),
-                       vals.get('loss_ce', 0.0), vals.get('loss_aug', 0.0),
-                       total, share, n))
+                       vals.get('loss_ce', 0.0), vals.get('loss_aug', 0.0), total,
+                       fmt(self._aug_grad_last), fmt(self._aug_grad_first), share, n))
+        # Same four values as scalars, plus the probe.
+        self.log('loss_total', torch.tensor(float(total), device=self.device),
+                 on_step=False, on_epoch=True, logger=True)
+        if self._aug_grad_last is not None:
+            self.log('aug_grad_norm', torch.tensor(float(self._aug_grad_last), device=self.device),
+                     on_step=False, on_epoch=True, logger=True)
 
     def extract_eval_features(self, tensor, modality):
         """Extract visual features (prompted only, no distill mixing)."""
