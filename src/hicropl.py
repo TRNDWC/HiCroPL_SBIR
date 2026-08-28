@@ -791,13 +791,57 @@ class VisualVisualPromptLearner(nn.Module):
         )
 
 
+def _build_description_prompts(raw_names, clean_names, descriptions, desc_pos, n_ctx):
+    """Assemble the description prompt string for every class, budget-checked.
+
+    The leading `n_ctx` "X" tokens are LOAD-BEARING placeholders, not decoration:
+    SimpleTextPromptLearner drops embedding[:, 1:1+n_ctx] and puts the learnable
+    ctx there, so whatever sits in that window is deleted. Without the padding,
+    ctx would erase the first words of the description instead.
+
+    Budget: 1(SOS) + n_ctx + L_d + L_cls + 1(EOT) <= 77. Checked with the raw
+    tokenizer (no length cap) BEFORE clip.tokenize is called, because
+    clip.tokenize(truncate=False) raises a bare RuntimeError naming no class.
+    """
+    from src.clip.clip import _tokenizer
+
+    if desc_pos not in ('V1', 'V2'):
+        raise ValueError(f"desc_pos must be 'V1' or 'V2', got {desc_pos!r}")
+    placeholder = " ".join(["X"] * n_ctx)
+
+    prompts, offenders = [], []
+    for raw, clean in zip(raw_names, clean_names):
+        d = descriptions[raw].strip().rstrip(".").lower()
+        if desc_pos == 'V1':
+            prompt = f"{placeholder} {d}, a {clean}."
+        else:
+            prompt = f"{placeholder} a {clean}, {d}."
+        n_total = 2 + len(_tokenizer.encode(prompt))   # + SOS + EOT
+        if n_total > 77:
+            offenders.append((raw, len(_tokenizer.encode(d)),
+                              len(_tokenizer.encode(f"a {clean}.")), n_total))
+        prompts.append(prompt)
+
+    if offenders:
+        rows = "\n".join(
+            f"    {name}: L_d={ld} L_cls={lc} -> 1 + {n_ctx} + L_d + L_cls + 1 = {tot} > 77"
+            for name, ld, lc, tot in offenders
+        )
+        raise ValueError(
+            f"{len(offenders)} class(es) do not fit CLIP's 77-token context at "
+            f"n_ctx={n_ctx}, desc_pos={desc_pos}:\n{rows}\n"
+            f"Shorten those descriptions or lower n_ctx."
+        )
+    return prompts
+
+
 class SimpleTextPromptLearner(nn.Module):
     """Minimal text-only prompt learner: prepares tokenized prompts and text prompt tensors.
 
     Matches the outputs needed by TextEncoder but does not perform cross-modal mapping.
     """
 
-    def __init__(self, cfg, classnames, clip_model):
+    def __init__(self, cfg, classnames, clip_model, descriptions=None, desc_pos="V1"):
         super().__init__()
         n_cls = len(classnames)
         self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
@@ -827,9 +871,29 @@ class SimpleTextPromptLearner(nn.Module):
             nn.init.normal_(p, std=0.02)
         self.cross_prompts_text = cross_prompts_text
 
+        # P2: the branch above drops ctx_init SILENTLY when n_ctx > 4 (see the
+        # `if ctx_init and (n_ctx) <= 4` condition earlier in this __init__).
+        # Warn only -- behaviour deliberately left as it is.
+        if ctx_init and n_ctx > 4:
+            print(f"[WARN] SimpleTextPromptLearner: ctx_init={ctx_init!r} is IGNORED because "
+                  f"n_ctx={n_ctx} > 4. ctx falls back to normal(std=0.02) init and the prompt "
+                  f"prefix becomes {' '.join(['X'] * n_ctx)!r}. Behaviour unchanged.")
+
         # register token prefix/suffix buffers for class prompts
+        #
+        # All THREE buffers below are derived from the same `prompts` list. They
+        # must stay in sync: token_prefix/token_suffix feed the embedding that
+        # goes into the encoder, while tokenized_prompts is what TextEncoder
+        # runs argmax over to locate EOT for pooling. Regenerating one without
+        # the others produces a valid-shaped tensor pooled at the wrong
+        # position -- no exception, just a wrong feature (see the P1 assert).
+        raw_names = list(classnames)   # keys exactly as they appear in the JSON
         classnames = [name.replace("_", " ") for name in classnames]
-        prompts = [prompt_prefix + " " + name + "." for name in classnames]
+        if descriptions is None:
+            prompts = [prompt_prefix + " " + name + "." for name in classnames]
+        else:
+            prompts = _build_description_prompts(
+                raw_names, classnames, descriptions, desc_pos, n_ctx)
         from src.clip import clip as _clip
         tokenized_prompts = torch.cat([_clip.tokenize(p) for p in prompts]).to(clip_model.token_embedding.weight.device)
         with torch.no_grad():
@@ -837,6 +901,32 @@ class SimpleTextPromptLearner(nn.Module):
         self.register_buffer("token_prefix", embedding[:, :1, :])
         self.register_buffer("token_suffix", embedding[:, 1 + n_ctx:, :])
         self.register_buffer("tokenized_prompts", tokenized_prompts)
+
+        # P1: EOT must be the last real token, because TextEncoder pools at
+        # tokenized_prompts.argmax(-1) and that index is only the EOT position
+        # while this holds. A stale tokenized_prompts fails here instead of
+        # silently pooling mid-sentence.
+        eot_idx = tokenized_prompts.argmax(dim=-1)
+        n_real = (tokenized_prompts != 0).sum(dim=-1) - 1
+        assert torch.equal(eot_idx, n_real), (
+            "P1: tokenized_prompts.argmax(-1) is not the last non-pad position -- the buffer "
+            f"does not describe the strings it was built from. argmax={eot_idx[:5].tolist()} "
+            f"vs last-real={n_real[:5].tolist()}"
+        )
+
+        # P8: the ctx window must contain only placeholders. If real content
+        # sits at positions 1..n_ctx it is DELETED (that slice never reaches the
+        # encoder), which no shape check would catch.
+        if descriptions is not None:
+            from src.clip.clip import _tokenizer
+            x_id = _tokenizer.encode("X")[0]
+            window = tokenized_prompts[:, 1:1 + n_ctx]
+            bad = (window != x_id).any(dim=-1).nonzero().flatten()
+            assert bad.numel() == 0, (
+                f"P8: {bad.numel()} prompt(s) do not start with {n_ctx} 'X' placeholders, so ctx "
+                f"would overwrite real content. First offender: {raw_names[int(bad[0])]!r} -> "
+                f"window ids {window[int(bad[0])].tolist()} (expected all {x_id})"
+            )
 
     def construct_prompts(self, ctx, prefix, suffix, label=None):
         if label is not None:

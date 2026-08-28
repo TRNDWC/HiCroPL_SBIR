@@ -94,10 +94,31 @@ parser.add_argument('--aug_detach_view', action='store_true', help='Sub-flag of 
 parser.add_argument('--allow_degenerate_aug', action='store_true', help='Run D -- escape hatch that permits --aug_shared_encoder together with --aug_identity_transform, a combination otherwise rejected. It is NOT a no-op: photo_aug_feat comes out bit-identical to photo_feat, so the InfoNCE positive term is saturated (cos=1, nothing left to align), but the NEGATIVE term still pushes the batch apart -- the aug term degenerates into a pure intra-domain uniformity regularizer with the alignment half switched off. That separates the two things loss_aug does at once, which no other flag combination can. Off by default; the ValueError stays exactly as before without it.')
 parser.add_argument('--aug_identity_transform', action='store_true', help='Run B -- isolates variable (i), the second encoder, by neutralizing variable (ii). clip_aug is still built, still gets its visual LayerNorms opened, still runs its two forward passes, and loss_aug keeps its exact structure -- but the augmented transform for BOTH photo and sketch is replaced by Sketchy.data_transform (the very transform used for the clean view), so photo_aug is bit-wise equal to photo and sketch_aug to sketch. Verified once on the first batch with torch.allclose (prints IDENTITY TRANSFORM: OK). Any gain that survives here comes from the second encoder itself, not from the perturbation. Mutually exclusive with --aug_shared_encoder.')
 
+# ----------------------
+# Class descriptions (VLM-generated, per-domain) -- see gpt_file/*.json
+# Both must be supplied together; supplying neither keeps the hard-coded
+# ctx_init/ctx_init_sketch template path untouched.
+# ----------------------
+parser.add_argument('--desc_sketch', type=str, default=None, help='Path to descriptions_sketch.json: {"meta": {...}, "descriptions": {classname: text}}. Replaces the hard-coded sketch template for the text branch. Must be given together with --desc_photo.')
+parser.add_argument('--desc_photo', type=str, default=None, help='Path to descriptions_photo.json: {"meta": {...}, "descriptions": {classname: text}}. Replaces the hard-coded photo template for the text branch. Must be given together with --desc_sketch.')
+parser.add_argument('--desc_pos', type=str, default='V1', choices=['V1', 'V2'], help='Where the class name sits relative to the description in the text prompt. V1 (default): "X..X <description>, a <class>." -- class last. V2: "X..X a <class>, <description>." -- class first, description last. The leading X tokens are placeholders the learnable ctx overwrites in both cases. V3 (class name inside the description) is not offered: the shipped description files have the class name stripped, so it cannot be built from them. No effect unless --desc_sketch/--desc_photo are given.')
+
 opts = parser.parse_args()
 
 # Guard nonsense combinations rather than letting them degrade into a silent
 # no-op that looks like a legitimate run in the logs.
+# Descriptions are per-domain and must stay paired: one branch on descriptions
+# and the other on the hard-coded template would confound every comparison.
+if (opts.desc_sketch is None) != (opts.desc_photo is None):
+    missing = '--desc_photo' if opts.desc_photo is None else '--desc_sketch'
+    given = '--desc_sketch' if opts.desc_photo is None else '--desc_photo'
+    raise ValueError(
+        f"{given} was given but {missing} was not. Class descriptions must be supplied for "
+        "BOTH branches or neither: running one branch on VLM descriptions while the other "
+        "keeps the hard-coded template changes two things at once, so the run would not be "
+        f"comparable to any baseline. Pass {missing} as well, or drop {given}."
+    )
+
 if opts.aug_shared_encoder and opts.aug_identity_transform:
     if not opts.allow_degenerate_aug:
         raise ValueError(

@@ -351,6 +351,29 @@ def log_param_breakdown(model, printer=print):
 
 
 
+
+def log_desc_fingerprint(cfg, n_cls, sha_s, sha_p, eot=None, printer=print):
+    """One greppable line describing the text-prompt input of this run.
+
+    Printed in every run, description mode or not, with the same field shape
+    (n/a fillers when off) so a single grep pattern reads them all. eot_* comes
+    from the SKETCH learner's tokenized_prompts.argmax(-1) -- the position
+    TextEncoder actually pools at, i.e. the number that silently goes wrong when
+    the three buffers drift apart.
+    """
+    import statistics
+
+    on = 1 if sha_s != 'n/a' else 0
+    if eot is None or len(eot) == 0:
+        e_min = e_med = e_max = 'n/a'
+    else:
+        vals = [int(v) for v in eot]
+        e_min, e_med, e_max = min(vals), int(round(statistics.median(vals))), max(vals)
+    printer(f"DESC_FP | on={on} | pos={getattr(cfg, 'desc_pos', 'V1')} | n_cls={n_cls} | "
+            f"n_ctx={getattr(cfg, 'n_ctx', 4)} | sha_s={sha_s} | sha_p={sha_p} | "
+            f"eot_min={e_min} | eot_med={e_med} | eot_max={e_max}")
+
+
 def unfreeze_ln(m):
     """Mở lại weight/bias của mọi LayerNorm trong module.
 
@@ -406,6 +429,39 @@ class CustomCLIP(nn.Module):
 
         # Single shared logit scale (matches ducta/baseline)
         self.logit_scale = self.clip.logit_scale
+
+        # -- Class descriptions (--desc_sketch/--desc_photo), both or neither --
+        # Loaded here, before any learner is built, so a coverage gap fails now
+        # rather than after a class silently falls back to a different prompt
+        # shape than its neighbours.
+        desc_sketch = desc_photo = None
+        sha_s = sha_p = 'n/a'
+        desc_pos = getattr(cfg, 'desc_pos', 'V1')
+        path_s = getattr(cfg, 'desc_sketch', None)
+        path_p = getattr(cfg, 'desc_photo', None)
+        if (path_s is None) != (path_p is None):
+            raise ValueError(
+                "desc_sketch and desc_photo must be given together or not at all; got "
+                f"desc_sketch={path_s!r}, desc_photo={path_p!r}"
+            )
+        if path_s is not None:
+            from src.utils import load_class_descriptions
+            desc_sketch, sha_s = load_class_descriptions(path_s)
+            desc_photo, sha_p = load_class_descriptions(path_p)
+            # P6: every class the model classifies over must have a description
+            # in BOTH files, otherwise the CE logits mix two prompt formats.
+            missing_s = sorted(set(classnames) - set(desc_sketch))
+            missing_p = sorted(set(classnames) - set(desc_photo))
+            if missing_s or missing_p:
+                raise ValueError(
+                    f"Class descriptions do not cover the model's classes. "
+                    f"|classnames|={len(classnames)}, |desc_sketch|={len(desc_sketch)}, "
+                    f"|desc_photo|={len(desc_photo)}. "
+                    f"Missing from sketch ({len(missing_s)}): {missing_s[:10]}"
+                    f"{' ...' if len(missing_s) > 10 else ''}. "
+                    f"Missing from photo ({len(missing_p)}): {missing_p[:10]}"
+                    f"{' ...' if len(missing_p) > 10 else ''}."
+                )
 
         if self.no_prompt_learning:
             print("[ABLATION] no_prompt_learning=True: skipping ALL prompt learners. "
@@ -465,18 +521,34 @@ class CustomCLIP(nn.Module):
             print("Initializing Photo Text Prompt Learner...")
             cfg_photo = copy.copy(cfg)
             cfg_photo.ctx_init = getattr(cfg, 'ctx_init', 'a photo of a')
-            self.text_prompt_photo = SimpleTextPromptLearner(cfg_photo, classnames, self.clip)
+            self.text_prompt_photo = SimpleTextPromptLearner(
+                cfg_photo, classnames, self.clip, descriptions=desc_photo, desc_pos=desc_pos)
 
             print("Initializing Sketch Text Prompt Learner...")
             cfg_sketch = copy.copy(cfg)
             cfg_sketch.ctx_init = getattr(cfg, 'ctx_init_sketch', 'a sketch of a')
-            self.text_prompt_sketch = SimpleTextPromptLearner(cfg_sketch, classnames, self.clip)
+            self.text_prompt_sketch = SimpleTextPromptLearner(
+                cfg_sketch, classnames, self.clip, descriptions=desc_sketch, desc_pos=desc_pos)
+
+            log_desc_fingerprint(cfg, len(classnames), sha_s, sha_p,
+                                 eot=self.text_prompt_sketch.tokenized_prompts.argmax(dim=-1))
 
             # -- Encoders (both branches wrap the SAME shared backbone) --
             self.text_encoder_photo = TextEncoder(self.clip)
             self.text_encoder_sketch = TextEncoder(self.clip)
             self.visual_encoder_photo = VisualEncoder(self.clip)
             self.visual_encoder_sketch = VisualEncoder(self.clip)
+
+        # The default branch already logged DESC_FP with real eot_* values; the
+        # other two architectures have no SimpleTextPromptLearner to read them
+        # from, so they log the same line with eot_*=n/a.
+        if self.no_prompt_learning or self.use_text_visual_exchange:
+            log_desc_fingerprint(cfg, len(classnames), sha_s, sha_p, eot=None)
+            if desc_sketch is not None:
+                print("[WARN] class descriptions were loaded but this architecture branch does "
+                      "not use SimpleTextPromptLearner, so they are IGNORED "
+                      f"(no_prompt_learning={self.no_prompt_learning}, "
+                      f"use_text_visual_exchange={self.use_text_visual_exchange}).")
 
         # -- Augmentation branch: second backbone, built LAST on purpose --
         #
