@@ -1,3 +1,4 @@
+import contextlib
 import copy
 import re
 import torch
@@ -374,6 +375,99 @@ def log_desc_fingerprint(cfg, n_cls, sha_s, sha_p, eot=None, printer=print):
             f"eot_min={e_min} | eot_med={e_med} | eot_max={e_max}")
 
 
+
+class DomainLayerNorm(nn.Module):
+    """Two LayerNorms in one slot, selected by a process-wide active domain.
+
+    Restores the base model's per-branch normalisation (Sain et al., CVPR 2023:
+    trainable set {v^s, v^p, l^s_theta, l^p_theta}) without touching
+    src/clip/model.py: the CLIP blocks keep calling `self.ln_1(x)` with a single
+    argument, and the routing happens inside.
+
+    Both copies start from the SAME pretrained tensor (deepcopy, not a fresh
+    init), so at step 0 the split is numerically invisible -- any difference that
+    appears later comes from training, not from initialisation.
+
+    The active domain is a CLASS attribute, not per-instance state: a forward
+    pass touches 26 of these modules and setting a flag on each one before every
+    call would be 26 chances to miss one.
+    """
+
+    _ACTIVE = 'photo'
+
+    def __init__(self, layer_norm):
+        super().__init__()
+        self.photo = copy.deepcopy(layer_norm)
+        self.sketch = copy.deepcopy(layer_norm)
+
+    def forward(self, x):
+        return (self.photo if DomainLayerNorm._ACTIVE == 'photo' else self.sketch)(x)
+
+    def extra_repr(self):
+        return f"active={DomainLayerNorm._ACTIVE}"
+
+
+@contextlib.contextmanager
+def active_domain(domain):
+    """Route every DomainLayerNorm to `domain` for the duration of the block.
+
+    No-op in numeric terms when --domain_specific_ln is off, because no
+    DomainLayerNorm exists then. Restores the previous value on exit so nested
+    or interleaved use cannot leak state into the next call.
+    """
+    if domain not in ('photo', 'sketch'):
+        raise ValueError(f"domain must be 'photo' or 'sketch', got {domain!r}")
+    previous = DomainLayerNorm._ACTIVE
+    DomainLayerNorm._ACTIVE = domain
+    try:
+        yield
+    finally:
+        DomainLayerNorm._ACTIVE = previous
+
+
+def split_visual_layernorms(visual):
+    """Replace every nn.LayerNorm under `visual` with a DomainLayerNorm.
+
+    Returns the number of MODULES replaced (26 for ViT-B/32: 12 blocks x
+    ln_1/ln_2, plus ln_pre and ln_post) -- which is 52 tensors before the split
+    and 104 after.
+
+    Called BEFORE freeze_all_but_bn on purpose: that function walks
+    model.modules(), which recurses into the two children of each
+    DomainLayerNorm, so both copies still get unfrozen. Wrapping them does not
+    hide them from the freeze logic, from configure_optimizers' LayerNorm sweep,
+    or from log_param_breakdown -- all three test isinstance(m, nn.LayerNorm)
+    over a recursive walk.
+    """
+    replaced = 0
+    for module in list(visual.modules()):
+        for child_name, child in list(module.named_children()):
+            if isinstance(child, nn.LayerNorm):
+                setattr(module, child_name, DomainLayerNorm(child))
+                replaced += 1
+    return replaced
+
+
+def log_dsln_fingerprint(model, n_replaced, printer=print):
+    """One greppable line: how the visual LayerNorm budget ended up split."""
+    vis_ids = {id(p) for p in model.clip.visual.parameters()}
+    ln_ids = {id(p) for m in model.modules() if isinstance(m, nn.LayerNorm)
+              for p in m.parameters()}
+    seen, ln_v, ln_t, total = set(), 0, 0, 0
+    for name, p in model.named_parameters():
+        if not p.requires_grad or id(p) in seen:
+            continue
+        seen.add(id(p))
+        total += p.numel()
+        if id(p) in ln_ids and name.startswith('clip.'):
+            if id(p) in vis_ids:
+                ln_v += p.numel()
+            else:
+                ln_t += p.numel()
+    printer(f"DSLN_FP | on={int(n_replaced > 0)} | n_ln_replaced={n_replaced} | "
+            f"ln_visual_params={ln_v} | ln_text_params={ln_t} | total_trainable={total}")
+
+
 def unfreeze_ln(m):
     """Mở lại weight/bias của mọi LayerNorm trong module.
 
@@ -423,6 +517,14 @@ class CustomCLIP(nn.Module):
         # 1. Single shared backbone for both photo and sketch (matches ducta/baseline:
         # one CLIP copy, same LayerNorm weights updated by gradients from both modalities).
         self.clip = copy.deepcopy(clip_model).to(original_device)
+        # Per-branch visual LayerNorm (--domain_specific_ln). Done BEFORE
+        # freeze_all_but_bn so both copies land in its LayerNorm sweep, and
+        # scoped to .visual only -- the text tower, clip_aug and the Mapper/LKP
+        # LayerNorms are deliberately left shared. deepcopy consumes no RNG, so
+        # every module built after this point keeps its stream.
+        self.domain_specific_ln = getattr(cfg, 'domain_specific_ln', False)
+        self._n_ln_replaced = (split_visual_layernorms(self.clip.visual)
+                               if self.domain_specific_ln else 0)
         freeze_all_but_bn(self.clip)
         # Param counts are reported once by log_param_breakdown() in
         # configure_optimizers -- the single source of truth.
@@ -601,6 +703,8 @@ class CustomCLIP(nn.Module):
             self.clip_aug.visual.apply(unfreeze_ln)
             self.clip_aug.eval()
 
+        log_dsln_fingerprint(self, self._n_ln_replaced)
+
     def train(self, mode=True):
         """Keep clip_aug in eval mode permanently.
 
@@ -657,32 +761,44 @@ class CustomCLIP(nn.Module):
         if self.no_prompt_learning:
             # Plain frozen CLIP forward (only LayerNorm trainable) -- no
             # prompt tensors of any kind, text uses the fixed template.
-            image_features_photo = self.clip.encode_image(photo_tensor.type(self.dtype))
-            image_features_sketch = self.clip.encode_image(sk_tensor.type(self.dtype))
-            image_features_neg = self.clip.encode_image(neg_tensor.type(self.dtype))
+            with active_domain('photo'):
+                image_features_photo = self.clip.encode_image(photo_tensor.type(self.dtype))
+            with active_domain('sketch'):
+                image_features_sketch = self.clip.encode_image(sk_tensor.type(self.dtype))
+            # neg_tensor is a PHOTO of a different category (src/dataset_retrieval.py:131),
+            # so it uses the photo LayerNorms -- not the sketch ones.
+            with active_domain('photo'):
+                image_features_neg = self.clip.encode_image(neg_tensor.type(self.dtype))
             text_features_all_photo = self.clip.encode_text(self.tokenized_prompts_photo)
             text_features_all_sketch = self.clip.encode_text(self.tokenized_prompts_sketch)
             if run_shared_aug:
-                image_features_photo_aug = self.clip.encode_image(photo_aug_tensor.type(self.dtype))
-                image_features_sketch_aug = self.clip.encode_image(sk_aug_tensor.type(self.dtype))
+                with active_domain('photo'):
+                    image_features_photo_aug = self.clip.encode_image(photo_aug_tensor.type(self.dtype))
+                with active_domain('sketch'):
+                    image_features_sketch_aug = self.clip.encode_image(sk_aug_tensor.type(self.dtype))
         elif self.use_text_visual_exchange:
             # Each branch's learner performs its OWN bidirectional text<->visual
             # exchange -- no coupling between the two learners/branches.
             text_input_photo_all, vis_shallow_photo, cross_prompts_text_deeper_photo, vis_deeper_photo = self.text_visual_learner_photo()
             text_features_all_photo = self.text_encoder_photo(text_input_photo_all, self.text_visual_learner_photo.tokenized_prompts, cross_prompts_text_deeper_photo)
-            image_features_photo = self.visual_encoder_photo(photo_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
+            with active_domain('photo'):
+                image_features_photo = self.visual_encoder_photo(photo_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
 
             text_input_sketch_all, vis_shallow_sketch, cross_prompts_text_deeper_sketch, vis_deeper_sketch = self.text_visual_learner_sketch()
             text_features_all_sketch = self.text_encoder_sketch(text_input_sketch_all, self.text_visual_learner_sketch.tokenized_prompts, cross_prompts_text_deeper_sketch)
-            image_features_sketch = self.visual_encoder_sketch(sk_tensor.type(self.dtype), vis_shallow_sketch, vis_deeper_sketch)
+            with active_domain('sketch'):
+                image_features_sketch = self.visual_encoder_sketch(sk_tensor.type(self.dtype), vis_shallow_sketch, vis_deeper_sketch)
 
             # Negative branch (uses photo encoder + photo visual prompts)
-            image_features_neg = self.visual_encoder_photo(neg_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
+            with active_domain('photo'):   # neg_tensor is a photo
+                image_features_neg = self.visual_encoder_photo(neg_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
 
             if run_shared_aug:
                 # Same encoders, same prompt tensors as the clean views above.
-                image_features_photo_aug = self.visual_encoder_photo(photo_aug_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
-                image_features_sketch_aug = self.visual_encoder_sketch(sk_aug_tensor.type(self.dtype), vis_shallow_sketch, vis_deeper_sketch)
+                with active_domain('photo'):
+                    image_features_photo_aug = self.visual_encoder_photo(photo_aug_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
+                with active_domain('sketch'):
+                    image_features_sketch_aug = self.visual_encoder_sketch(sk_aug_tensor.type(self.dtype), vis_shallow_sketch, vis_deeper_sketch)
         else:
             # 1. Call visual-visual learner ONCE (shared by both branches)
             photo_shallow, sketch_shallow, photo_deeper, sketch_deeper = self.visual_visual_learner()
@@ -691,24 +807,29 @@ class CustomCLIP(nn.Module):
             # Compute text features for ALL classes (not just batch) - needed for loss computation
             text_input_photo_all, cross_prompts_text_deeper_photo = self.text_prompt_photo(label=None)  # All classes
             text_features_all_photo = self.text_encoder_photo(text_input_photo_all, self.text_prompt_photo.tokenized_prompts, cross_prompts_text_deeper_photo)
-            image_features_photo = self.visual_encoder_photo(photo_tensor.type(self.dtype), photo_shallow, photo_deeper)
+            with active_domain('photo'):
+                image_features_photo = self.visual_encoder_photo(photo_tensor.type(self.dtype), photo_shallow, photo_deeper)
 
             # 3. Sketch branch: text learner + visual routing
             # Compute text features for ALL classes (not just batch) - needed for loss computation
             text_input_sketch_all, cross_prompts_text_deeper_sketch = self.text_prompt_sketch(label=None)  # All classes
             text_features_all_sketch = self.text_encoder_sketch(text_input_sketch_all, self.text_prompt_sketch.tokenized_prompts, cross_prompts_text_deeper_sketch)
-            image_features_sketch = self.visual_encoder_sketch(sk_tensor.type(self.dtype), sketch_shallow, sketch_deeper)
+            with active_domain('sketch'):
+                image_features_sketch = self.visual_encoder_sketch(sk_tensor.type(self.dtype), sketch_shallow, sketch_deeper)
 
             # 4. Negative branch (uses photo encoder + photo visual prompts)
-            image_features_neg = self.visual_encoder_photo(neg_tensor.type(self.dtype), photo_shallow, photo_deeper)
+            with active_domain('photo'):   # neg_tensor is a photo
+                image_features_neg = self.visual_encoder_photo(neg_tensor.type(self.dtype), photo_shallow, photo_deeper)
 
             # 4b. Run A: augmented views, SAME encoders and SAME prompt tensors
             # (photo_shallow/photo_deeper, sketch_shallow/sketch_deeper) as
             # steps 2-3 -- the learner is not called a second time, so the only
             # thing that differs from the clean pass is the input tensor.
             if run_shared_aug:
-                image_features_photo_aug = self.visual_encoder_photo(photo_aug_tensor.type(self.dtype), photo_shallow, photo_deeper)
-                image_features_sketch_aug = self.visual_encoder_sketch(sk_aug_tensor.type(self.dtype), sketch_shallow, sketch_deeper)
+                with active_domain('photo'):
+                    image_features_photo_aug = self.visual_encoder_photo(photo_aug_tensor.type(self.dtype), photo_shallow, photo_deeper)
+                with active_domain('sketch'):
+                    image_features_sketch_aug = self.visual_encoder_sketch(sk_aug_tensor.type(self.dtype), sketch_shallow, sketch_deeper)
 
         # 5. Normalize features
         photo_feat = image_features_photo / image_features_photo.norm(dim=-1, keepdim=True)
@@ -1025,35 +1146,40 @@ class HiCroPL_SBIR(pl.LightningModule):
 
     def extract_eval_features(self, tensor, modality):
         """Extract visual features (prompted only, no distill mixing)."""
-        if self.model.no_prompt_learning:
-            feat = self.model.clip.encode_image(tensor.type(self.model.dtype))
-            return feat / feat.norm(dim=-1, keepdim=True)
+        # modality is the ground truth for which LayerNorm set to use at eval:
+        # sketch queries -> sketch LN, photo gallery -> photo LN. Getting this
+        # wrong lowers mAP without raising anything, so the whole body runs
+        # inside the context rather than only the encoder call.
+        with active_domain('photo' if modality == 'photo' else 'sketch'):
+            if self.model.no_prompt_learning:
+                feat = self.model.clip.encode_image(tensor.type(self.model.dtype))
+                return feat / feat.norm(dim=-1, keepdim=True)
 
-        if self.model.use_text_visual_exchange:
-            learner = (
-                self.model.text_visual_learner_photo if modality == 'photo'
-                else self.model.text_visual_learner_sketch
-            )
-            visual_encoder = (
-                self.model.visual_encoder_photo if modality == 'photo'
-                else self.model.visual_encoder_sketch
-            )
-            _, vis_shallow, _, vis_deeper = learner()
+            if self.model.use_text_visual_exchange:
+                learner = (
+                    self.model.text_visual_learner_photo if modality == 'photo'
+                    else self.model.text_visual_learner_sketch
+                )
+                visual_encoder = (
+                    self.model.visual_encoder_photo if modality == 'photo'
+                    else self.model.visual_encoder_sketch
+                )
+                _, vis_shallow, _, vis_deeper = learner()
+                feat = visual_encoder(tensor.type(self.model.dtype), vis_shallow, vis_deeper)
+                return feat / feat.norm(dim=-1, keepdim=True)
+
+            # Call visual learner once, cache outputs
+            photo_shallow, sketch_shallow, photo_deeper, sketch_deeper = self.model.visual_visual_learner()
+
+            if modality == 'photo':
+                visual_encoder = self.model.visual_encoder_photo
+                vis_shallow, vis_deeper = photo_shallow, photo_deeper
+            else:
+                visual_encoder = self.model.visual_encoder_sketch
+                vis_shallow, vis_deeper = sketch_shallow, sketch_deeper
+
             feat = visual_encoder(tensor.type(self.model.dtype), vis_shallow, vis_deeper)
             return feat / feat.norm(dim=-1, keepdim=True)
-
-        # Call visual learner once, cache outputs
-        photo_shallow, sketch_shallow, photo_deeper, sketch_deeper = self.model.visual_visual_learner()
-
-        if modality == 'photo':
-            visual_encoder = self.model.visual_encoder_photo
-            vis_shallow, vis_deeper = photo_shallow, photo_deeper
-        else:
-            visual_encoder = self.model.visual_encoder_sketch
-            vis_shallow, vis_deeper = sketch_shallow, sketch_deeper
-
-        feat = visual_encoder(tensor.type(self.model.dtype), vis_shallow, vis_deeper)
-        return feat / feat.norm(dim=-1, keepdim=True)
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         return self._validation_step_category(batch, batch_idx, dataloader_idx)
