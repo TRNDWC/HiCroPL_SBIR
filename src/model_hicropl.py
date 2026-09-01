@@ -379,18 +379,30 @@ def log_desc_fingerprint(cfg, n_cls, sha_s, sha_p, eot=None, printer=print):
 class DomainLayerNorm(nn.Module):
     """Two LayerNorms in one slot, selected by a process-wide active domain.
 
-    Restores the base model's per-branch normalisation (Sain et al., CVPR 2023:
-    trainable set {v^s, v^p, l^s_theta, l^p_theta}) without touching
-    src/clip/model.py: the CLIP blocks keep calling `self.ln_1(x)` with a single
-    argument, and the routing happens inside.
+    Gives sketch and photo fully disjoint TRAINABLE backbone parameters. Since
+    LayerNorm is the only trainable part of the frozen CLIP backbone, routing it
+    per domain is numerically identical to keeping two complete encoder copies,
+    while duplicating 0.25 MiB instead of 577 MiB: the other 151M weights are
+    frozen, identical in both copies, and never updated, so sharing the objects
+    cannot change any output.
+
+    Done without touching src/clip/model.py: the CLIP blocks keep calling
+    `self.ln_1(x)` / `self.ln_final(x)` with a single argument, and the routing
+    happens inside.
 
     Both copies start from the SAME pretrained tensor (deepcopy, not a fresh
     init), so at step 0 the split is numerically invisible -- any difference that
     appears later comes from training, not from initialisation.
 
-    The active domain is a CLASS attribute, not per-instance state: a forward
-    pass touches 26 of these modules and setting a flag on each one before every
-    call would be 26 chances to miss one.
+    The active domain is a CLASS attribute, not per-instance state: one forward
+    pass touches 51 of these modules, and setting a flag on each would be 51
+    chances to miss one.
+
+    `weight` / `bias` / `normalized_shape` / `eps` proxy to the active copy so
+    read-only introspection keeps working -- src/hicropl.py:188 and :852 size the
+    text context with `clip_model.ln_final.weight.shape[0]`, which would raise
+    AttributeError otherwise. Both copies always share a shape, so which one
+    answers does not matter.
     """
 
     _ACTIVE = 'photo'
@@ -401,7 +413,27 @@ class DomainLayerNorm(nn.Module):
         self.sketch = copy.deepcopy(layer_norm)
 
     def forward(self, x):
-        return (self.photo if DomainLayerNorm._ACTIVE == 'photo' else self.sketch)(x)
+        return self.active(x)
+
+    @property
+    def active(self):
+        return self.photo if DomainLayerNorm._ACTIVE == 'photo' else self.sketch
+
+    @property
+    def weight(self):
+        return self.active.weight
+
+    @property
+    def bias(self):
+        return self.active.bias
+
+    @property
+    def normalized_shape(self):
+        return self.active.normalized_shape
+
+    @property
+    def eps(self):
+        return self.active.eps
 
     def extra_repr(self):
         return f"active={DomainLayerNorm._ACTIVE}"
@@ -411,7 +443,7 @@ class DomainLayerNorm(nn.Module):
 def active_domain(domain):
     """Route every DomainLayerNorm to `domain` for the duration of the block.
 
-    No-op in numeric terms when --domain_specific_ln is off, because no
+    Numerically inert when no DomainLayerNorm is in the graph, because no
     DomainLayerNorm exists then. Restores the previous value on exit so nested
     or interleaved use cannot leak state into the next call.
     """
@@ -425,12 +457,12 @@ def active_domain(domain):
         DomainLayerNorm._ACTIVE = previous
 
 
-def split_visual_layernorms(visual):
-    """Replace every nn.LayerNorm under `visual` with a DomainLayerNorm.
+def split_layernorms(root):
+    """Replace every nn.LayerNorm under `root` with a DomainLayerNorm.
 
-    Returns the number of MODULES replaced (26 for ViT-B/32: 12 blocks x
-    ln_1/ln_2, plus ln_pre and ln_post) -- which is 52 tensors before the split
-    and 104 after.
+    Returns the number of MODULES replaced. For a whole ViT-B/32 CLIP that is 51
+    (26 visual: 12 blocks x ln_1/ln_2 + ln_pre + ln_post; 25 text: 12 blocks x
+    ln_1/ln_2 + ln_final) -- 102 tensors before the split, 204 after.
 
     Called BEFORE freeze_all_but_bn on purpose: that function walks
     model.modules(), which recurses into the two children of each
@@ -440,7 +472,7 @@ def split_visual_layernorms(visual):
     over a recursive walk.
     """
     replaced = 0
-    for module in list(visual.modules()):
+    for module in list(root.modules()):
         for child_name, child in list(module.named_children()):
             if isinstance(child, nn.LayerNorm):
                 setattr(module, child_name, DomainLayerNorm(child))
@@ -464,8 +496,12 @@ def log_dsln_fingerprint(model, n_replaced, printer=print):
                 ln_v += p.numel()
             else:
                 ln_t += p.numel()
-    printer(f"DSLN_FP | on={int(n_replaced > 0)} | n_ln_replaced={n_replaced} | "
-            f"ln_visual_params={ln_v} | ln_text_params={ln_t} | total_trainable={total}")
+    aug = getattr(model, 'clip_aug', None)
+    ln_aug = 0 if aug is None else sum(
+        p.numel() for p in aug.parameters() if p.requires_grad and id(p) in ln_ids)
+    printer(f"DSLN_FP | n_ln_split_main={n_replaced} | n_ln_split_aug="
+            f"{getattr(model, '_n_ln_replaced_aug', 0)} | ln_visual_params={ln_v} | "
+            f"ln_text_params={ln_t} | ln_aug_params={ln_aug} | total_trainable={total}")
 
 
 def unfreeze_ln(m):
@@ -517,14 +553,18 @@ class CustomCLIP(nn.Module):
         # 1. Single shared backbone for both photo and sketch (matches ducta/baseline:
         # one CLIP copy, same LayerNorm weights updated by gradients from both modalities).
         self.clip = copy.deepcopy(clip_model).to(original_device)
-        # Per-branch visual LayerNorm (--domain_specific_ln). Done BEFORE
-        # freeze_all_but_bn so both copies land in its LayerNorm sweep, and
-        # scoped to .visual only -- the text tower, clip_aug and the Mapper/LKP
-        # LayerNorms are deliberately left shared. deepcopy consumes no RNG, so
-        # every module built after this point keeps its stream.
-        self.domain_specific_ln = getattr(cfg, 'domain_specific_ln', False)
-        self._n_ln_replaced = (split_visual_layernorms(self.clip.visual)
-                               if self.domain_specific_ln else 0)
+        # Per-branch LayerNorm across the WHOLE backbone -- visual tower AND
+        # text tower. Always on: sketch and photo share no trainable backbone
+        # parameter, which is what "separate encoders" reduces to here, since
+        # LayerNorm is the only trainable part of a frozen CLIP.
+        #
+        # Done BEFORE freeze_all_but_bn so both copies land in its LayerNorm
+        # sweep, and before the TextEncoder wrappers are built, because
+        # TextEncoder captures `clip_model.ln_final` by reference at
+        # construction time (src/hicropl.py:96) -- splitting afterwards would
+        # leave it pointing at the discarded original. deepcopy consumes no RNG,
+        # so every module built after this point keeps its stream.
+        self._n_ln_replaced = split_layernorms(self.clip)
         freeze_all_but_bn(self.clip)
         # Param counts are reported once by log_param_breakdown() in
         # configure_optimizers -- the single source of truth.
@@ -684,11 +724,17 @@ class CustomCLIP(nn.Module):
         # Explicit None (rather than a missing attribute) so every consumer can
         # use a plain `is not None` test.
         self.clip_aug = None
+        self._n_ln_replaced_aug = 0
         if not self.disable_aug_branch and not self.aug_shared_encoder:
             from src.utils import load_clip_to_cpu
             cfg_aug = copy.copy(cfg)
             cfg_aug.clip_trainer = 'CoOp'
             self.clip_aug = load_clip_to_cpu(cfg_aug).to(original_device)
+            # Same per-domain split on the aug backbone's visual tower: photo_aug
+            # and sketch_aug must not share LayerNorm either. Its text tower is
+            # left alone -- this branch calls encode_image only, so splitting it
+            # would only duplicate frozen weights that are never executed.
+            self._n_ln_replaced_aug = split_layernorms(self.clip_aug.visual)
             # Freeze everything, then reopen LayerNorm in the VISUAL TOWER ONLY.
             #
             # freeze_all_but_bn(self.clip_aug) would be the obvious call, but it
@@ -769,8 +815,10 @@ class CustomCLIP(nn.Module):
             # so it uses the photo LayerNorms -- not the sketch ones.
             with active_domain('photo'):
                 image_features_neg = self.clip.encode_image(neg_tensor.type(self.dtype))
-            text_features_all_photo = self.clip.encode_text(self.tokenized_prompts_photo)
-            text_features_all_sketch = self.clip.encode_text(self.tokenized_prompts_sketch)
+            with active_domain('photo'):
+                text_features_all_photo = self.clip.encode_text(self.tokenized_prompts_photo)
+            with active_domain('sketch'):
+                text_features_all_sketch = self.clip.encode_text(self.tokenized_prompts_sketch)
             if run_shared_aug:
                 with active_domain('photo'):
                     image_features_photo_aug = self.clip.encode_image(photo_aug_tensor.type(self.dtype))
@@ -780,12 +828,14 @@ class CustomCLIP(nn.Module):
             # Each branch's learner performs its OWN bidirectional text<->visual
             # exchange -- no coupling between the two learners/branches.
             text_input_photo_all, vis_shallow_photo, cross_prompts_text_deeper_photo, vis_deeper_photo = self.text_visual_learner_photo()
-            text_features_all_photo = self.text_encoder_photo(text_input_photo_all, self.text_visual_learner_photo.tokenized_prompts, cross_prompts_text_deeper_photo)
+            with active_domain('photo'):
+                text_features_all_photo = self.text_encoder_photo(text_input_photo_all, self.text_visual_learner_photo.tokenized_prompts, cross_prompts_text_deeper_photo)
             with active_domain('photo'):
                 image_features_photo = self.visual_encoder_photo(photo_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
 
             text_input_sketch_all, vis_shallow_sketch, cross_prompts_text_deeper_sketch, vis_deeper_sketch = self.text_visual_learner_sketch()
-            text_features_all_sketch = self.text_encoder_sketch(text_input_sketch_all, self.text_visual_learner_sketch.tokenized_prompts, cross_prompts_text_deeper_sketch)
+            with active_domain('sketch'):
+                text_features_all_sketch = self.text_encoder_sketch(text_input_sketch_all, self.text_visual_learner_sketch.tokenized_prompts, cross_prompts_text_deeper_sketch)
             with active_domain('sketch'):
                 image_features_sketch = self.visual_encoder_sketch(sk_tensor.type(self.dtype), vis_shallow_sketch, vis_deeper_sketch)
 
@@ -806,14 +856,16 @@ class CustomCLIP(nn.Module):
             # 2. Photo branch: text learner + visual routing
             # Compute text features for ALL classes (not just batch) - needed for loss computation
             text_input_photo_all, cross_prompts_text_deeper_photo = self.text_prompt_photo(label=None)  # All classes
-            text_features_all_photo = self.text_encoder_photo(text_input_photo_all, self.text_prompt_photo.tokenized_prompts, cross_prompts_text_deeper_photo)
+            with active_domain('photo'):
+                text_features_all_photo = self.text_encoder_photo(text_input_photo_all, self.text_prompt_photo.tokenized_prompts, cross_prompts_text_deeper_photo)
             with active_domain('photo'):
                 image_features_photo = self.visual_encoder_photo(photo_tensor.type(self.dtype), photo_shallow, photo_deeper)
 
             # 3. Sketch branch: text learner + visual routing
             # Compute text features for ALL classes (not just batch) - needed for loss computation
             text_input_sketch_all, cross_prompts_text_deeper_sketch = self.text_prompt_sketch(label=None)  # All classes
-            text_features_all_sketch = self.text_encoder_sketch(text_input_sketch_all, self.text_prompt_sketch.tokenized_prompts, cross_prompts_text_deeper_sketch)
+            with active_domain('sketch'):
+                text_features_all_sketch = self.text_encoder_sketch(text_input_sketch_all, self.text_prompt_sketch.tokenized_prompts, cross_prompts_text_deeper_sketch)
             with active_domain('sketch'):
                 image_features_sketch = self.visual_encoder_sketch(sk_tensor.type(self.dtype), sketch_shallow, sketch_deeper)
 
@@ -876,8 +928,10 @@ class CustomCLIP(nn.Module):
                 photo_aug_feat = photo_aug_feat.detach()
                 sketch_aug_feat = sketch_aug_feat.detach()
         elif photo_aug_tensor is not None and self.clip_aug is not None:
-            f_p = self.clip_aug.encode_image(photo_aug_tensor.type(self.dtype))
-            f_s = self.clip_aug.encode_image(sk_aug_tensor.type(self.dtype))
+            with active_domain('photo'):
+                f_p = self.clip_aug.encode_image(photo_aug_tensor.type(self.dtype))
+            with active_domain('sketch'):
+                f_s = self.clip_aug.encode_image(sk_aug_tensor.type(self.dtype))
             photo_aug_feat = f_p / f_p.norm(dim=-1, keepdim=True)
             sketch_aug_feat = f_s / f_s.norm(dim=-1, keepdim=True)
 
