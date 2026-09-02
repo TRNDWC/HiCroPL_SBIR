@@ -53,6 +53,7 @@ def loss_fn_hicropl(args, features, return_components=False):
         neg_feat, label,
         text_feat_photo, text_feat_sketch,
         photo_aug_feat, sketch_aug_feat,
+        text_desc_feat_photo, text_desc_feat_sketch,
     ) = features
 
     device = logits_photo.device
@@ -103,11 +104,23 @@ def loss_fn_hicropl(args, features, return_components=False):
         loss_aug = lambda_aug * (cross_loss(photo_feat, photo_aug_feat, temperature)
                                  + cross_loss(sketch_feat, sketch_aug_feat, temperature))
 
-    total = loss_cross_modal + loss_ce + loss_aug
+    # --- L6: text template <-> VLM description, InfoNCE ---
+    # Same construction as loss_aug on the image side: two views of the same
+    # class through one encoder, pulled together. The template view carries the
+    # learnable context; the description view carries VLM-written content and
+    # rides the same context. Coefficient fixed at 1.0 -- no CLI flag was added
+    # for it, matching how lambda_aug's structure looks at its default.
+    loss_text = 0.0
+    if text_desc_feat_photo is not None:
+        loss_text = (cross_loss(text_feat_photo, text_desc_feat_photo, temperature)
+                     + cross_loss(text_feat_sketch, text_desc_feat_sketch, temperature))
+
+    total = loss_cross_modal + loss_ce + loss_aug + loss_text
     if return_components:
         return total, {
             'loss_cross_modal': loss_cross_modal,
             'loss_ce': loss_ce,
             'loss_aug': loss_aug,
+            'loss_text': loss_text,
         }
     return total

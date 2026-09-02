@@ -604,6 +604,10 @@ class CustomCLIP(nn.Module):
                     f"Missing from photo ({len(missing_p)}): {missing_p[:10]}"
                     f"{' ...' if len(missing_p) > 10 else ''}."
                 )
+        # Whether the description branch exists at all. Read further down by the
+        # clip_aug block, which must open its text tower's LayerNorms only when
+        # that tower is really going to be called.
+        self._has_descriptions = desc_sketch is not None
 
         if self.no_prompt_learning:
             print("[ABLATION] no_prompt_learning=True: skipping ALL prompt learners. "
@@ -729,24 +733,47 @@ class CustomCLIP(nn.Module):
             from src.utils import load_clip_to_cpu
             cfg_aug = copy.copy(cfg)
             cfg_aug.clip_trainer = 'CoOp'
+            # vision_depth=0 makes this backbone genuinely prompt-free.
+            #
+            # Without it, the CoOp build's VisionTransformer creates
+            # self.VPT = nn.Parameter(normal_(std=0.02)) whenever vision_depth
+            # != 0 (src/clip/model.py:441-452) and its forward CONCATENATES
+            # those tokens onto every image (src/clip/model.py:479-481). CLIP's
+            # pretrained state_dict has no such key, so they stay at their random
+            # init -- and freeze_model() then locks them there for the whole run.
+            # Measured effect: cos(feature with those tokens, feature without)
+            # = 0.929, i.e. the "vanilla reference" was neither vanilla nor
+            # prompt-free. The stray key is also what printed
+            # "Weights not found for some missing keys: ['visual.VPT']".
+            #
+            # With 0, VPT_shallow is False, no VPT parameter is built, and
+            # forward takes the `else` branch whose `assert
+            # self.prompt_till_layer_visual == 0` holds because
+            # prompt_till_layer_visual is set from this same value
+            # (src/clip/model.py:460). The text tower is unaffected: the CoOp
+            # build uses plain ResidualAttentionBlock either way.
+            cfg_aug.vision_depth = 0
             self.clip_aug = load_clip_to_cpu(cfg_aug).to(original_device)
-            # Same per-domain split on the aug backbone's visual tower: photo_aug
-            # and sketch_aug must not share LayerNorm either. Its text tower is
-            # left alone -- this branch calls encode_image only, so splitting it
-            # would only duplicate frozen weights that are never executed.
-            self._n_ln_replaced_aug = split_layernorms(self.clip_aug.visual)
-            # Freeze everything, then reopen LayerNorm in the VISUAL TOWER ONLY.
+            # Per-domain split on BOTH towers of the aug backbone: photo_aug and
+            # sketch_aug must not share LayerNorm, and neither must the photo and
+            # sketch description prompts when they run through this text tower.
+            self._n_ln_replaced_aug = split_layernorms(self.clip_aug)
+            # Freeze everything, then reopen LayerNorm only where this branch
+            # actually computes something.
             #
             # freeze_all_but_bn(self.clip_aug) would be the obvious call, but it
-            # opens LayerNorm in both towers -- and this branch only ever calls
-            # encode_image(). The 50 text-tower LayerNorms (25,600 params) would
-            # sit in the optimizer with .grad = None for the entire run: real
-            # dead weight, and enough to put an IDLE row in the param log of
-            # every experiment, including the exchange ablations that are
-            # otherwise clean. Scoping the unfreeze to .visual keeps declared ==
-            # effective everywhere.
+            # opens LayerNorm in both towers unconditionally. Without
+            # descriptions this branch calls encode_image() only, so the text
+            # tower's LayerNorms would sit in the optimizer with .grad = None for
+            # the entire run: real dead weight, and an IDLE row in the param log
+            # of every experiment. With descriptions the text tower IS called
+            # (encode_text on the description prompts), so its LayerNorms become
+            # live and are opened too. Either way declared == effective.
             freeze_model(self.clip_aug)
             self.clip_aug.visual.apply(unfreeze_ln)
+            if self._has_descriptions:
+                self.clip_aug.transformer.apply(unfreeze_ln)
+                self.clip_aug.ln_final.apply(unfreeze_ln)
             self.clip_aug.eval()
 
         log_dsln_fingerprint(self, self._n_ln_replaced)
@@ -802,6 +829,9 @@ class CustomCLIP(nn.Module):
         # called) learner output, and calling encode_image() instead would skip
         # the prompts entirely.
         image_features_photo_aug = image_features_sketch_aug = None
+        # Description text features -- stay None unless --desc_sketch/--desc_photo
+        # were given AND this architecture branch has a SimpleTextPromptLearner.
+        text_features_desc_photo = text_features_desc_sketch = None
         run_shared_aug = self.aug_shared_encoder and photo_aug_tensor is not None
 
         if self.no_prompt_learning:
@@ -858,6 +888,15 @@ class CustomCLIP(nn.Module):
             text_input_photo_all, cross_prompts_text_deeper_photo = self.text_prompt_photo(label=None)  # All classes
             with active_domain('photo'):
                 text_features_all_photo = self.text_encoder_photo(text_input_photo_all, self.text_prompt_photo.tokenized_prompts, cross_prompts_text_deeper_photo)
+                # Description branch, shared-encoder variant: SAME encoder, SAME
+                # ctx, SAME deep prompts (cross_prompts_text_deeper_photo is
+                # reused, the learner is not called again) -- only the frozen
+                # token content differs. Exact text-side mirror of what
+                # --aug_shared_encoder does to the augmented image view.
+                if self.aug_shared_encoder:
+                    desc_input_photo = self.text_prompt_photo.forward_description()
+                    if desc_input_photo is not None:
+                        text_features_desc_photo = self.text_encoder_photo(desc_input_photo, self.text_prompt_photo.tokenized_prompts_desc, cross_prompts_text_deeper_photo)
             with active_domain('photo'):
                 image_features_photo = self.visual_encoder_photo(photo_tensor.type(self.dtype), photo_shallow, photo_deeper)
 
@@ -866,6 +905,10 @@ class CustomCLIP(nn.Module):
             text_input_sketch_all, cross_prompts_text_deeper_sketch = self.text_prompt_sketch(label=None)  # All classes
             with active_domain('sketch'):
                 text_features_all_sketch = self.text_encoder_sketch(text_input_sketch_all, self.text_prompt_sketch.tokenized_prompts, cross_prompts_text_deeper_sketch)
+                if self.aug_shared_encoder:
+                    desc_input_sketch = self.text_prompt_sketch.forward_description()
+                    if desc_input_sketch is not None:
+                        text_features_desc_sketch = self.text_encoder_sketch(desc_input_sketch, self.text_prompt_sketch.tokenized_prompts_desc, cross_prompts_text_deeper_sketch)
             with active_domain('sketch'):
                 image_features_sketch = self.visual_encoder_sketch(sk_tensor.type(self.dtype), sketch_shallow, sketch_deeper)
 
@@ -889,6 +932,10 @@ class CustomCLIP(nn.Module):
         neg_feat = image_features_neg / image_features_neg.norm(dim=-1, keepdim=True)
         text_feat_photo = text_features_all_photo / text_features_all_photo.norm(dim=-1, keepdim=True)
         text_feat_sketch = text_features_all_sketch / text_features_all_sketch.norm(dim=-1, keepdim=True)
+        text_desc_feat_photo = text_desc_feat_sketch = None
+        if text_features_desc_photo is not None:
+            text_desc_feat_photo = text_features_desc_photo / text_features_desc_photo.norm(dim=-1, keepdim=True)
+            text_desc_feat_sketch = text_features_desc_sketch / text_features_desc_sketch.norm(dim=-1, keepdim=True)
 
         # 6. Compute logits
         logit_scale = self.logit_scale.exp()
@@ -935,12 +982,34 @@ class CustomCLIP(nn.Module):
             photo_aug_feat = f_p / f_p.norm(dim=-1, keepdim=True)
             sketch_aug_feat = f_s / f_s.norm(dim=-1, keepdim=True)
 
+        # 7b. Description branch, second-encoder variant -- the text-side twin of
+        # the block just above. clip_aug already carries a full text tower that
+        # was previously never called, so this costs no extra weights: the
+        # descriptions run through it prompt-free via encode_text(), exactly as
+        # the augmented image runs through clip_aug.visual prompt-free.
+        #
+        # Uses tokenized_prompts_desc_plain, NOT tokenized_prompts_desc: there is
+        # no ctx here to overwrite the "X" window, so the placeholders must not be
+        # in the sequence at all.
+        _tp = getattr(self, 'text_prompt_photo', None)   # absent in the other two architectures
+        if (text_features_desc_photo is None and self.clip_aug is not None
+                and _tp is not None and _tp.has_descriptions):
+            with active_domain('photo'):
+                text_features_desc_photo = self.clip_aug.encode_text(
+                    self.text_prompt_photo.tokenized_prompts_desc_plain)
+            with active_domain('sketch'):
+                text_features_desc_sketch = self.clip_aug.encode_text(
+                    self.text_prompt_sketch.tokenized_prompts_desc_plain)
+            text_desc_feat_photo = text_features_desc_photo / text_features_desc_photo.norm(dim=-1, keepdim=True)
+            text_desc_feat_sketch = text_features_desc_sketch / text_features_desc_sketch.norm(dim=-1, keepdim=True)
+
         return (
             photo_feat, logits_photo,
             sketch_feat, logits_sketch,
             neg_feat, label,
             text_feat_photo, text_feat_sketch,
             photo_aug_feat, sketch_aug_feat,
+            text_desc_feat_photo, text_desc_feat_sketch,
         )
 
 

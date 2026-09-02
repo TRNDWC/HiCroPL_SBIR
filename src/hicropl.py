@@ -791,31 +791,38 @@ class VisualVisualPromptLearner(nn.Module):
         )
 
 
-def _build_description_prompts(raw_names, clean_names, descriptions, desc_pos, n_ctx):
+def _build_description_prompts(raw_names, clean_names, descriptions, desc_pos, n_ctx,
+                               with_placeholder=True):
     """Assemble the description prompt string for every class, budget-checked.
 
-    The leading `n_ctx` "X" tokens are LOAD-BEARING placeholders, not decoration:
-    SimpleTextPromptLearner drops embedding[:, 1:1+n_ctx] and puts the learnable
-    ctx there, so whatever sits in that window is deleted. Without the padding,
-    ctx would erase the first words of the description instead.
+    With `with_placeholder=True` the string starts with `n_ctx` "X" tokens. They
+    are LOAD-BEARING, not decoration: SimpleTextPromptLearner drops
+    embedding[:, 1:1+n_ctx] and puts the learnable ctx there, so whatever sits in
+    that window is deleted. Without the padding, ctx would erase the first words
+    of the description instead.
 
-    Budget: 1(SOS) + n_ctx + L_d + L_cls + 1(EOT) <= 77. Checked with the raw
-    tokenizer (no length cap) BEFORE clip.tokenize is called, because
+    With `with_placeholder=False` the same sentence is built WITHOUT them, for
+    the prompt-free tower (clip_aug.encode_text): no ctx is ever substituted
+    there, so literal "x x x" would be fed to the encoder as content.
+
+    Budget: 1(SOS) + n_ctx + L_d + L_cls + 1(EOT) <= 77 (the placeholder term
+    drops out in the prompt-free variant). Checked with the raw tokenizer (no
+    length cap) BEFORE clip.tokenize is called, because
     clip.tokenize(truncate=False) raises a bare RuntimeError naming no class.
     """
     from src.clip.clip import _tokenizer
 
     if desc_pos not in ('V1', 'V2'):
         raise ValueError(f"desc_pos must be 'V1' or 'V2', got {desc_pos!r}")
-    placeholder = " ".join(["X"] * n_ctx)
+    placeholder = (" ".join(["X"] * n_ctx) + " ") if with_placeholder else ""
 
     prompts, offenders = [], []
     for raw, clean in zip(raw_names, clean_names):
         d = descriptions[raw].strip().rstrip(".").lower()
         if desc_pos == 'V1':
-            prompt = f"{placeholder} {d}, a {clean}."
+            prompt = f"{placeholder}{d}, a {clean}."
         else:
-            prompt = f"{placeholder} a {clean}, {d}."
+            prompt = f"{placeholder}a {clean}, {d}."
         n_total = 2 + len(_tokenizer.encode(prompt))   # + SOS + EOT
         if n_total > 77:
             offenders.append((raw, len(_tokenizer.encode(d)),
@@ -889,43 +896,65 @@ class SimpleTextPromptLearner(nn.Module):
         # position -- no exception, just a wrong feature (see the P1 assert).
         raw_names = list(classnames)   # keys exactly as they appear in the JSON
         classnames = [name.replace("_", " ") for name in classnames]
-        if descriptions is None:
-            prompts = [prompt_prefix + " " + name + "." for name in classnames]
-        else:
-            prompts = _build_description_prompts(
-                raw_names, classnames, descriptions, desc_pos, n_ctx)
         from src.clip import clip as _clip
-        tokenized_prompts = torch.cat([_clip.tokenize(p) for p in prompts]).to(clip_model.token_embedding.weight.device)
-        with torch.no_grad():
-            embedding = clip_model.token_embedding(tokenized_prompts).type(dtype)
-        self.register_buffer("token_prefix", embedding[:, :1, :])
-        self.register_buffer("token_suffix", embedding[:, 1 + n_ctx:, :])
-        self.register_buffer("tokenized_prompts", tokenized_prompts)
 
-        # P1: EOT must be the last real token, because TextEncoder pools at
-        # tokenized_prompts.argmax(-1) and that index is only the EOT position
-        # while this holds. A stale tokenized_prompts fails here instead of
-        # silently pooling mid-sentence.
-        eot_idx = tokenized_prompts.argmax(dim=-1)
-        n_real = (tokenized_prompts != 0).sum(dim=-1) - 1
-        assert torch.equal(eot_idx, n_real), (
-            "P1: tokenized_prompts.argmax(-1) is not the last non-pad position -- the buffer "
-            f"does not describe the strings it was built from. argmax={eot_idx[:5].tolist()} "
-            f"vs last-real={n_real[:5].tolist()}"
-        )
+        def _register(prompts, tag):
+            """Build the three co-dependent buffers for one prompt sequence."""
+            tokenized = torch.cat([_clip.tokenize(p) for p in prompts]).to(
+                clip_model.token_embedding.weight.device)
+            with torch.no_grad():
+                emb = clip_model.token_embedding(tokenized).type(dtype)
+            self.register_buffer(f"token_prefix{tag}", emb[:, :1, :])
+            self.register_buffer(f"token_suffix{tag}", emb[:, 1 + n_ctx:, :])
+            self.register_buffer(f"tokenized_prompts{tag}", tokenized)
+            # P1: EOT must be the last real token, because TextEncoder pools at
+            # tokenized_prompts.argmax(-1) and that index is only the EOT
+            # position while this holds. A stale buffer fails here instead of
+            # silently pooling mid-sentence.
+            eot_idx = tokenized.argmax(dim=-1)
+            n_real = (tokenized != 0).sum(dim=-1) - 1
+            assert torch.equal(eot_idx, n_real), (
+                f"P1{tag}: tokenized_prompts.argmax(-1) is not the last non-pad position -- the "
+                f"buffer does not describe the strings it was built from. "
+                f"argmax={eot_idx[:5].tolist()} vs last-real={n_real[:5].tolist()}"
+            )
+            return tokenized
 
-        # P8: the ctx window must contain only placeholders. If real content
-        # sits at positions 1..n_ctx it is DELETED (that slice never reaches the
-        # encoder), which no shape check would catch.
-        if descriptions is not None:
+        # -- Branch 1: the hand-written template, ALWAYS built --
+        # "a photo of a {class}." / "a sketch of a {class}.". This is the
+        # prompt-learning branch; descriptions no longer replace it.
+        _register([prompt_prefix + " " + name + "." for name in classnames], "")
+
+        # -- Branch 2: the VLM description, only when one was supplied --
+        # Two tokenisations of the SAME sentence, mirroring the two ways the
+        # image side encodes an augmented view:
+        #   _desc        with "X"*n_ctx placeholders -> for the SHARED encoder
+        #                (--aug_shared_encoder), where ctx overwrites that window
+        #   _desc_plain  without placeholders        -> for clip_aug's prompt-free
+        #                text tower, where no ctx is ever substituted and literal
+        #                "x x x" would be read as content
+        # Only one of the two is used per run; both are cheap frozen buffers.
+        self.has_descriptions = descriptions is not None
+        if self.has_descriptions:
+            tokenized_desc = _register(
+                _build_description_prompts(raw_names, classnames, descriptions, desc_pos, n_ctx),
+                "_desc")
+            _register(
+                _build_description_prompts(raw_names, classnames, descriptions, desc_pos, n_ctx,
+                                           with_placeholder=False),
+                "_desc_plain")
+            # P8: the ctx window must contain only placeholders. If real content
+            # sits at positions 1..n_ctx it is DELETED (that slice never reaches
+            # the encoder), which no shape check would catch.
             from src.clip.clip import _tokenizer
             x_id = _tokenizer.encode("X")[0]
-            window = tokenized_prompts[:, 1:1 + n_ctx]
+            window = tokenized_desc[:, 1:1 + n_ctx]
             bad = (window != x_id).any(dim=-1).nonzero().flatten()
             assert bad.numel() == 0, (
-                f"P8: {bad.numel()} prompt(s) do not start with {n_ctx} 'X' placeholders, so ctx "
-                f"would overwrite real content. First offender: {raw_names[int(bad[0])]!r} -> "
-                f"window ids {window[int(bad[0])].tolist()} (expected all {x_id})"
+                f"P8: {bad.numel()} description prompt(s) do not start with {n_ctx} 'X' "
+                f"placeholders, so ctx would overwrite real content. First offender: "
+                f"{raw_names[int(bad[0])]!r} -> window ids {window[int(bad[0])].tolist()} "
+                f"(expected all {x_id})"
             )
 
     def construct_prompts(self, ctx, prefix, suffix, label=None):
@@ -935,13 +964,32 @@ class SimpleTextPromptLearner(nn.Module):
             ctx = ctx[label]  # Select ctx by label to match batch dimension
         return torch.cat([prefix, ctx, suffix], dim=1)
 
-    def forward(self, label=None):
+    def _expanded_ctx(self, n_rows):
         ctx = self.cross_prompts_text[0]
         if ctx.dim() == 2:
-            ctx = ctx.unsqueeze(0).expand(self.tokenized_prompts.shape[0], -1, -1)
+            ctx = ctx.unsqueeze(0).expand(n_rows, -1, -1)
+        return ctx
+
+    def forward(self, label=None):
+        ctx = self._expanded_ctx(self.tokenized_prompts.shape[0])
         text_input = self.construct_prompts(ctx, self.token_prefix, self.token_suffix, label=label)
         cross_prompts_text_deeper = [self.cross_prompts_text[i] for i in range(1, len(self.cross_prompts_text))]
         return text_input, cross_prompts_text_deeper
+
+    def forward_description(self, label=None):
+        """Embedding sequence for the description branch, or None if unused.
+
+        Deliberately reuses `self.cross_prompts_text[0]` -- the SAME learnable
+        context tensor the template branch gets, not a copy. The deep prompts
+        are not returned either: the caller passes the ones it already has from
+        forward(), so the learner is never invoked twice. That is exactly what
+        --aug_shared_encoder does for the augmented image view.
+        """
+        if not self.has_descriptions:
+            return None
+        ctx = self._expanded_ctx(self.tokenized_prompts_desc.shape[0])
+        return self.construct_prompts(ctx, self.token_prefix_desc, self.token_suffix_desc,
+                                      label=label)
 
 
 class VisualEncoder(nn.Module):
