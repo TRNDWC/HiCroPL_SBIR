@@ -107,12 +107,30 @@ def _classify_group(name):
 # if they disagree, so a stale value cannot go unnoticed for long.
 _AUG_FORWARD_BUILDS_GRAPH = True
 
-# Trainable params clip_aug is supposed to expose: the LayerNorms of the
-# ViT-B/32 VISUAL tower only (__init__ scopes unfreeze_ln to .visual).
-#   12 blocks x (ln_1 + ln_2) x (weight + bias) x 768 = 36,864
-#   ln_pre + ln_post                x (weight + bias) x 768 =  3,072
-# Verified against a real build. Any other number means the freeze scope moved.
-_AUG_LN_EXPECTED = 39_936
+# Trainable params clip_aug is supposed to expose. Every LayerNorm is split per
+# domain (split_layernorms), so each tower contributes TWICE its single-set size.
+#
+#   visual, one set: 12 blocks x (ln_1 + ln_2) x (weight + bias) x 768 = 36,864
+#                    ln_pre + ln_post          x (weight + bias) x 768 =  3,072
+#                                                          single set = 39,936
+#   text,   one set: 12 blocks x (ln_1 + ln_2) x (weight + bias) x 512 = 24,576
+#                    ln_final                  x (weight + bias) x 512 =  1,024
+#                                                          single set = 25,600
+#
+# The visual tower is always opened; the text tower only when descriptions are
+# given, because only then is encode_text actually called on this backbone.
+# Verified against real builds. Any other number means a freeze scope moved.
+_AUG_LN_VISUAL_EXPECTED = 2 * 39_936          # 79,872
+_AUG_LN_TEXT_EXPECTED = 2 * 25_600            # 51,200
+
+
+def _expected_aug_ln(model):
+    """How many trainable LayerNorm params clip_aug should hold in this run."""
+    total = _AUG_LN_VISUAL_EXPECTED
+    tp = getattr(model, 'text_prompt_photo', None)
+    if tp is not None and getattr(tp, 'text_variant', 'template') == 'desc_sep':
+        total += _AUG_LN_TEXT_EXPECTED
+    return total
 
 
 def _is_idle(name, cfg, group):
@@ -333,17 +351,21 @@ def log_param_breakdown(model, printer=print):
             printer(f"    ERROR Run A: expected clip_aug=0 and clip_aug_loaded=no, got "
                     f"clip_aug={n_clip_aug} and clip_aug_loaded="
                     f"{'yes' if clip_aug is not None else 'no'}")
-    # Run B (and the plain aug branch) reference: exactly the visual tower's
-    # LayerNorms -- 12 blocks x 2 LN x (weight+bias) x 768 = 36,864, plus
-    # ln_pre + ln_post = 3,072.
+    # Reference for the aug backbone: the per-domain LayerNorm sets it is
+    # supposed to open -- visual always, text only when descriptions make
+    # encode_text live. See _expected_aug_ln for the arithmetic.
     if clip_aug is not None:
-        if n_clip_aug == _AUG_LN_EXPECTED:
-            printer(f"    CHECK Run B: clip_aug trainable={n_clip_aug:,} -- OK "
-                    f"(visual-tower LayerNorm only)")
+        expected = _expected_aug_ln(model)
+        towers = ('visual + text' if expected > _AUG_LN_VISUAL_EXPECTED else 'visual')
+        if n_clip_aug == expected:
+            printer(f"    CHECK aug backbone: clip_aug trainable={n_clip_aug:,} -- OK "
+                    f"({towers} tower LayerNorm, 2 domains each)")
         else:
-            printer(f"    WARNING Run B: clip_aug trainable={n_clip_aug:,}, expected "
-                    f"{_AUG_LN_EXPECTED:,} (ViT-B/32 visual tower: 12x2x2x768=36,864 "
-                    f"+ ln_pre/ln_post=3,072). Breakdown by tensor:")
+            printer(f"    WARNING aug backbone: clip_aug trainable={n_clip_aug:,}, expected "
+                    f"{expected:,} ({towers} tower LayerNorm x 2 domains: visual "
+                    f"{_AUG_LN_VISUAL_EXPECTED:,}"
+                    f"{f' + text {_AUG_LN_TEXT_EXPECTED:,}' if expected > _AUG_LN_VISUAL_EXPECTED else ''})."
+                    f" Breakdown by tensor:")
             for r in [x for x in recs if x['group'] == 'backbone' and x['sub'] == 'aug'][:60]:
                 printer(f"        {r['name']}  {r['numel']:,}  "
                         f"{'LN' if r['is_ln'] else 'NOT-LN'}")
@@ -353,26 +375,31 @@ def log_param_breakdown(model, printer=print):
 
 
 
-def log_desc_fingerprint(cfg, n_cls, sha_s, sha_p, eot=None, printer=print):
-    """One greppable line describing the text-prompt input of this run.
+def log_desc_fingerprint(cfg, n_cls, sha_s, sha_p, eot_ce=None, eot_aux=None,
+                         aux_encoder='none', printer=print):
+    """One greppable line describing the text branch of this run.
 
-    Printed in every run, description mode or not, with the same field shape
-    (n/a fillers when off) so a single grep pattern reads them all. eot_* comes
-    from the SKETCH learner's tokenized_prompts.argmax(-1) -- the position
-    TextEncoder actually pools at, i.e. the number that silently goes wrong when
-    the three buffers drift apart.
+    eot_ce / eot_aux are tokenized_prompts.argmax(-1) of the two sequences --
+    the position TextEncoder actually pools at, i.e. the number that silently
+    goes wrong when the three co-dependent buffers drift apart.
     """
     import statistics
 
-    on = 1 if sha_s != 'n/a' else 0
-    if eot is None or len(eot) == 0:
-        e_min = e_med = e_max = 'n/a'
-    else:
-        vals = [int(v) for v in eot]
-        e_min, e_med, e_max = min(vals), int(round(statistics.median(vals))), max(vals)
-    printer(f"DESC_FP | on={on} | pos={getattr(cfg, 'desc_pos', 'V1')} | n_cls={n_cls} | "
+    def stats(v):
+        if v is None or len(v) == 0:
+            return 'n/a', 'n/a', 'n/a'
+        vals = [int(x) for x in v]
+        return min(vals), int(round(statistics.median(vals))), max(vals)
+
+    c_min, c_med, c_max = stats(eot_ce)
+    a_min, a_med, a_max = stats(eot_aux)
+    printer(f"DESC_FP | variant={getattr(cfg, 'text_variant', 'template')} | "
+            f"lambda_text={getattr(cfg, 'lambda_text', 1.0):.3f} | n_cls={n_cls} | "
             f"n_ctx={getattr(cfg, 'n_ctx', 4)} | sha_s={sha_s} | sha_p={sha_p} | "
-            f"eot_min={e_min} | eot_med={e_med} | eot_max={e_max}")
+            f"eot_ce_min={c_min} | eot_ce_med={c_med} | eot_ce_max={c_max} | "
+            f"eot_aux_min={a_min} | eot_aux_med={a_med} | eot_aux_max={a_max} | "
+            f"aux_encoder={aux_encoder}")
+
 
 
 
@@ -604,9 +631,15 @@ class CustomCLIP(nn.Module):
                     f"Missing from photo ({len(missing_p)}): {missing_p[:10]}"
                     f"{' ...' if len(missing_p) > 10 else ''}."
                 )
-        # Whether the description branch exists at all. Read further down by the
-        # clip_aug block, which must open its text tower's LayerNorms only when
-        # that tower is really going to be called.
+        # Text-branch architecture. Deliberately independent of every aug flag:
+        # the vanilla-instance build condition further down ORs this in rather
+        # than reading --aug_shared_encoder.
+        self.text_variant = getattr(cfg, 'text_variant', 'template')
+        self.lambda_text = getattr(cfg, 'lambda_text', 1.0)
+        if self.text_variant != 'template' and desc_sketch is None:
+            raise ValueError(
+                f"--text_variant {self.text_variant} needs --desc_sketch and --desc_photo"
+            )
         self._has_descriptions = desc_sketch is not None
 
         if self.no_prompt_learning:
@@ -668,16 +701,24 @@ class CustomCLIP(nn.Module):
             cfg_photo = copy.copy(cfg)
             cfg_photo.ctx_init = getattr(cfg, 'ctx_init', 'a photo of a')
             self.text_prompt_photo = SimpleTextPromptLearner(
-                cfg_photo, classnames, self.clip, descriptions=desc_photo, desc_pos=desc_pos)
+                cfg_photo, classnames, self.clip, descriptions=desc_photo, desc_pos=desc_pos,
+                text_variant=self.text_variant)
 
             print("Initializing Sketch Text Prompt Learner...")
             cfg_sketch = copy.copy(cfg)
             cfg_sketch.ctx_init = getattr(cfg, 'ctx_init_sketch', 'a sketch of a')
             self.text_prompt_sketch = SimpleTextPromptLearner(
-                cfg_sketch, classnames, self.clip, descriptions=desc_sketch, desc_pos=desc_pos)
+                cfg_sketch, classnames, self.clip, descriptions=desc_sketch, desc_pos=desc_pos,
+                text_variant=self.text_variant)
 
-            log_desc_fingerprint(cfg, len(classnames), sha_s, sha_p,
-                                 eot=self.text_prompt_sketch.tokenized_prompts.argmax(dim=-1))
+            _L = self.text_prompt_sketch
+            _aux_tok = getattr(_L, 'tokenized_prompts_aux', None)
+            log_desc_fingerprint(
+                cfg, len(classnames), sha_s, sha_p,
+                eot_ce=_L.tokenized_prompts.argmax(dim=-1),
+                eot_aux=None if _aux_tok is None else _aux_tok.argmax(dim=-1),
+                aux_encoder=({'desc_sep': 'vanilla', 'desc_shared': 'main'}
+                             .get(self.text_variant, 'none')))
 
             # -- Encoders (both branches wrap the SAME shared backbone) --
             self.text_encoder_photo = TextEncoder(self.clip)
@@ -689,7 +730,7 @@ class CustomCLIP(nn.Module):
         # other two architectures have no SimpleTextPromptLearner to read them
         # from, so they log the same line with eot_*=n/a.
         if self.no_prompt_learning or self.use_text_visual_exchange:
-            log_desc_fingerprint(cfg, len(classnames), sha_s, sha_p, eot=None)
+            log_desc_fingerprint(cfg, len(classnames), sha_s, sha_p)
             if desc_sketch is not None:
                 print("[WARN] class descriptions were loaded but this architecture branch does "
                       "not use SimpleTextPromptLearner, so they are IGNORED "
@@ -729,7 +770,16 @@ class CustomCLIP(nn.Module):
         # use a plain `is not None` test.
         self.clip_aug = None
         self._n_ln_replaced_aug = 0
-        if not self.disable_aug_branch and not self.aug_shared_encoder:
+        # ONE vanilla instance serves two independent purposes, so the decision
+        # to build it is the OR of two independent conditions -- the text branch
+        # must not depend on an image-branch flag:
+        #   visual tower -> prompt-free encoder for the augmented image views
+        #   text tower   -> prompt-free encoder for the description sequence
+        # `self.clip_aug` stays the attribute name so every existing call site,
+        # log line and param-group rule keeps working unchanged.
+        need_vanilla_visual = not self.disable_aug_branch and not self.aug_shared_encoder
+        need_vanilla_text = self.text_variant == 'desc_sep'
+        if need_vanilla_visual or need_vanilla_text:
             from src.utils import load_clip_to_cpu
             cfg_aug = copy.copy(cfg)
             cfg_aug.clip_trainer = 'CoOp'
@@ -762,16 +812,15 @@ class CustomCLIP(nn.Module):
             # actually computes something.
             #
             # freeze_all_but_bn(self.clip_aug) would be the obvious call, but it
-            # opens LayerNorm in both towers unconditionally. Without
-            # descriptions this branch calls encode_image() only, so the text
-            # tower's LayerNorms would sit in the optimizer with .grad = None for
+            # opens LayerNorm in both towers unconditionally. A tower that is
+            # never called would then sit in the optimizer with .grad = None for
             # the entire run: real dead weight, and an IDLE row in the param log
-            # of every experiment. With descriptions the text tower IS called
-            # (encode_text on the description prompts), so its LayerNorms become
-            # live and are opened too. Either way declared == effective.
+            # of every experiment. Each tower is opened only when something
+            # actually runs through it, which keeps declared == effective.
             freeze_model(self.clip_aug)
-            self.clip_aug.visual.apply(unfreeze_ln)
-            if self._has_descriptions:
+            if need_vanilla_visual:
+                self.clip_aug.visual.apply(unfreeze_ln)
+            if need_vanilla_text:
                 self.clip_aug.transformer.apply(unfreeze_ln)
                 self.clip_aug.ln_final.apply(unfreeze_ln)
             self.clip_aug.eval()
@@ -893,10 +942,12 @@ class CustomCLIP(nn.Module):
                 # reused, the learner is not called again) -- only the frozen
                 # token content differs. Exact text-side mirror of what
                 # --aug_shared_encoder does to the augmented image view.
-                if self.aug_shared_encoder:
-                    desc_input_photo = self.text_prompt_photo.forward_description()
-                    if desc_input_photo is not None:
-                        text_features_desc_photo = self.text_encoder_photo(desc_input_photo, self.text_prompt_photo.tokenized_prompts_desc, cross_prompts_text_deeper_photo)
+                # desc_shared: the auxiliary sequence rides THIS encoder with the
+                # same ctx and the same deep prompts (the learner is not called
+                # again). Gated only by --text_variant, never by an aug flag.
+                aux_input_photo = self.text_prompt_photo.forward_aux()
+                if aux_input_photo is not None:
+                    text_features_desc_photo = self.text_encoder_photo(aux_input_photo, self.text_prompt_photo.tokenized_prompts_aux, cross_prompts_text_deeper_photo)
             with active_domain('photo'):
                 image_features_photo = self.visual_encoder_photo(photo_tensor.type(self.dtype), photo_shallow, photo_deeper)
 
@@ -905,10 +956,9 @@ class CustomCLIP(nn.Module):
             text_input_sketch_all, cross_prompts_text_deeper_sketch = self.text_prompt_sketch(label=None)  # All classes
             with active_domain('sketch'):
                 text_features_all_sketch = self.text_encoder_sketch(text_input_sketch_all, self.text_prompt_sketch.tokenized_prompts, cross_prompts_text_deeper_sketch)
-                if self.aug_shared_encoder:
-                    desc_input_sketch = self.text_prompt_sketch.forward_description()
-                    if desc_input_sketch is not None:
-                        text_features_desc_sketch = self.text_encoder_sketch(desc_input_sketch, self.text_prompt_sketch.tokenized_prompts_desc, cross_prompts_text_deeper_sketch)
+                aux_input_sketch = self.text_prompt_sketch.forward_aux()
+                if aux_input_sketch is not None:
+                    text_features_desc_sketch = self.text_encoder_sketch(aux_input_sketch, self.text_prompt_sketch.tokenized_prompts_aux, cross_prompts_text_deeper_sketch)
             with active_domain('sketch'):
                 image_features_sketch = self.visual_encoder_sketch(sk_tensor.type(self.dtype), sketch_shallow, sketch_deeper)
 
@@ -992,16 +1042,25 @@ class CustomCLIP(nn.Module):
         # no ctx here to overwrite the "X" window, so the placeholders must not be
         # in the sequence at all.
         _tp = getattr(self, 'text_prompt_photo', None)   # absent in the other two architectures
-        if (text_features_desc_photo is None and self.clip_aug is not None
-                and _tp is not None and _tp.has_descriptions):
+        if (self.text_variant == 'desc_sep' and self.clip_aug is not None
+                and _tp is not None and _tp.has_aux):
             with active_domain('photo'):
                 text_features_desc_photo = self.clip_aug.encode_text(
-                    self.text_prompt_photo.tokenized_prompts_desc_plain)
+                    self.text_prompt_photo.tokenized_prompts_aux)
             with active_domain('sketch'):
                 text_features_desc_sketch = self.clip_aug.encode_text(
-                    self.text_prompt_sketch.tokenized_prompts_desc_plain)
+                    self.text_prompt_sketch.tokenized_prompts_aux)
             text_desc_feat_photo = text_features_desc_photo / text_features_desc_photo.norm(dim=-1, keepdim=True)
             text_desc_feat_sketch = text_features_desc_sketch / text_features_desc_sketch.norm(dim=-1, keepdim=True)
+
+        # Snapshot for TEXT_FP. Text features depend only on the prompts, not on
+        # the image batch, so the last step of an epoch describes that epoch's
+        # end state exactly. Detached: reporting must not touch the graph.
+        self._text_snapshot = (
+            text_feat_photo.detach(), text_feat_sketch.detach(),
+            None if text_desc_feat_photo is None else text_desc_feat_photo.detach(),
+            None if text_desc_feat_sketch is None else text_desc_feat_sketch.detach(),
+        )
 
         return (
             photo_feat, logits_photo,
@@ -1215,6 +1274,40 @@ class HiCroPL_SBIR(pl.LightningModule):
 
         return loss
 
+    def _print_text_fp(self):
+        """TEXT_FP: how far apart the two text sequences actually are.
+
+        cos_TA_*    -- mean over classes of cos(T_c, A_c): how tightly loss_text
+                       has pulled the L_ce sequence and the description together.
+        offdiag_A_* -- mean over class PAIRS of cos(A_c, A_c'): how spread the
+                       description features are. A collapsing auxiliary branch
+                       shows up here before it shows up in mAP.
+        gap_TT      -- mean over classes of cos(T_c^photo, T_c^sketch): the
+                       photo/sketch text gap, unchanged by this branch at init.
+
+        Printed only for the variants that actually have an auxiliary sequence.
+        """
+        snap = getattr(self.model, '_text_snapshot', None)
+        if snap is None or snap[2] is None:
+            return
+        t_p, t_s, a_p, a_s = snap
+
+        def offdiag(x):
+            sim = x @ x.t()
+            n = sim.shape[0]
+            if n < 2:
+                return float('nan')
+            return ((sim.sum() - sim.diag().sum()) / (n * (n - 1))).item()
+
+        self.print("TEXT_FP | ep={} | cos_TA_photo={:.4f} | cos_TA_sketch={:.4f} "
+                   "| offdiag_A_photo={:.4f} | offdiag_A_sketch={:.4f} "
+                   "| gap_TT={:.4f}".format(
+                       self.current_epoch,
+                       (t_p * a_p).sum(-1).mean().item(),
+                       (t_s * a_s).sum(-1).mean().item(),
+                       offdiag(a_p), offdiag(a_s),
+                       (t_p * t_s).sum(-1).mean().item()))
+
     def _probe_aug_grad(self, loss_aug, photo_feat, first):
         """d(loss_aug)/d(photo_feat), L2 norm -- read-only.
 
@@ -1255,11 +1348,13 @@ class HiCroPL_SBIR(pl.LightningModule):
         share = 100.0 * vals.get('loss_aug', 0.0) / total if total else 0.0
         fmt = lambda x: 'n/a' if x is None else '{:.6e}'.format(x)
         self.print("LOSS_FP | ep={} | cross_modal={:.6f} | ce={:.6f} | aug={:.6f} "
-                   "| total={:.6f} | aug_grad_norm={} | aug_grad_norm_first={} "
-                   "| aug_share={:.2f}% | steps={}".format(
+                   "| text={:.6f} | total={:.6f} | aug_grad_norm={} "
+                   "| aug_grad_norm_first={} | aug_share={:.2f}% | steps={}".format(
                        self.current_epoch, vals.get('loss_cross_modal', 0.0),
-                       vals.get('loss_ce', 0.0), vals.get('loss_aug', 0.0), total,
+                       vals.get('loss_ce', 0.0), vals.get('loss_aug', 0.0),
+                       vals.get('loss_text', 0.0), total,
                        fmt(self._aug_grad_last), fmt(self._aug_grad_first), share, n))
+        self._print_text_fp()
         # Same four values as scalars, plus the probe.
         self.log('loss_total', torch.tensor(float(total), device=self.device),
                  on_step=False, on_epoch=True, logger=True)

@@ -848,7 +848,8 @@ class SimpleTextPromptLearner(nn.Module):
     Matches the outputs needed by TextEncoder but does not perform cross-modal mapping.
     """
 
-    def __init__(self, cfg, classnames, clip_model, descriptions=None, desc_pos="V1"):
+    def __init__(self, cfg, classnames, clip_model, descriptions=None, desc_pos="V1",
+                 text_variant="template"):
         super().__init__()
         n_cls = len(classnames)
         self.prompt_depth = getattr(cfg, 'prompt_depth', 9)
@@ -900,7 +901,7 @@ class SimpleTextPromptLearner(nn.Module):
 
         def _register(prompts, tag):
             """Build the three co-dependent buffers for one prompt sequence."""
-            tokenized = torch.cat([_clip.tokenize(p) for p in prompts]).to(
+            tokenized = torch.cat([_clip.tokenize(p, truncate=True) for p in prompts]).to(
                 clip_model.token_embedding.weight.device)
             with torch.no_grad():
                 emb = clip_model.token_embedding(tokenized).type(dtype)
@@ -920,42 +921,61 @@ class SimpleTextPromptLearner(nn.Module):
             )
             return tokenized
 
-        # -- Branch 1: the hand-written template, ALWAYS built --
-        # "a photo of a {class}." / "a sketch of a {class}.". This is the
-        # prompt-learning branch; descriptions no longer replace it.
-        _register([prompt_prefix + " " + name + "." for name in classnames], "")
+        def _check_placeholder_window(tokenized, tag):
+            """P8: positions 1..n_ctx must be placeholders, never real content.
 
-        # -- Branch 2: the VLM description, only when one was supplied --
-        # Two tokenisations of the SAME sentence, mirroring the two ways the
-        # image side encodes an augmented view:
-        #   _desc        with "X"*n_ctx placeholders -> for the SHARED encoder
-        #                (--aug_shared_encoder), where ctx overwrites that window
-        #   _desc_plain  without placeholders        -> for clip_aug's prompt-free
-        #                text tower, where no ctx is ever substituted and literal
-        #                "x x x" would be read as content
-        # Only one of the two is used per run; both are cheap frozen buffers.
-        self.has_descriptions = descriptions is not None
-        if self.has_descriptions:
-            tokenized_desc = _register(
-                _build_description_prompts(raw_names, classnames, descriptions, desc_pos, n_ctx),
-                "_desc")
-            _register(
-                _build_description_prompts(raw_names, classnames, descriptions, desc_pos, n_ctx,
-                                           with_placeholder=False),
-                "_desc_plain")
-            # P8: the ctx window must contain only placeholders. If real content
-            # sits at positions 1..n_ctx it is DELETED (that slice never reaches
-            # the encoder), which no shape check would catch.
+            That slice is dropped and replaced by ctx, so anything meaningful
+            sitting there is silently deleted -- no shape check would notice.
+            """
             from src.clip.clip import _tokenizer
             x_id = _tokenizer.encode("X")[0]
-            window = tokenized_desc[:, 1:1 + n_ctx]
+            window = tokenized[:, 1:1 + n_ctx]
             bad = (window != x_id).any(dim=-1).nonzero().flatten()
             assert bad.numel() == 0, (
-                f"P8: {bad.numel()} description prompt(s) do not start with {n_ctx} 'X' "
-                f"placeholders, so ctx would overwrite real content. First offender: "
+                f"P8{tag}: {bad.numel()} prompt(s) do not start with {n_ctx} 'X' placeholders, "
+                f"so ctx would overwrite real content. First offender: "
                 f"{raw_names[int(bad[0])]!r} -> window ids {window[int(bad[0])].tolist()} "
                 f"(expected all {x_id})"
             )
+
+        # -- Two sequences, chosen by --text_variant --------------------------
+        #   ce  : the sequence whose feature feeds L_ce. Always carries ctx.
+        #   aux : the optional second sequence, target of loss_text.
+        #
+        #   template     ce = "T C."                       aux = none
+        #   desc_only    ce = "P D, a C."                  aux = none
+        #   desc_sep     ce = "T C."                       aux = "D, a C."   (no P: the
+        #                                                   vanilla tower has no ctx to
+        #                                                   overwrite it, so literal
+        #                                                   "x x x" would be read as text)
+        #   desc_shared  ce = "T C."                       aux = "P D, a C."
+        self.text_variant = text_variant
+        self.has_descriptions = descriptions is not None
+        template_prompts = [prompt_prefix + " " + name + "." for name in classnames]
+
+        if text_variant == 'desc_only':
+            if descriptions is None:
+                raise ValueError("text_variant='desc_only' requires descriptions")
+            ce_tokenized = _register(
+                _build_description_prompts(raw_names, classnames, descriptions, desc_pos, n_ctx),
+                "")
+            _check_placeholder_window(ce_tokenized, "/ce")
+        else:
+            _register(template_prompts, "")
+
+        self.has_aux = text_variant in ('desc_sep', 'desc_shared')
+        if self.has_aux:
+            if descriptions is None:
+                raise ValueError(f"text_variant={text_variant!r} requires descriptions")
+            # desc_shared rides the main encoder (ctx substituted) -> needs the
+            # placeholders; desc_sep rides a prompt-free tower -> must not have them.
+            with_ph = (text_variant == 'desc_shared')
+            aux_tokenized = _register(
+                _build_description_prompts(raw_names, classnames, descriptions, desc_pos, n_ctx,
+                                           with_placeholder=with_ph),
+                "_aux")
+            if with_ph:
+                _check_placeholder_window(aux_tokenized, "/aux")
 
     def construct_prompts(self, ctx, prefix, suffix, label=None):
         if label is not None:
@@ -976,19 +996,22 @@ class SimpleTextPromptLearner(nn.Module):
         cross_prompts_text_deeper = [self.cross_prompts_text[i] for i in range(1, len(self.cross_prompts_text))]
         return text_input, cross_prompts_text_deeper
 
-    def forward_description(self, label=None):
-        """Embedding sequence for the description branch, or None if unused.
+    def forward_aux(self, label=None):
+        """Embedding sequence for the auxiliary branch, or None if unused.
 
-        Deliberately reuses `self.cross_prompts_text[0]` -- the SAME learnable
-        context tensor the template branch gets, not a copy. The deep prompts
-        are not returned either: the caller passes the ones it already has from
-        forward(), so the learner is never invoked twice. That is exactly what
-        --aug_shared_encoder does for the augmented image view.
+        Only meaningful for text_variant='desc_shared', where the sequence rides
+        the MAIN encoder: it reuses `self.cross_prompts_text[0]` -- the SAME
+        learnable context tensor the L_ce sequence gets, not a copy -- and the
+        caller passes the deep prompts it already has from forward(), so the
+        learner is never invoked twice.
+
+        For 'desc_sep' the auxiliary sequence goes through a prompt-free tower,
+        which consumes `tokenized_prompts_aux` directly and never calls this.
         """
-        if not self.has_descriptions:
+        if not self.has_aux or self.text_variant != 'desc_shared':
             return None
-        ctx = self._expanded_ctx(self.tokenized_prompts_desc.shape[0])
-        return self.construct_prompts(ctx, self.token_prefix_desc, self.token_suffix_desc,
+        ctx = self._expanded_ctx(self.tokenized_prompts_aux.shape[0])
+        return self.construct_prompts(ctx, self.token_prefix_aux, self.token_suffix_aux,
                                       label=label)
 
 

@@ -102,6 +102,8 @@ parser.add_argument('--aug_identity_transform', action='store_true', help='Run B
 parser.add_argument('--desc_sketch', type=str, default=None, help='Path to descriptions_sketch.json: {"meta": {...}, "descriptions": {classname: text}}. Replaces the hard-coded sketch template for the text branch. Must be given together with --desc_photo.')
 parser.add_argument('--desc_photo', type=str, default=None, help='Path to descriptions_photo.json: {"meta": {...}, "descriptions": {classname: text}}. Replaces the hard-coded photo template for the text branch. Must be given together with --desc_sketch.')
 parser.add_argument('--desc_pos', type=str, default='V1', choices=['V1', 'V2'], help='Where the class name sits relative to the description in the text prompt. V1 (default): "X..X <description>, a <class>." -- class last. V2: "X..X a <class>, <description>." -- class first, description last. The leading X tokens are placeholders the learnable ctx overwrites in both cases. V3 (class name inside the description) is not offered: the shipped description files have the class name stripped, so it cannot be built from them. No effect unless --desc_sketch/--desc_photo are given.')
+parser.add_argument('--text_variant', type=str, default='template', choices=['template', 'desc_only', 'desc_sep', 'desc_shared'], help='Architecture of the text branch. Fully independent of every aug flag. "template" (default) = current baseline: only "a photo of a <class>." with learnable ctx feeds L_ce, nothing else is built and loss_text does not exist. "desc_only" = the VLM description REPLACES the template in L_ce ("x..x <desc>, a <class>."), still one sequence, still no loss_text -- the cheapest variant. "desc_sep" = template feeds L_ce and the description is a SECOND sequence encoded by a vanilla prompt-free text tower; loss_text pulls the two together. "desc_shared" = same as desc_sep except the description rides the MAIN clip with the same ctx and deep prompts, which doubles the text batch of that encoder. desc_sep and desc_shared differ in exactly one thing: which encoder sees the auxiliary sequence.')
+parser.add_argument('--lambda_text', type=float, default=1.0, help='Weight of loss_text, the InfoNCE between the L_ce text feature and the auxiliary description feature. Only used by --text_variant desc_sep / desc_shared; the other two variants have no such term at all (not a zero-weighted one).')
 
 opts = parser.parse_args()
 
@@ -118,6 +120,16 @@ if (opts.desc_sketch is None) != (opts.desc_photo is None):
         "keeps the hard-coded template changes two things at once, so the run would not be "
         f"comparable to any baseline. Pass {missing} as well, or drop {given}."
     )
+# Every variant except the baseline needs the description files.
+if opts.text_variant != 'template':
+    missing = [f for f, v in (('--desc_sketch', opts.desc_sketch),
+                              ('--desc_photo', opts.desc_photo)) if v is None]
+    if missing:
+        raise ValueError(
+            f"--text_variant {opts.text_variant} needs class descriptions, but "
+            f"{' and '.join(missing)} {'was' if len(missing) == 1 else 'were'} not given. "
+            f"Pass both files, or use --text_variant template."
+        )
 
 if opts.aug_shared_encoder and opts.aug_identity_transform:
     if not opts.allow_degenerate_aug:

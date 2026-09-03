@@ -104,18 +104,25 @@ def loss_fn_hicropl(args, features, return_components=False):
         loss_aug = lambda_aug * (cross_loss(photo_feat, photo_aug_feat, temperature)
                                  + cross_loss(sketch_feat, sketch_aug_feat, temperature))
 
-    # --- L6: text template <-> VLM description, InfoNCE ---
+    # --- L6: L_ce sequence <-> auxiliary description sequence, InfoNCE ---
     # Same construction as loss_aug on the image side: two views of the same
     # class through one encoder, pulled together. The template view carries the
     # learnable context; the description view carries VLM-written content and
-    # rides the same context. Coefficient fixed at 1.0 -- no CLI flag was added
-    # for it, matching how lambda_aug's structure looks at its default.
+    # rides the same context. Scaled by --lambda_text; the term exists only for
+    # --text_variant desc_sep / desc_shared.
+    lambda_text = getattr(args, 'lambda_text', 1.0)
     loss_text = 0.0
     if text_desc_feat_photo is not None:
-        loss_text = (cross_loss(text_feat_photo, text_desc_feat_photo, temperature)
-                     + cross_loss(text_feat_sketch, text_desc_feat_sketch, temperature))
+        loss_text = lambda_text * (cross_loss(text_feat_photo, text_desc_feat_photo, temperature)
+                                   + cross_loss(text_feat_sketch, text_desc_feat_sketch, temperature))
 
-    total = loss_cross_modal + loss_ce + loss_aug + loss_text
+    # Absent terms stay python floats and are never added: 'template' and
+    # 'desc_only' must not carry a zero tensor with a grad_fn into total.
+    total = loss_cross_modal + loss_ce
+    if torch.is_tensor(loss_aug):
+        total = total + loss_aug
+    if torch.is_tensor(loss_text):
+        total = total + loss_text
     if return_components:
         return total, {
             'loss_cross_modal': loss_cross_modal,
