@@ -125,12 +125,31 @@ _AUG_LN_TEXT_EXPECTED = 2 * 25_600            # 51,200
 
 
 def _expected_aug_ln(model):
-    """How many trainable LayerNorm params clip_aug should hold in this run."""
-    total = _AUG_LN_VISUAL_EXPECTED
-    tp = getattr(model, 'text_prompt_photo', None)
-    if tp is not None and getattr(tp, 'text_variant', 'template') == 'desc_sep':
+    """How many trainable LayerNorm params clip_aug should hold in this run.
+
+    The vanilla instance now serves two INDEPENDENT purposes, so each tower is
+    counted only when its own condition holds. Under --aug_shared_encoder with
+    --text_variant desc_sep the instance exists for the text tower alone, and
+    the visual term must not be added.
+    """
+    total = 0
+    if _needs_vanilla_visual(model):
+        total += _AUG_LN_VISUAL_EXPECTED
+    if _needs_vanilla_text(model):
         total += _AUG_LN_TEXT_EXPECTED
     return total
+
+
+def _needs_vanilla_visual(model):
+    """Is clip_aug's VISUAL tower actually executed this run?"""
+    cfg = getattr(model, 'cfg', None)
+    return (not getattr(cfg, 'disable_aug_branch', False)
+            and not getattr(cfg, 'aug_shared_encoder', False))
+
+
+def _needs_vanilla_text(model):
+    """Is clip_aug's TEXT tower actually executed this run?"""
+    return getattr(getattr(model, 'cfg', None), 'text_variant', 'template') == 'desc_sep'
 
 
 def _is_idle(name, cfg, group):
@@ -154,12 +173,15 @@ def _is_idle(name, cfg, group):
         if name.startswith('clip_aug.'):
             if not _AUG_FORWARD_BUILDS_GRAPH:
                 return 'clip_aug forward under no_grad'
-            # Canary. The aug branch calls encode_image only, so a trainable
-            # text-tower LayerNorm here could never receive gradient. __init__
-            # scopes the unfreeze to clip_aug.visual precisely so this cannot
-            # happen -- reaching this line means someone widened it back to
-            # freeze_all_but_bn(self.clip_aug).
-            if not name.startswith('clip_aug.visual.'):
+            # Canary, one per tower. The vanilla instance serves two independent
+            # purposes and __init__ opens each tower only when that tower is
+            # really executed, so a trainable param here whose tower is NOT
+            # executed means the two conditions have drifted apart.
+            if name.startswith('clip_aug.visual.'):
+                if not (not getattr(cfg, 'disable_aug_branch', False)
+                        and not getattr(cfg, 'aug_shared_encoder', False)):
+                    return 'clip_aug visual tower never called (aug views ride the main encoder)'
+            elif getattr(cfg, 'text_variant', 'template') != 'desc_sep':
                 return 'clip_aug text tower never called (encode_image only)'
         return None
 
@@ -342,29 +364,34 @@ def log_param_breakdown(model, printer=print):
     printer(f"PARAM_FP  | trainable={grand} | ln={n_ln} | prompt={n_prompt} | "
             f"mapper={n_mapper} | lkp={n_lkp} | clip_aug={n_clip_aug} | other={n_other}")
 
-    # Run A reference: the second backbone must not exist at all -- not built,
-    # not in the optimizer, not in the checkpoint.
+    # Run A reference: --aug_shared_encoder means the augmented IMAGE views ride
+    # the main encoder, so the vanilla instance must hold no trainable VISUAL
+    # LayerNorm. It may still exist for --text_variant desc_sep, whose text
+    # tower is a separate concern -- checking the instance's total here would
+    # flag that legitimate case as an error.
     if shared_enc:
-        if n_clip_aug == 0 and clip_aug is None:
-            printer("    CHECK Run A: clip_aug=0, clip_aug_loaded=no -- OK")
+        n_aug_visual = sum(r['numel'] for r in recs
+                           if r['group'] == 'backbone' and r['sub'] == 'aug'
+                           and r['name'].startswith('clip_aug.visual.'))
+        if n_aug_visual == 0:
+            printer(f"    CHECK Run A: clip_aug visual trainable=0 -- OK "
+                    f"(instance {'present for the text tower' if clip_aug is not None else 'absent'})")
         else:
-            printer(f"    ERROR Run A: expected clip_aug=0 and clip_aug_loaded=no, got "
-                    f"clip_aug={n_clip_aug} and clip_aug_loaded="
-                    f"{'yes' if clip_aug is not None else 'no'}")
+            printer(f"    ERROR Run A: expected clip_aug visual trainable=0, got {n_aug_visual}")
     # Reference for the aug backbone: the per-domain LayerNorm sets it is
-    # supposed to open -- visual always, text only when descriptions make
-    # encode_text live. See _expected_aug_ln for the arithmetic.
+    # supposed to open -- each tower only when that tower is really executed.
+    # See _expected_aug_ln / _needs_vanilla_* for the arithmetic.
     if clip_aug is not None:
         expected = _expected_aug_ln(model)
-        towers = ('visual + text' if expected > _AUG_LN_VISUAL_EXPECTED else 'visual')
+        towers = '+'.join([t for t, on in (('visual', _needs_vanilla_visual(model)),
+                                           ('text', _needs_vanilla_text(model))) if on]) or 'none'
         if n_clip_aug == expected:
             printer(f"    CHECK aug backbone: clip_aug trainable={n_clip_aug:,} -- OK "
                     f"({towers} tower LayerNorm, 2 domains each)")
         else:
             printer(f"    WARNING aug backbone: clip_aug trainable={n_clip_aug:,}, expected "
-                    f"{expected:,} ({towers} tower LayerNorm x 2 domains: visual "
-                    f"{_AUG_LN_VISUAL_EXPECTED:,}"
-                    f"{f' + text {_AUG_LN_TEXT_EXPECTED:,}' if expected > _AUG_LN_VISUAL_EXPECTED else ''})."
+                    f"{expected:,} (towers executed: {towers}; visual set "
+                    f"{_AUG_LN_VISUAL_EXPECTED:,}, text set {_AUG_LN_TEXT_EXPECTED:,})."
                     f" Breakdown by tensor:")
             for r in [x for x in recs if x['group'] == 'backbone' and x['sub'] == 'aug'][:60]:
                 printer(f"        {r['name']}  {r['numel']:,}  "
@@ -1024,7 +1051,13 @@ class CustomCLIP(nn.Module):
                 # apples-to-apples setting.
                 photo_aug_feat = photo_aug_feat.detach()
                 sketch_aug_feat = sketch_aug_feat.detach()
-        elif photo_aug_tensor is not None and self.clip_aug is not None:
+        # `self.clip_aug is not None` used to be a proxy for "the aug branch is
+        # on", back when that instance existed for no other reason. It can now
+        # be built purely for --text_variant desc_sep, so the aug branch must be
+        # gated on its OWN flag. Without this, feeding augmented tensors while
+        # --disable_aug_branch is set would silently revive loss_aug.
+        elif (not self.disable_aug_branch and photo_aug_tensor is not None
+                and self.clip_aug is not None):
             with active_domain('photo'):
                 f_p = self.clip_aug.encode_image(photo_aug_tensor.type(self.dtype))
             with active_domain('sketch'):
