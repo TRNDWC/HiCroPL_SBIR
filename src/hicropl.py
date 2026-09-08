@@ -669,6 +669,12 @@ class VisualVisualPromptLearner(nn.Module):
             # Output detached before the Mapper (src/hicropl.py:644-647), or the
             # module is bypassed entirely under --exchange_free_source.
             dead += [self.attn_pooling_photo_nets, self.photo_proxy_token]
+        n_deep = self.prompt_depth - self.cross_layer
+        if (not self.disable_exchange) and n_deep > 0 and self.exchange_detach_source:
+            # Same reasoning as the photo side: the sketch proxy is detached
+            # before sketch2photo_net, so attn_pooling_sketch_nets and
+            # sketch_proxy_token can never receive gradient.
+            dead += [self.attn_pooling_sketch_nets, self.sketch_proxy_token]
         if self.sketch_self_refine_ln:
             # Applied only on the k/v side, which is detached.
             dead.append(self.ln_selfrefine)
@@ -771,6 +777,15 @@ class VisualVisualPromptLearner(nn.Module):
             )
             photo_prompts_flat = photo_prompts_range.view(-1, photo_prompts_range.shape[-1])
             proxy_sketch_flat = proxy_sketch_prompts.view(-1, proxy_sketch_prompts.shape[-1])
+            if self.exchange_detach_source:
+                # Mirror of the Photo->Sketch block above. --exchange_detach_source
+                # means "cut the gradient into whichever branch is acting as the
+                # SOURCE", so it has to fire here too -- otherwise the flag would
+                # silently mean different things at different --cross_layer values
+                # and the three direction variants (P->S at cross_layer=depth,
+                # S->P at 0, both in between) would differ in trainable capacity
+                # by the whole sketch-side LKP rather than in direction alone.
+                proxy_sketch_flat = proxy_sketch_flat.detach()
 
             updated_photo_prompts = self.sketch2photo_net(photo_prompts_flat, proxy_sketch_flat, proxy_sketch_flat)
             updated_photo_prompts = updated_photo_prompts.view(
