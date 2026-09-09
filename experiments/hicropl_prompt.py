@@ -80,11 +80,32 @@ if __name__ == '__main__':
                 print("[ABLATION] --aug_shared_encoder (Run A): clip_aug NOT built; the augmented "
                       "views go through the main encoder with the same prompts. "
                       f"aug_detach_view={int(opts.aug_detach_view)}.")
+        if opts.cross_dataset_eval:
+            if not opts.eval_dataset or not opts.eval_data_dir:
+                raise ValueError("--cross_dataset_eval requires both --eval_dataset and --eval_data_dir.")
+            if opts.gzs_eval:
+                raise ValueError("--cross_dataset_eval and --gzs_eval are mutually exclusive "
+                                  "(GZS mixes SEEN classes of --dataset; cross-dataset eval classes "
+                                  "are all unseen by construction).")
+            if opts.eval_mode_gzs:
+                raise ValueError("--cross_dataset_eval and --eval_mode_gzs are mutually exclusive.")
+            print(f"[CONFIG] --cross_dataset_eval: training on ALL categories of '{opts.dataset}', "
+                  f"evaluating on '{opts.eval_dataset}' ({opts.eval_data_dir})")
+        if opts.eval_mode_gzs and opts.gzs_eval:
+            raise ValueError("--eval_mode_gzs and --gzs_eval are mutually exclusive.")
+        if opts.eval_mode_gzs:
+            print(f"[CONFIG] --eval_mode_gzs: photo gallery = P^s (ALL train photos of every seen "
+                  f"class of '{opts.dataset}') union P^u (unseen-class photos); query stays S^u.")
         train_dataset = Sketchy(opts, dataset_transforms, mode='train', return_orig=False,
                                 transform_aug_photo=aug_photo, transform_aug_sketch=aug_sketch)
         print(f"[CONFIG] Loading validation data in category mode")
         val_sketch = ValidDataset(opts, mode='sketch')
         val_photo = ValidDataset(opts, mode='photo')
+        if opts.eval_mode_gzs:
+            print(f"GZS_FP | on=1 | n_gallery_seen={val_photo.n_gallery_seen} | "
+                  f"n_gallery_unseen={val_photo.n_gallery_unseen} | "
+                  f"n_gallery_total={val_photo.n_gallery_seen + val_photo.n_gallery_unseen} | "
+                  f"n_query={val_sketch.n_query}")
 
     print(f"Train dataset: {len(train_dataset)} samples, {len(train_dataset.all_categories)} categories")
     if opts.eval_mode == 'fine_grained':
@@ -187,8 +208,11 @@ if __name__ == '__main__':
         checkpoint_monitor = 'top1'
         checkpoint_filename = '{epoch:02d}-{top1:.4f}'
     else:
-        checkpoint_monitor = 'val_map_200' if opts.dataset == 'sketchy_ext' else 'val_map_all'
-        checkpoint_filename = '{epoch:02d}-{val_map_200:.4f}' if opts.dataset == 'sketchy_ext' else '{epoch:02d}-{val_map_all:.4f}'
+        # --cross_dataset_eval always logs mAP@all (see model_hicropl.py), regardless
+        # of --dataset, so it must not fall into the sketchy_ext -> val_map_200 branch.
+        use_map_200 = opts.dataset == 'sketchy_ext' and not opts.cross_dataset_eval
+        checkpoint_monitor = 'val_map_200' if use_map_200 else 'val_map_all'
+        checkpoint_filename = '{epoch:02d}-{val_map_200:.4f}' if use_map_200 else '{epoch:02d}-{val_map_all:.4f}'
 
     checkpoint_callback = ModelCheckpoint(
         monitor=checkpoint_monitor,

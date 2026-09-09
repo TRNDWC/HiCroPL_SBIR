@@ -9,13 +9,39 @@ parser.add_argument('--exp_name', type=str, default='LN_prompt')
 # --------------------
 
 # Path to 'Sketchy' folder holding Sketch_extended dataset. It should have 2 folders named 'sketch' and 'photo'.
-parser.add_argument('--dataset', type=str, default='sketchy', 
-                    choices=['sketchy', 'sketchy_ext', 'tuberlin', 'quickdraw'],
-                    help='Dataset name: sketchy, sketchy_ext, tuberlin, or quickdraw')
-parser.add_argument('--data_dir', type=str, default='/isize2/sain/data/Sketchy/') 
+parser.add_argument('--dataset', type=str, default='sketchy',
+                    choices=['sketchy', 'sketchy_ext', 'sketchy_1', 'sketchy_2', 'tuberlin', 'quickdraw'],
+                    help='Dataset name: sketchy, sketchy_ext, sketchy_1, sketchy_2, tuberlin, or quickdraw')
+parser.add_argument('--data_dir', type=str, default='/isize2/sain/data/Sketchy/')
 parser.add_argument('--max_size', type=int, default=224)
 parser.add_argument('--nclass', type=int, default=10)
 parser.add_argument('--data_split', type=float, default=-1.0)
+parser.add_argument('--gzs_eval', action='store_true',
+                    help='NON-STANDARD GZS eval (kept for backward compat, prefer --eval_mode_gzs): '
+                         'mix a fixed, hand-picked SEEN-class subset '
+                         '(GENERALIZED_CLASSES in src/dataset_retrieval.py, keyed by --dataset) '
+                         'into the ValidDataset (sketch AND photo) gallery/query on top of the '
+                         'unseen classes. Mutually exclusive with --eval_mode_gzs.')
+parser.add_argument('--eval_mode_gzs', action='store_true',
+                    help='Standard GZS-SBIR protocol: gallery = P^s union P^u (P^s = ALL train '
+                         'photos of EVERY seen class, no subsampling, read directly off disk; P^u '
+                         '= the existing unseen-class photo gallery, unchanged). Query stays S^u '
+                         '(unseen sketches only, unchanged) -- only the photo gallery grows. Seen '
+                         'images share no label with any query, so they only ever act as '
+                         'distractors, never positives. Off by default (identical to plain '
+                         'ZS-SBIR). Mutually exclusive with --gzs_eval and --cross_dataset_eval.')
+parser.add_argument('--cross_dataset_eval', action='store_true',
+                    help='Across-dataset ZS-SBIR: train on --dataset (e.g. sketchy) using ALL of '
+                         'its categories (no within-dataset unseen holdout), and evaluate on a '
+                         'different dataset entirely (--eval_dataset / --eval_data_dir), which is '
+                         'fully unseen since its categories never appeared during training. '
+                         'Mutually exclusive with --gzs_eval.')
+parser.add_argument('--eval_dataset', type=str, default=None, choices=['tuberlin', 'quickdraw'],
+                    help='Target dataset for --cross_dataset_eval. Selects the map_k/P@k '
+                         'convention used for that dataset in on_validation_epoch_end.')
+parser.add_argument('--eval_data_dir', type=str, default=None,
+                    help='Root directory of --eval_dataset for --cross_dataset_eval (must contain '
+                         '"sketch" and "photo" subfolders). Required when --cross_dataset_eval is set.')
 
 # ----------------------
 # Training Params

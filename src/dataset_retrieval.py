@@ -23,7 +23,7 @@ UNSEEN_CLASSES = {
     "sketchy_1": [
         "cup", "swan", "harp", "squirrel", "snail", "ray", "pineapple",
         "volcano", "rifle", "scissors", "parrot", "windmill", "teddy_bear",
-        "tree", "wine_bottle", "deer", "chicken", "hotdog", "wheelchair",
+        "tree", "wine_bottle", "deer", "chicken", "airplane", "wheelchair", 
         "tank", "umbrella", "butterfly", "camel", "horse", "bell"
     ],
     "sketchy_2": [
@@ -47,6 +47,43 @@ UNSEEN_CLASSES = {
         "church", "couch", "cow", "crab", "crocodilian", "dolphin",
         "eyeglasses", "guitar"
     ]
+}
+
+# Extra SEEN classes mixed into GZS-SBIR (generalized ZS) evaluation, on top of
+# UNSEEN_CLASSES. These classes were part of the training split, so their
+# retrieval gallery/query images are ones the encoder already saw during
+# training -- this tests robustness to seen-class distractors in the gallery,
+# not held-out generalization on those specific images.
+GENERALIZED_CLASSES = {
+    "sketchy_ext": [
+        "teapot",
+        "harp",
+        "piano",
+        "trumpet",
+        "saxophone",
+        "hourglass",
+        "mushroom",
+        "pretzel",
+        "bell",
+    ],
+    "sketchy_2": [
+        "teapot",
+        "harp",
+        "piano",
+        "trumpet",
+        "saxophone",
+        "hourglass",
+        "mushroom",
+        "pretzel",
+        "bell",
+    ],
+    "tuberlin": [
+        "blimp",
+        "tablelamp",
+        "telephone",
+        "human-skeleton",
+        "pickup truck",
+    ],
 }
 
 class Sketchy(torch.utils.data.Dataset):
@@ -76,6 +113,11 @@ class Sketchy(torch.utils.data.Dataset):
                 self.all_categories = self.all_categories[:int(len(self.all_categories)*self.opts.data_split)]
             else:
                 self.all_categories = sorted(set(self.all_categories) - set(used_cat))  # sorted!
+        elif mode == 'train' and getattr(self.opts, 'cross_dataset_eval', False):
+            # Cross-dataset ZS-SBIR: evaluation happens on a fully separate
+            # dataset (see ValidDataset), so the within-dataset unseen split
+            # doesn't need to be held out here -- train on every category.
+            self.all_categories = sorted(self.all_categories)
         else:
             if mode == 'train':
                 self.all_categories = sorted(set(self.all_categories) - set(unseen_classes))  # sorted!
@@ -234,22 +276,104 @@ def normal_transform():
     return dataset_transforms
 
 class ValidDataset(torch.utils.data.Dataset):
-    def __init__(self, args, mode='photo'):
+    def __init__(self, args, mode='photo', base_data_dir=None):
         super(ValidDataset, self).__init__()
         self.args = args
         self.mode = mode
         self.transform = normal_transform()
-        
-        dataset_key = self.args.dataset if hasattr(self.args, 'dataset') else 'sketchy'
+
+        # Across-dataset ZS-SBIR (--cross_dataset_eval): evaluate against a
+        # dataset entirely different from the one trained on (e.g. train on
+        # sketchy_ext, eval on tuberlin/quickdraw). base_data_dir (explicit
+        # param, or args.eval_data_dir when the flag is set) overrides
+        # args.data_dir, and dataset_key switches to args.eval_dataset so the
+        # STANDARD unseen-test split of the target dataset is used (per the
+        # paper protocol: "evaluate directly on the unseen test classes of
+        # TU-Berlin-Ext and QuickDraw-Ext") -- not every category of that
+        # dataset.
+        cross_dataset_eval = getattr(self.args, 'cross_dataset_eval', False)
+        if base_data_dir is None and cross_dataset_eval:
+            base_data_dir = self.args.eval_data_dir
+        self.data_dir = base_data_dir if base_data_dir is not None else self.args.data_dir
+
+        if cross_dataset_eval:
+            dataset_key = self.args.eval_dataset
+        else:
+            dataset_key = self.args.dataset if hasattr(self.args, 'dataset') else 'sketchy'
         unseen_classes = UNSEEN_CLASSES.get(dataset_key, UNSEEN_CLASSES['sketchy'])
-        self.all_categories = sorted(set(unseen_classes))
+
+        eval_mode_gzs = getattr(self.args, 'eval_mode_gzs', False)
+        if eval_mode_gzs and cross_dataset_eval:
+            raise ValueError("--eval_mode_gzs and --cross_dataset_eval are mutually exclusive.")
+        if eval_mode_gzs and getattr(self.args, 'gzs_eval', False):
+            raise ValueError("--eval_mode_gzs and --gzs_eval are mutually exclusive -- two different, "
+                              "incompatible GZS mechanisms. --gzs_eval mixes a hand-picked SEEN-class "
+                              "subset into both sketch and photo (non-standard). --eval_mode_gzs "
+                              "implements the standard protocol, gallery = P^s (ALL train photos of "
+                              "EVERY seen class) union P^u, query unchanged (S^u only).")
+
+        if eval_mode_gzs:
+            # Standard GZS-SBIR protocol: gallery = P^s union P^u, query = S^u
+            # unchanged. P^s/P^u are read directly off disk (glob), independent
+            # of the training DataLoader, per dataset_retrieval.py:127-153's
+            # pattern for Sketchy.all_photos_path -- no subsampling.
+            full_categories = sorted(os.listdir(os.path.join(self.data_dir, 'sketch')))
+            if '.ipynb_checkpoints' in full_categories:
+                full_categories.remove('.ipynb_checkpoints')
+            seen_classes = sorted(set(full_categories) - set(unseen_classes))
+            # Combined label vocabulary shared by BOTH the sketch (query) and
+            # photo (gallery) ValidDataset instances, so a category's integer
+            # label (self.all_categories.index(category) in __getitem__) is
+            # IDENTICAL across both -- required for target = (photo_label ==
+            # sketch_label) in model_hicropl.py to work once the gallery spans
+            # two disjoint category sets: a seen-class gallery image can never
+            # get the same label as any query (query labels only ever come
+            # from unseen_classes), so it is correctly a distractor, never a
+            # false positive.
+            self.all_categories = sorted(set(unseen_classes) | set(seen_classes))
+
+            self.paths = []
+            if self.mode == 'photo':
+                paths_unseen = []
+                for category in sorted(unseen_classes):
+                    paths_unseen.extend(sorted(glob.glob(os.path.join(self.data_dir, 'photo', category, '*'))))
+                paths_seen = []
+                for category in seen_classes:
+                    paths_seen.extend(sorted(glob.glob(os.path.join(self.data_dir, 'photo', category, '*'))))
+                self.paths = paths_seen + paths_unseen
+                self.n_gallery_seen = len(paths_seen)
+                self.n_gallery_unseen = len(paths_unseen)
+                print(f"GZS_FP | on=1 | n_gallery_seen={self.n_gallery_seen} | "
+                      f"n_gallery_unseen={self.n_gallery_unseen} | "
+                      f"n_gallery_total={self.n_gallery_seen + self.n_gallery_unseen}")
+            else:
+                for category in sorted(unseen_classes):
+                    self.paths.extend(sorted(glob.glob(os.path.join(self.data_dir, 'sketch', category, '*'))))
+                self.n_query = len(self.paths)
+                print(f"GZS_FP | on=1 | n_query={self.n_query}")
+            return
+
+        # GZS-SBIR (non-standard, existing flag): mix a fixed set of SEEN
+        # classes into the eval gallery/query on top of the unseen ones. See
+        # GENERALIZED_CLASSES docstring for the train/test image-leakage
+        # caveat this implies for the seen classes. Mutually exclusive with
+        # --cross_dataset_eval (enforced in the training script), so
+        # dataset_key here always refers to args.dataset.
+        if getattr(self.args, 'gzs_eval', False):
+            seen_classes = GENERALIZED_CLASSES.get(dataset_key, [])
+            if len(seen_classes) == 0:
+                print(f"[WARN] --gzs_eval set but no GENERALIZED_CLASSES entry for dataset '{dataset_key}'; "
+                      f"falling back to unseen-only evaluation.")
+            self.all_categories = sorted(set(unseen_classes) | set(seen_classes))
+        else:
+            self.all_categories = sorted(set(unseen_classes))
 
         self.paths = []
         for category in self.all_categories:
             if self.mode == "photo":
-                self.paths.extend(sorted(glob.glob(os.path.join(self.args.data_dir, 'photo', category, '*'))))
+                self.paths.extend(sorted(glob.glob(os.path.join(self.data_dir, 'photo', category, '*'))))
             else:
-                self.paths.extend(sorted(glob.glob(os.path.join(self.args.data_dir, 'sketch', category, '*'))))
+                self.paths.extend(sorted(glob.glob(os.path.join(self.data_dir, 'sketch', category, '*'))))
 
     def __getitem__(self, index):
         filepath = self.paths[index]                

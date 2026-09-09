@@ -1114,6 +1114,13 @@ class HiCroPL_SBIR(pl.LightningModule):
         self.model = model
         
         self.best_metric = 1e-3
+        # Companions to best_metric: P@k and the epoch measured AT THE SAME
+        # validation pass, so the summary file reports a matched pair instead of
+        # max(mAP) next to an unrelated P@k.
+        self.best_precision = 0.0
+        self.best_epoch = -1
+        self.best_metric_name = ''
+        self.best_precision_name = ''
         self.distance_fn = lambda x, y: 1.0 - F.cosine_similarity(x, y)
 
         self.test_photo_features = []
@@ -1140,13 +1147,16 @@ class HiCroPL_SBIR(pl.LightningModule):
         self._aug_grad_last = None
 
     def on_fit_start(self):
-        """Intentionally empty.
+        """Records the wall-clock start so on_fit_end can report a duration.
+
+        Was intentionally empty before.
 
         Used to print per-branch learnable-token counts; that information is now
         covered (in params, not token counts) by log_param_breakdown() in
         configure_optimizers, which is the single source of truth.
         """
-        pass
+        import time
+        self._fit_started_at = time.time()
 
     def configure_optimizers(self):
         def add_unique_params(candidates, out_list, seen_ids):
@@ -1395,6 +1405,90 @@ class HiCroPL_SBIR(pl.LightningModule):
             self.log('aug_grad_norm', torch.tensor(float(self._aug_grad_last), device=self.device),
                      on_step=False, on_epoch=True, logger=True)
 
+    def on_fit_end(self):
+        """Write the best result of this run to results/<exp_name>.txt.
+
+        Two outputs, both append-safe: one file per experiment (easy to open for
+        a single run) and one shared CSV row (easy to sort when filling a table
+        of 20+ runs). Metric names are carried through rather than hard-coded,
+        because the metric depends on the dataset -- mAP@200/P@200 for
+        sketchy_ext, mAP@all/P@100 for tuberlin, mAP@all/P@200 for quickdraw
+        (see _on_validation_epoch_end_category).
+        """
+        import csv
+        import os
+        import shlex
+        import sys
+        import time
+
+        if not self.trainer.is_global_zero:
+            return
+        finished_at = time.strftime('%Y-%m-%d %H:%M:%S')
+
+        # Reconstruct the command in `python -m <module>` form rather than
+        # joining sys.argv verbatim: sys.argv[0] is the script PATH, and running
+        # that path directly puts experiments/ on sys.path instead of the repo
+        # root, so `from src...` would fail. The -m form is what actually reruns.
+        try:
+            module = os.path.splitext(os.path.relpath(sys.argv[0], os.getcwd()))[0]
+            module = module.replace(os.sep, '.')
+            launcher = f"python -m {module}"
+        except ValueError:                      # different drive on Windows
+            launcher = f"python {sys.argv[0]}"
+        command = " ".join([launcher] + [shlex.quote(a) for a in sys.argv[1:]])
+        started = getattr(self, '_fit_started_at', None)
+        elapsed = '' if started is None else time.strftime('%H:%M:%S', time.gmtime(time.time() - started))
+        exp = getattr(self.args, 'exp_name', 'run')
+        out_dir = 'results'
+        os.makedirs(out_dir, exist_ok=True)
+
+        # The flags that actually distinguish one ablation cell from another.
+        flag_names = ('dataset', 'epochs', 'n_ctx', 'prompt_depth', 'cross_layer',
+                      'prompt_lr', 'clip_LN_lr', 'disable_exchange',
+                      'exchange_detach_source', 'disable_aug_branch',
+                      'aug_shared_encoder', 'aug_identity_transform',
+                      'allow_degenerate_aug', 'text_variant')
+        flags = {k: getattr(self.args, k, None) for k in flag_names}
+
+        m_name = self.best_metric_name or 'best_metric'
+        p_name = self.best_precision_name or 'P'
+        # APPEND, never truncate: re-running the same --exp_name must add a new
+        # entry rather than destroy the previous one, so a repeated or resumed
+        # run can be compared against its predecessor. The timestamp is what
+        # tells the entries apart.
+        lines = ["=" * 66,
+                 f"finished_at = {finished_at}" + (f"   (elapsed {elapsed})" if elapsed else ""),
+                 f"exp_name   = {exp}",
+                 f"best_epoch = {self.best_epoch}",
+                 f"{m_name:<10} = {self.best_metric:.4f}",
+                 f"{p_name:<10} = {self.best_precision:.4f}",
+                 f"epochs_run = {self.current_epoch}",
+                 f"cwd        = {os.getcwd()}",
+                 "flags:"]
+        lines += [f"    {k} = {v}" for k, v in flags.items()]
+        lines += ["command:", f"    {command}"]
+        with open(os.path.join(out_dir, f"{exp}.txt"), 'a') as f:
+            f.write("\n".join(lines) + "\n")
+
+        # csv.writer, not manual f-string joining: the command field can contain
+        # commas or quotes and would otherwise split into bogus columns.
+        csv_path = os.path.join(out_dir, 'summary.csv')
+        header = ["finished_at", "elapsed", "exp_name", "dataset", "metric", "best_value",
+                  "precision_name", "precision", "best_epoch", "command"]
+        row = [finished_at, elapsed, exp, flags['dataset'], m_name, f"{self.best_metric:.4f}",
+               p_name, f"{self.best_precision:.4f}", self.best_epoch, command]
+        need_header = not os.path.exists(csv_path)
+        with open(csv_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            if need_header:
+                writer.writerow(header)
+            writer.writerow(row)
+
+        self.print(f"BEST_FP | exp={exp} | {m_name}={self.best_metric:.4f} | "
+                   f"{p_name}={self.best_precision:.4f} | epoch={self.best_epoch} | "
+                   f"at={finished_at} | elapsed={elapsed or 'n/a'} | "
+                   f"-> {out_dir}/{exp}.txt, {csv_path}")
+
     def extract_eval_features(self, tensor, modality):
         """Extract visual features (prompted only, no distill mixing)."""
         # modality is the ground truth for which LayerNorm set to use at eval:
@@ -1468,7 +1562,13 @@ class HiCroPL_SBIR(pl.LightningModule):
         similarity_matrix = query_features @ gallery_features.t()
 
         dataset = getattr(self.args, 'dataset', 'sketchy')
-        if dataset == "sketchy_2" or dataset == "sketchy_ext":
+        if getattr(self.args, 'cross_dataset_eval', False):
+            # Across-dataset ZS-SBIR always reports mAP@all, P@100 regardless
+            # of which target dataset (tuberlin/quickdraw) is being evaluated --
+            # overrides the per-dataset map_k/p_k convention below.
+            map_k = 0
+            p_k = 100
+        elif dataset == "sketchy_2" or dataset == "sketchy_ext":
             map_k = 200
             p_k = 200
         elif dataset == "quickdraw":
@@ -1509,8 +1609,15 @@ class HiCroPL_SBIR(pl.LightningModule):
             self.log("val_map_all", mAP, on_step=False, on_epoch=True)
         self.log(f"val_p_{p_k}", mean_precision, on_step=False, on_epoch=True)
 
-        if self.global_step > 0:
-            self.best_metric = self.best_metric if (self.best_metric > mAP.item()) else mAP.item()
+        if self.global_step > 0 and mAP.item() >= self.best_metric:
+            # Same update rule as before (the old expression kept the old value
+            # only when best > mAP, i.e. it replaced on >=); it just records the
+            # companions now.
+            self.best_metric = mAP.item()
+            self.best_precision = mean_precision.item()
+            self.best_epoch = self.current_epoch
+            self.best_metric_name = f'mAP@{map_k}' if map_k != 0 else 'mAP@all'
+            self.best_precision_name = f'P@{p_k}'
 
         if map_k != 0:
             self.print('mAP@{}: {:.4f}, P@{}: {:.4f}, Best mAP: {:.4f}'.format(
