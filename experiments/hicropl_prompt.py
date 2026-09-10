@@ -94,8 +94,9 @@ if __name__ == '__main__':
         if opts.eval_mode_gzs and opts.gzs_eval:
             raise ValueError("--eval_mode_gzs and --gzs_eval are mutually exclusive.")
         if opts.eval_mode_gzs:
-            print(f"[CONFIG] --eval_mode_gzs: photo gallery = P^s (ALL train photos of every seen "
-                  f"class of '{opts.dataset}') union P^u (unseen-class photos); query stays S^u.")
+            print(f"[CONFIG] --eval_mode_gzs: SEM-PCYC protocol — gallery = unseen photos + "
+                  f"random 20% of seen photos; query = unseen sketches + random 20% of "
+                  f"seen sketches (dataset: '{opts.dataset}').")
         train_dataset = Sketchy(opts, dataset_transforms, mode='train', return_orig=False,
                                 transform_aug_photo=aug_photo, transform_aug_sketch=aug_sketch)
         print(f"[CONFIG] Loading validation data in category mode")

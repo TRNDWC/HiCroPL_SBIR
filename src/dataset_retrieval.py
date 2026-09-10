@@ -32,20 +32,26 @@ UNSEEN_CLASSES = {
         "seagull", "skyscraper", "songbird", "sword", "tree", "wheelchair",
         "windmill", "window"
     ],
+    # 30 lớp test của TUBerlin Ext (ZSE-SBIR split, dùng cho within-dataset ZS-SBIR).
+    # Khi cross_dataset_eval (S→T), ValidDataset sẽ lọc thêm các lớp trùng với
+    # source train (Sketchy 100) → còn lại 21 lớp unseen đúng theo bài báo.
     "tuberlin": [
-        "helicopter", "wrist-watch", "mermaid", "mosquito", "pear", "couch",
-        "hammer", "purse", "house", "tennis-racket", "toilet", "panda",
-        "butterfly", "mug", "wineglass", "motorbike", "eyeglasses",
-        "hot air balloon", "screwdriver", "skull", "truck", "palm tree",
-        "cell phone", "horse", "sailboat", "suv", "church", "floor lamp",
-        "pipe (for smoking)", "tv"
+        "ant", "banana", "bottle opener", "brain", "bread", "bridge",
+        "bus", "canoe", "fan", "frying-pan", "horse", "hot air balloon",
+        "laptop", "lighter", "parachute", "penguin", "pizza", "rollerblades",
+        "shoe", "snowboard", "space shuttle", "streetlight", "suitcase",
+        "t-shirt", "table", "teacup", "telephone", "tractor", "trombone",
+        "windmill"
     ],
+    # 30 lớp test của QuickDraw Ext (ZSE-SBIR split, dùng cho within-dataset ZS-SBIR).
+    # Khi cross_dataset_eval (S→Q), ValidDataset sẽ lọc thêm các lớp trùng với
+    # source train (Sketchy 100) → còn lại 11 lớp unseen đúng theo bài báo.
     "quickdraw": [
-        "airplane", "alarm_clock", "ant", "apple", "axe", "banana", "bat",
-        "bear", "bee", "bench", "bicycle", "bread", "bus", "butterfly",
-        "cactus", "cake", "camel", "candle", "car", "castle", "cat", "chair",
-        "church", "couch", "cow", "crab", "crocodilian", "dolphin",
-        "eyeglasses", "guitar"
+        "banana", "bat", "beach", "bread", "cactus", "cake", "campfire",
+        "cow", "dolphin", "door", "fan", "feather", "fire_hydrant", "frog",
+        "giraffe", "hamburger", "helicopter", "megaphone", "mouse",
+        "palm tree", "raccoon", "rhinoceros", "saw", "scissors", "shark",
+        "skyscraper", "tiger", "tree", "windmill", "zebra"
     ]
 }
 
@@ -302,6 +308,29 @@ class ValidDataset(torch.utils.data.Dataset):
             dataset_key = self.args.dataset if hasattr(self.args, 'dataset') else 'sketchy'
         unseen_classes = UNSEEN_CLASSES.get(dataset_key, UNSEEN_CLASSES['sketchy'])
 
+        if cross_dataset_eval:
+            # Zero-shot guarantee: loại bỏ các lớp trong tập test của dataset đích
+            # mà đã xuất hiện trong tập train của dataset nguồn (args.data_dir).
+            # Normalize tên để xử lý bất đồng định dạng, ví dụ:
+            #   Sketchy "hot-air_balloon" == TUBerlin "hot air balloon"
+            def _norm_cls(s):
+                return s.lower().replace('-', ' ').replace('_', ' ').strip()
+
+            src_sketch_dir = os.path.join(self.args.data_dir, 'sketch')
+            src_train_norm = set()
+            if os.path.isdir(src_sketch_dir):
+                src_cats = os.listdir(src_sketch_dir)
+                if '.ipynb_checkpoints' in src_cats:
+                    src_cats.remove('.ipynb_checkpoints')
+                src_train_norm = {_norm_cls(c) for c in src_cats}
+
+            before_filter = list(unseen_classes)
+            unseen_classes = [c for c in unseen_classes if _norm_cls(c) not in src_train_norm]
+            removed = sorted(set(before_filter) - set(unseen_classes))
+            print(f"[cross_dataset_eval] Lọc lớp trùng với source train: "
+                  f"{len(before_filter)} → {len(unseen_classes)} lớp "
+                  f"(loại {len(removed)}: {removed})")
+
         eval_mode_gzs = getattr(self.args, 'eval_mode_gzs', False)
         if eval_mode_gzs and cross_dataset_eval:
             raise ValueError("--eval_mode_gzs and --cross_dataset_eval are mutually exclusive.")
@@ -309,14 +338,18 @@ class ValidDataset(torch.utils.data.Dataset):
             raise ValueError("--eval_mode_gzs and --gzs_eval are mutually exclusive -- two different, "
                               "incompatible GZS mechanisms. --gzs_eval mixes a hand-picked SEEN-class "
                               "subset into both sketch and photo (non-standard). --eval_mode_gzs "
-                              "implements the standard protocol, gallery = P^s (ALL train photos of "
-                              "EVERY seen class) union P^u, query unchanged (S^u only).")
+                              "implements the SEM-PCYC protocol: gallery = unseen photos + random "
+                              "20% seen photos; query = unseen sketches + random 20% seen sketches.")
 
         if eval_mode_gzs:
-            # Standard GZS-SBIR protocol: gallery = P^s union P^u, query = S^u
-            # unchanged. P^s/P^u are read directly off disk (glob), independent
-            # of the training DataLoader, per dataset_retrieval.py:127-153's
-            # pattern for Sketchy.all_photos_path -- no subsampling.
+            # GZS-SBIR protocol following SEM-PCYC (Dutta & Akata, CVPR 2019):
+            # Both gallery and query are augmented with a random subset of seen
+            # data.  The number of seen samples added = perc × number of unseen
+            # samples in that modality (perc = 0.2, i.e. 20%).
+            #
+            # Gallery = unseen photos  +  random_sample(seen photos, 0.2 × |unseen photos|)
+            # Query   = unseen sketches + random_sample(seen sketches, 0.2 × |unseen sketches|)
+            perc = 0.2
             full_categories = sorted(os.listdir(os.path.join(self.data_dir, 'sketch')))
             if '.ipynb_checkpoints' in full_categories:
                 full_categories.remove('.ipynb_checkpoints')
@@ -325,11 +358,7 @@ class ValidDataset(torch.utils.data.Dataset):
             # photo (gallery) ValidDataset instances, so a category's integer
             # label (self.all_categories.index(category) in __getitem__) is
             # IDENTICAL across both -- required for target = (photo_label ==
-            # sketch_label) in model_hicropl.py to work once the gallery spans
-            # two disjoint category sets: a seen-class gallery image can never
-            # get the same label as any query (query labels only ever come
-            # from unseen_classes), so it is correctly a distractor, never a
-            # false positive.
+            # sketch_label) in model_hicropl.py to work correctly.
             self.all_categories = sorted(set(unseen_classes) | set(seen_classes))
 
             self.paths = []
@@ -337,20 +366,47 @@ class ValidDataset(torch.utils.data.Dataset):
                 paths_unseen = []
                 for category in sorted(unseen_classes):
                     paths_unseen.extend(sorted(glob.glob(os.path.join(self.data_dir, 'photo', category, '*'))))
-                paths_seen = []
+                paths_seen_all = []
                 for category in seen_classes:
-                    paths_seen.extend(sorted(glob.glob(os.path.join(self.data_dir, 'photo', category, '*'))))
-                self.paths = paths_seen + paths_unseen
-                self.n_gallery_seen = len(paths_seen)
+                    paths_seen_all.extend(sorted(glob.glob(os.path.join(self.data_dir, 'photo', category, '*'))))
+                # Sample 20% of the unseen count from seen photos
+                n_sample = int(perc * len(paths_unseen))
+                n_sample = min(n_sample, len(paths_seen_all))
+                rng = np.random.RandomState(42)  # fixed seed for reproducibility
+                idx = rng.choice(len(paths_seen_all), n_sample, replace=False)
+                idx.sort()
+                paths_seen_sampled = [paths_seen_all[i] for i in idx]
+                self.paths = paths_seen_sampled + paths_unseen
+                self.n_gallery_seen = len(paths_seen_sampled)
                 self.n_gallery_unseen = len(paths_unseen)
-                print(f"GZS_FP | on=1 | n_gallery_seen={self.n_gallery_seen} | "
+                print(f"GZS_FP | on=1 | protocol=SEM-PCYC | perc={perc} | "
+                      f"n_seen_pool={len(paths_seen_all)} | "
+                      f"n_gallery_seen={self.n_gallery_seen} | "
                       f"n_gallery_unseen={self.n_gallery_unseen} | "
                       f"n_gallery_total={self.n_gallery_seen + self.n_gallery_unseen}")
             else:
+                paths_unseen = []
                 for category in sorted(unseen_classes):
-                    self.paths.extend(sorted(glob.glob(os.path.join(self.data_dir, 'sketch', category, '*'))))
+                    paths_unseen.extend(sorted(glob.glob(os.path.join(self.data_dir, 'sketch', category, '*'))))
+                paths_seen_all = []
+                for category in seen_classes:
+                    paths_seen_all.extend(sorted(glob.glob(os.path.join(self.data_dir, 'sketch', category, '*'))))
+                # Sample 20% of the unseen count from seen sketches
+                n_sample = int(perc * len(paths_unseen))
+                n_sample = min(n_sample, len(paths_seen_all))
+                rng = np.random.RandomState(42)  # same seed for reproducibility
+                idx = rng.choice(len(paths_seen_all), n_sample, replace=False)
+                idx.sort()
+                paths_seen_sampled = [paths_seen_all[i] for i in idx]
+                self.paths = paths_seen_sampled + paths_unseen
+                self.n_query_seen = len(paths_seen_sampled)
+                self.n_query_unseen = len(paths_unseen)
                 self.n_query = len(self.paths)
-                print(f"GZS_FP | on=1 | n_query={self.n_query}")
+                print(f"GZS_FP | on=1 | protocol=SEM-PCYC | perc={perc} | "
+                      f"n_seen_pool={len(paths_seen_all)} | "
+                      f"n_query_seen={self.n_query_seen} | "
+                      f"n_query_unseen={self.n_query_unseen} | "
+                      f"n_query_total={self.n_query}")
             return
 
         # GZS-SBIR (non-standard, existing flag): mix a fixed set of SEEN

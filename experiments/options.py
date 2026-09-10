@@ -23,12 +23,11 @@ parser.add_argument('--gzs_eval', action='store_true',
                          'into the ValidDataset (sketch AND photo) gallery/query on top of the '
                          'unseen classes. Mutually exclusive with --eval_mode_gzs.')
 parser.add_argument('--eval_mode_gzs', action='store_true',
-                    help='Standard GZS-SBIR protocol: gallery = P^s union P^u (P^s = ALL train '
-                         'photos of EVERY seen class, no subsampling, read directly off disk; P^u '
-                         '= the existing unseen-class photo gallery, unchanged). Query stays S^u '
-                         '(unseen sketches only, unchanged) -- only the photo gallery grows. Seen '
-                         'images share no label with any query, so they only ever act as '
-                         'distractors, never positives. Off by default (identical to plain '
+                    help='GZS-SBIR protocol following SEM-PCYC (Dutta & Akata, CVPR 2019): '
+                         'gallery = unseen photos + random 20%% of seen photos (count = 0.2 × '
+                         '|unseen photos|); query = unseen sketches + random 20%% of seen sketches '
+                         '(count = 0.2 × |unseen sketches|). Both gallery and query are augmented '
+                         'with seen data as distractors. Off by default (identical to plain '
                          'ZS-SBIR). Mutually exclusive with --gzs_eval and --cross_dataset_eval.')
 parser.add_argument('--cross_dataset_eval', action='store_true',
                     help='Across-dataset ZS-SBIR: train on --dataset (e.g. sketchy) using ALL of '
