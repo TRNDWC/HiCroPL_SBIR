@@ -462,6 +462,72 @@ class ValidDataset(torch.utils.data.Dataset):
                       f"{len(before_filter)} → {len(unseen_classes)} lớp "
                       f"(loại {len(removed)}: {removed})")
 
+        eval_mode_gzs_ocean = getattr(self.args, 'eval_mode_gzs_ocean', False)
+        if eval_mode_gzs_ocean and cross_dataset_eval:
+            raise ValueError("--eval_mode_gzs_ocean and --cross_dataset_eval are mutually exclusive.")
+        if eval_mode_gzs_ocean and getattr(self.args, 'gzs_eval', False):
+            raise ValueError("--eval_mode_gzs_ocean and --gzs_eval are mutually exclusive.")
+        if eval_mode_gzs_ocean and getattr(self.args, 'eval_mode_gzs', False):
+            raise ValueError("--eval_mode_gzs_ocean and --eval_mode_gzs are mutually exclusive -- two "
+                              "different GZS-SBIR protocols. --eval_mode_gzs: gallery = P^s (ALL "
+                              "seen-class photos) union P^u_test, query = S^u_test UNCHANGED (seen "
+                              "images are pure distractors, never queried). --eval_mode_gzs_ocean: the "
+                              "OCEAN (Zhu et al., ICME 2020) protocol -- C^g = C^u union a RANDOM "
+                              "subset of whole seen CLASSES (count = round(0.2 * |C^u|), not a sample "
+                              "of images), and BOTH query and gallery are drawn from C^g (seen-class "
+                              "sketches ARE queried, not just used as gallery distractors).")
+
+        if eval_mode_gzs_ocean:
+            # OCEAN (Zhu et al., ICME 2020) GZS-SBIR protocol -- verified against
+            # the paper's Table 1 and Sec 3.1/4.1 text:
+            #   "We randomly choose 20% C^s and all C^u to form the generalized
+            #    test classes C^g. The test set is defined as D^g = {X^g, Y^g},
+            #    which from C^g."
+            # The "20%" is a fraction of |C^u| (not |C^s|) applied to the COUNT
+            # OF WHOLE CLASSES (not images) -- verified by reproducing Table 1's
+            # "Test classes (GZS-SBIR)" numbers exactly: Sketchy 25 unseen +
+            # round(0.2*25)=5 extra seen classes = 30; TU-Berlin 30 unseen +
+            # round(0.2*30)=6 extra seen classes = 36.
+            # Unlike --eval_mode_gzs, D^g spans C^g for BOTH sketch (query) and
+            # photo (gallery) -- every image (all of it, no per-image sampling)
+            # of the selected extra seen classes enters both the query and the
+            # gallery, exactly like an unseen class would.
+            full_categories = sorted(os.listdir(os.path.join(self.data_dir, 'sketch')))
+            if '.ipynb_checkpoints' in full_categories:
+                full_categories.remove('.ipynb_checkpoints')
+            seen_pool = sorted(set(full_categories) - set(unseen_classes))
+            n_extra = int(round(0.2 * len(unseen_classes)))
+            n_extra = min(n_extra, len(seen_pool))
+            rng = np.random.RandomState(42)  # fixed seed: identical pick across the sketch/photo instances
+            extra_idx = rng.choice(len(seen_pool), n_extra, replace=False)
+            extra_idx.sort()
+            extra_seen_classes = [seen_pool[i] for i in extra_idx]
+
+            self.all_categories = sorted(set(unseen_classes) | set(extra_seen_classes))
+            all_g_classes = sorted(set(unseen_classes) | set(extra_seen_classes))
+
+            self.paths = []
+            for category in all_g_classes:
+                self.paths.extend(sorted(glob.glob(os.path.join(self.data_dir, self.mode, category, '*'))))
+
+            if self.mode == 'photo':
+                self.n_gallery_seen = sum(
+                    len(glob.glob(os.path.join(self.data_dir, 'photo', c, '*'))) for c in extra_seen_classes)
+                self.n_gallery_unseen = len(self.paths) - self.n_gallery_seen
+                print(f"GZS_OCEAN_FP | on=1 | n_test_classes_unseen={len(unseen_classes)} | "
+                      f"n_test_classes_seen={len(extra_seen_classes)} | "
+                      f"n_test_classes_total={len(all_g_classes)} | "
+                      f"n_gallery_seen={self.n_gallery_seen} | n_gallery_unseen={self.n_gallery_unseen} | "
+                      f"n_gallery_total={len(self.paths)} | extra_seen_classes={extra_seen_classes}")
+            else:
+                self.n_query_seen = sum(
+                    len(glob.glob(os.path.join(self.data_dir, 'sketch', c, '*'))) for c in extra_seen_classes)
+                self.n_query_unseen = len(self.paths) - self.n_query_seen
+                self.n_query = len(self.paths)
+                print(f"GZS_OCEAN_FP | on=1 | n_query_seen={self.n_query_seen} | "
+                      f"n_query_unseen={self.n_query_unseen} | n_query_total={self.n_query}")
+            return
+
         eval_mode_gzs = getattr(self.args, 'eval_mode_gzs', False)
         if eval_mode_gzs and cross_dataset_eval:
             raise ValueError("--eval_mode_gzs and --cross_dataset_eval are mutually exclusive.")
@@ -502,6 +568,21 @@ class ValidDataset(torch.utils.data.Dataset):
                 paths_seen = []
                 for category in seen_classes:
                     paths_seen.extend(sorted(glob.glob(os.path.join(self.data_dir, 'photo', category, '*'))))
+
+                # DEBUG ONLY (--gzs_seen_frac < 1.0): subsample P^s for a fast
+                # smoke-test of the eval loop. Deterministic (fixed seed) so a
+                # repeated debug run is reproducible. Default 1.0 = full P^s,
+                # the only setting whose numbers are the real GZS-SBIR protocol.
+                seen_frac = getattr(self.args, 'gzs_seen_frac', 1.0)
+                if seen_frac < 1.0:
+                    n_keep = max(1, int(round(seen_frac * len(paths_seen)))) if paths_seen else 0
+                    rng = np.random.RandomState(42)
+                    keep_idx = rng.choice(len(paths_seen), n_keep, replace=False)
+                    keep_idx.sort()
+                    paths_seen = [paths_seen[i] for i in keep_idx]
+                    print(f"[DEBUG] --gzs_seen_frac={seen_frac}: P^s subsampled to {len(paths_seen)} photos "
+                          f"-- NOT the standard protocol, do not report these numbers.")
+
                 self.paths = paths_seen + paths_unseen
                 self.n_gallery_seen = len(paths_seen)
                 self.n_gallery_unseen = len(paths_unseen)

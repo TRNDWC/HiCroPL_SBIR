@@ -30,6 +30,25 @@ parser.add_argument('--eval_mode_gzs', action='store_true',
                          'query, so they only ever act as distractors, never positives. Off by '
                          'default (identical to plain ZS-SBIR). Mutually exclusive with --gzs_eval '
                          'and --cross_dataset_eval.')
+parser.add_argument('--eval_mode_gzs_ocean', action='store_true',
+                    help='OCEAN (Zhu et al., ICME 2020, "Ocean: A Dual Learning Approach For '
+                         'Generalized Zero-Shot Sketch-Based Image Retrieval") GZS-SBIR protocol -- '
+                         'reproduces Table 1\'s "Test classes (GZS-SBIR)" counts exactly (Sketchy 30, '
+                         'TU-Berlin 36). C^g = C^u union round(0.2 * |C^u|) randomly chosen WHOLE seen '
+                         'classes (fixed seed 42, identical pick shared by the sketch and photo '
+                         'instances); the test set D^g = {X^g, Y^g} is drawn from C^g for BOTH query '
+                         '(sketch) and gallery (photo) -- unlike --eval_mode_gzs, seen-class sketches '
+                         'ARE part of the query here, not just distractors in the gallery. Every image '
+                         'of the selected extra seen classes is included (no per-image sampling). '
+                         'Mutually exclusive with --eval_mode_gzs, --gzs_eval and --cross_dataset_eval.')
+parser.add_argument('--gzs_seen_frac', type=float, default=1.0,
+                    help='DEBUG ONLY, no effect unless --eval_mode_gzs is set. Fraction of P^s '
+                         '(seen-class gallery photos) to actually load, sampled deterministically '
+                         '(fixed seed) per seen class. Default 1.0 = full P^s, the correct GZS-SBIR '
+                         'protocol -- this is the only setting whose numbers are valid to report or '
+                         'compare. A value < 1.0 (e.g. 0.2) exists purely to speed up smoke-testing '
+                         'the eval loop before a real run; mAP/P@k from such a run are NOT comparable '
+                         'to any full-P^s result and must not be reported as GZS-SBIR numbers.')
 parser.add_argument('--cross_dataset_eval', action='store_true',
                     help='Across-dataset ZS-SBIR: train on --dataset (e.g. sketchy) using ALL of '
                          'its categories (no within-dataset unseen holdout), and evaluate on a '
