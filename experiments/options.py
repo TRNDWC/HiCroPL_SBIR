@@ -9,9 +9,9 @@ parser.add_argument('--exp_name', type=str, default='LN_prompt')
 # --------------------
 
 # Path to 'Sketchy' folder holding Sketch_extended dataset. It should have 2 folders named 'sketch' and 'photo'.
-parser.add_argument('--dataset', type=str, default='sketchy',
-                    choices=['sketchy', 'sketchy_ext', 'sketchy_1', 'sketchy_2', 'tuberlin', 'quickdraw'],
-                    help='Dataset name: sketchy, sketchy_ext, sketchy_1, sketchy_2, tuberlin, or quickdraw')
+parser.add_argument('--dataset', type=str, default='sketchy_1',
+                    choices=['sketchy_1', 'sketchy_2', 'tuberlin', 'quickdraw'],
+                    help='Dataset name: sketchy_1, sketchy_2, tuberlin, or quickdraw')
 parser.add_argument('--data_dir', type=str, default='/isize2/sain/data/Sketchy/')
 parser.add_argument('--max_size', type=int, default=224)
 parser.add_argument('--nclass', type=int, default=10)
@@ -23,12 +23,13 @@ parser.add_argument('--gzs_eval', action='store_true',
                          'into the ValidDataset (sketch AND photo) gallery/query on top of the '
                          'unseen classes. Mutually exclusive with --eval_mode_gzs.')
 parser.add_argument('--eval_mode_gzs', action='store_true',
-                    help='GZS-SBIR protocol following SEM-PCYC (Dutta & Akata, CVPR 2019): '
-                         'gallery = unseen photos + random 20%% of seen photos (count = 0.2 × '
-                         '|unseen photos|); query = unseen sketches + random 20%% of seen sketches '
-                         '(count = 0.2 × |unseen sketches|). Both gallery and query are augmented '
-                         'with seen data as distractors. Off by default (identical to plain '
-                         'ZS-SBIR). Mutually exclusive with --gzs_eval and --cross_dataset_eval.')
+                    help='Standard GZS-SBIR protocol: gallery = P^s (ALL seen-class train photos, '
+                         'no subsampling) union P^u_test (the existing unseen-class photo gallery, '
+                         'unchanged). Query stays S^u_test (unseen sketches only, unchanged) -- only '
+                         'the photo gallery grows. Seen-class gallery images share no label with any '
+                         'query, so they only ever act as distractors, never positives. Off by '
+                         'default (identical to plain ZS-SBIR). Mutually exclusive with --gzs_eval '
+                         'and --cross_dataset_eval.')
 parser.add_argument('--cross_dataset_eval', action='store_true',
                     help='Across-dataset ZS-SBIR: train on --dataset (e.g. sketchy) using ALL of '
                          'its categories (no within-dataset unseen holdout), and evaluate on a '

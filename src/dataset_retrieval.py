@@ -6,53 +6,176 @@ from src_fg.utils_fg import parse_sketchy_fg_photo, parse_sketchy_fg_sketch
 from torchvision import transforms
 from PIL import Image, ImageOps
 
+def _norm_cls(s):
+    """Normalize a class name for cross-vocabulary comparison, e.g. Sketchy
+    'hot-air_balloon' == TU-Berlin 'hot air balloon'."""
+    return s.lower().replace('-', ' ').replace('_', ' ').strip()
+
 # Unseen classes for different datasets (ZS-SBIR evaluation)
 UNSEEN_CLASSES = {
-    "sketchy": [
-        "bat", "cabin", "cow", "dolphin", "door", "giraffe", "helicopter",
-        "mouse", "pear", "raccoon", "rhinoceros", "saw", "scissors",
-        "seagull", "skyscraper", "songbird", "sword", "tree", "wheelchair",
-        "windmill", "window"
-    ],
-    "sketchy_ext": [
-        "bat", "cabin", "cow", "dolphin", "door", "giraffe", "helicopter",
-        "mouse", "pear", "raccoon", "rhinoceros", "saw", "scissors",
-        "seagull", "skyscraper", "songbird", "sword", "tree", "wheelchair",
-        "windmill", "window"
-    ],
     "sketchy_1": [
-        "cup", "swan", "harp", "squirrel", "snail", "ray", "pineapple",
-        "volcano", "rifle", "scissors", "parrot", "windmill", "teddy_bear",
-        "tree", "wine_bottle", "deer", "chicken", "airplane", "wheelchair", 
-        "tank", "umbrella", "butterfly", "camel", "horse", "bell"
+        "cup",
+        "swan",
+        "harp",
+        "squirrel",
+        "snail",
+        "ray",
+        "pineapple",
+        "volcano",
+        "rifle",
+        "scissors",
+        "parrot",
+        "windmill",
+        "teddy_bear",
+        "tree",
+        "wine_bottle",
+        "deer",
+        "chicken",
+        "airplane",
+        "wheelchair",
+        "tank",
+        "umbrella",
+        "butterfly",
+        "camel",
+        "horse",
+        "bell"
     ],
+
     "sketchy_2": [
-        "bat", "cabin", "cow", "dolphin", "door", "giraffe", "helicopter",
-        "mouse", "pear", "raccoon", "rhinoceros", "saw", "scissors",
-        "seagull", "skyscraper", "songbird", "sword", "tree", "wheelchair",
-        "windmill", "window"
+        "bat",
+        "cabin",
+        "cow",
+        "dolphin",
+        "door",
+        "giraffe",
+        "helicopter",
+        "mouse",
+        "pear",
+        "raccoon",
+        "rhinoceros",
+        "saw",
+        "scissors",
+        "seagull",
+        "skyscraper",
+        "songbird",
+        "sword",
+        "tree",
+        "wheelchair",
+        "windmill",
+        "window",
     ],
-    # 30 lớp test của TUBerlin Ext (ZSE-SBIR split, dùng cho within-dataset ZS-SBIR).
-    # Khi cross_dataset_eval (S→T), ValidDataset sẽ lọc thêm các lớp trùng với
-    # source train (Sketchy 100) → còn lại 21 lớp unseen đúng theo bài báo.
-    "tuberlin": [
-        "ant", "banana", "bottle opener", "brain", "bread", "bridge",
-        "bus", "canoe", "fan", "frying-pan", "horse", "hot air balloon",
-        "laptop", "lighter", "parachute", "penguin", "pizza", "rollerblades",
-        "shoe", "snowboard", "space shuttle", "streetlight", "suitcase",
-        "t-shirt", "table", "teacup", "telephone", "tractor", "trombone",
-        "windmill"
-    ],
-    # 30 lớp test của QuickDraw Ext (ZSE-SBIR split, dùng cho within-dataset ZS-SBIR).
-    # Khi cross_dataset_eval (S→Q), ValidDataset sẽ lọc thêm các lớp trùng với
-    # source train (Sketchy 100) → còn lại 11 lớp unseen đúng theo bài báo.
+
     "quickdraw": [
-        "banana", "bat", "beach", "bread", "cactus", "cake", "campfire",
-        "cow", "dolphin", "door", "fan", "feather", "fire_hydrant", "frog",
-        "giraffe", "hamburger", "helicopter", "megaphone", "mouse",
-        "palm tree", "raccoon", "rhinoceros", "saw", "scissors", "shark",
-        "skyscraper", "tiger", "tree", "windmill", "zebra"
-    ]
+        "alarm_clock",
+        "axe",
+        "airplane",
+        "bat",
+        "car",
+        "bread",
+        "bus",
+        "cake",
+        "campfire",
+        "cruise ship",
+        "dolphin",
+        "eiffel tower",
+        "eyeglasses",
+        "horse",
+        "flower",
+        "giraffe",
+        "hamburger",
+        "helicopter",
+        "hot-air_balloon",
+        "kangaroo",
+        "tree",
+        "megaphone",
+        "moon",
+        "motorcycle",
+        "palm tree",
+        "parrot",
+        "raccoon",
+        "sailboat",
+        "skyscraper",
+        "windmill",
+    ],
+
+    "tuberlin": [
+        "helicopter",
+        "wrist-watch",
+        "mermaid",
+        "mosquito",
+        "pear",
+        "couch",
+        "hammer",
+        "airplane",
+        "house",
+        "baseball bat",
+        "toilet",
+        "panda",
+        "butterfly",
+        "mug",
+        "wineglass",
+        "motorbike",
+        "eyeglasses",
+        "hot air balloon",
+        "cup",
+        "skull",
+        "truck",
+        "palm tree",
+        "cell phone",
+        "horse",
+        "sailboat",
+        "suv",
+        "church",
+        "floor lamp",
+        "bus",
+        "tv",
+    ],
+}
+
+# Fixed cross-dataset ZS-SBIR subsets used for Sketchy-1-Ext as the source.
+# Keep these protocol lists explicit: S->T uses 21 classes and S->Q uses 11.
+# ValidDataset uses this (when the (source_dataset, eval_dataset) key exists)
+# as the target's unseen-class list, in place of UNSEEN_CLASSES[eval_dataset];
+# Sketchy(mode='train', cross_dataset_eval=True) excludes the same classes
+# (name-normalized) from the training set, so the pair is mutually consistent
+# -- a class listed here is guaranteed to be absent from training.
+CROSS_DATASET_CLASSES = {
+    ("sketchy_1", "tuberlin"): [
+        "airplane",
+        "baseball bat",
+        "bus",
+        "butterfly",
+        "cell phone",
+        "cup",
+        "floor lamp",
+        "house",
+        "horse",
+        "mermaid",
+        "mosquito",
+        "mug",
+        "palm tree",
+        "panda",
+        "skull",
+        "suv",
+        "toilet",
+        "truck",
+        "tv",
+        "wineglass",
+        "wrist-watch",
+    ],
+    ("sketchy_1", "quickdraw"): [
+        "airplane",
+        "cruise ship",
+        "windmill",
+        "horse",
+        "bus",
+        "eiffel tower",
+        "cake",
+        "parrot",
+        "palm tree",
+        "megaphone",
+        "tree",
+    ],
 }
 
 # Extra SEEN classes mixed into GZS-SBIR (generalized ZS) evaluation, on top of
@@ -61,17 +184,6 @@ UNSEEN_CLASSES = {
 # training -- this tests robustness to seen-class distractors in the gallery,
 # not held-out generalization on those specific images.
 GENERALIZED_CLASSES = {
-    "sketchy_ext": [
-        "teapot",
-        "harp",
-        "piano",
-        "trumpet",
-        "saxophone",
-        "hourglass",
-        "mushroom",
-        "pretzel",
-        "bell",
-    ],
     "sketchy_2": [
         "teapot",
         "harp",
@@ -106,13 +218,13 @@ class Sketchy(torch.utils.data.Dataset):
         self.transform_aug_photo = transform_aug_photo
         self.transform_aug_sketch = transform_aug_sketch
 
-        dataset_key = self.opts.dataset if hasattr(self.opts, 'dataset') else 'sketchy'
-        unseen_classes = UNSEEN_CLASSES.get(dataset_key, UNSEEN_CLASSES['sketchy'])
+        dataset_key = self.opts.dataset if hasattr(self.opts, 'dataset') else 'sketchy_1'
+        unseen_classes = UNSEEN_CLASSES.get(dataset_key, UNSEEN_CLASSES['sketchy_1'])
 
         self.all_categories = sorted(os.listdir(os.path.join(self.opts.data_dir, 'sketch')))
         if '.ipynb_checkpoints' in self.all_categories:
             self.all_categories.remove('.ipynb_checkpoints')
-            
+
         if self.opts.data_split > 0:
             np.random.shuffle(self.all_categories)
             if used_cat is None:
@@ -121,9 +233,20 @@ class Sketchy(torch.utils.data.Dataset):
                 self.all_categories = sorted(set(self.all_categories) - set(used_cat))  # sorted!
         elif mode == 'train' and getattr(self.opts, 'cross_dataset_eval', False):
             # Cross-dataset ZS-SBIR: evaluation happens on a fully separate
-            # dataset (see ValidDataset), so the within-dataset unseen split
+            # dataset (see ValidDataset). If a fixed CROSS_DATASET_CLASSES
+            # subset is pinned for (dataset_key, eval_dataset), exclude those
+            # classes (name-normalized) from training -- required for the
+            # zero-shot guarantee: a class ValidDataset tests as "unseen" for
+            # this source/target pair must never appear in training. Without
+            # a pinned subset (fallback), the within-dataset unseen split
             # doesn't need to be held out here -- train on every category.
-            self.all_categories = sorted(self.all_categories)
+            eval_dataset = getattr(self.opts, 'eval_dataset', None)
+            exclude_classes = CROSS_DATASET_CLASSES.get((dataset_key, eval_dataset))
+            if exclude_classes:
+                exclude_norm = {_norm_cls(c) for c in exclude_classes}
+                self.all_categories = sorted(c for c in self.all_categories if _norm_cls(c) not in exclude_norm)
+            else:
+                self.all_categories = sorted(self.all_categories)
         else:
             if mode == 'train':
                 self.all_categories = sorted(set(self.all_categories) - set(unseen_classes))  # sorted!
@@ -290,7 +413,7 @@ class ValidDataset(torch.utils.data.Dataset):
 
         # Across-dataset ZS-SBIR (--cross_dataset_eval): evaluate against a
         # dataset entirely different from the one trained on (e.g. train on
-        # sketchy_ext, eval on tuberlin/quickdraw). base_data_dir (explicit
+        # sketchy_1, eval on tuberlin/quickdraw). base_data_dir (explicit
         # param, or args.eval_data_dir when the flag is set) overrides
         # args.data_dir, and dataset_key switches to args.eval_dataset so the
         # STANDARD unseen-test split of the target dataset is used (per the
@@ -305,31 +428,39 @@ class ValidDataset(torch.utils.data.Dataset):
         if cross_dataset_eval:
             dataset_key = self.args.eval_dataset
         else:
-            dataset_key = self.args.dataset if hasattr(self.args, 'dataset') else 'sketchy'
-        unseen_classes = UNSEEN_CLASSES.get(dataset_key, UNSEEN_CLASSES['sketchy'])
+            dataset_key = self.args.dataset if hasattr(self.args, 'dataset') else 'sketchy_1'
+        unseen_classes = UNSEEN_CLASSES.get(dataset_key, UNSEEN_CLASSES['sketchy_1'])
 
         if cross_dataset_eval:
-            # Zero-shot guarantee: loại bỏ các lớp trong tập test của dataset đích
-            # mà đã xuất hiện trong tập train của dataset nguồn (args.data_dir).
-            # Normalize tên để xử lý bất đồng định dạng, ví dụ:
-            #   Sketchy "hot-air_balloon" == TUBerlin "hot air balloon"
-            def _norm_cls(s):
-                return s.lower().replace('-', ' ').replace('_', ' ').strip()
+            source_key = self.args.dataset if hasattr(self.args, 'dataset') else 'sketchy_1'
+            fixed_classes = CROSS_DATASET_CLASSES.get((source_key, self.args.eval_dataset))
+            if fixed_classes is not None:
+                # Pinned protocol subset: Sketchy(mode='train', cross_dataset_eval=True)
+                # already excludes these same classes (name-normalized) from
+                # training, so no further filtering is needed here.
+                unseen_classes = list(fixed_classes)
+                print(f"[cross_dataset_eval] Using CROSS_DATASET_CLASSES[{(source_key, self.args.eval_dataset)}]: "
+                      f"{len(unseen_classes)} classes.")
+            else:
+                # Fallback: no pinned subset for this (source, target) pair --
+                # zero-shot guarantee filter, loại bỏ các lớp trong tập test của
+                # dataset đích mà đã xuất hiện trong tập train của dataset nguồn
+                # (args.data_dir). Normalize tên để xử lý bất đồng định dạng,
+                # ví dụ: Sketchy "hot-air_balloon" == TUBerlin "hot air balloon"
+                src_sketch_dir = os.path.join(self.args.data_dir, 'sketch')
+                src_train_norm = set()
+                if os.path.isdir(src_sketch_dir):
+                    src_cats = os.listdir(src_sketch_dir)
+                    if '.ipynb_checkpoints' in src_cats:
+                        src_cats.remove('.ipynb_checkpoints')
+                    src_train_norm = {_norm_cls(c) for c in src_cats}
 
-            src_sketch_dir = os.path.join(self.args.data_dir, 'sketch')
-            src_train_norm = set()
-            if os.path.isdir(src_sketch_dir):
-                src_cats = os.listdir(src_sketch_dir)
-                if '.ipynb_checkpoints' in src_cats:
-                    src_cats.remove('.ipynb_checkpoints')
-                src_train_norm = {_norm_cls(c) for c in src_cats}
-
-            before_filter = list(unseen_classes)
-            unseen_classes = [c for c in unseen_classes if _norm_cls(c) not in src_train_norm]
-            removed = sorted(set(before_filter) - set(unseen_classes))
-            print(f"[cross_dataset_eval] Lọc lớp trùng với source train: "
-                  f"{len(before_filter)} → {len(unseen_classes)} lớp "
-                  f"(loại {len(removed)}: {removed})")
+                before_filter = list(unseen_classes)
+                unseen_classes = [c for c in unseen_classes if _norm_cls(c) not in src_train_norm]
+                removed = sorted(set(before_filter) - set(unseen_classes))
+                print(f"[cross_dataset_eval] Lọc lớp trùng với source train: "
+                      f"{len(before_filter)} → {len(unseen_classes)} lớp "
+                      f"(loại {len(removed)}: {removed})")
 
         eval_mode_gzs = getattr(self.args, 'eval_mode_gzs', False)
         if eval_mode_gzs and cross_dataset_eval:
@@ -338,18 +469,18 @@ class ValidDataset(torch.utils.data.Dataset):
             raise ValueError("--eval_mode_gzs and --gzs_eval are mutually exclusive -- two different, "
                               "incompatible GZS mechanisms. --gzs_eval mixes a hand-picked SEEN-class "
                               "subset into both sketch and photo (non-standard). --eval_mode_gzs "
-                              "implements the SEM-PCYC protocol: gallery = unseen photos + random "
-                              "20% seen photos; query = unseen sketches + random 20% seen sketches.")
+                              "implements the standard protocol: gallery = P^s (ALL seen-class train "
+                              "photos, no sampling) union P^u_test; query = S^u_test, unchanged.")
 
         if eval_mode_gzs:
-            # GZS-SBIR protocol following SEM-PCYC (Dutta & Akata, CVPR 2019):
-            # Both gallery and query are augmented with a random subset of seen
-            # data.  The number of seen samples added = perc × number of unseen
-            # samples in that modality (perc = 0.2, i.e. 20%).
-            #
-            # Gallery = unseen photos  +  random_sample(seen photos, 0.2 × |unseen photos|)
-            # Query   = unseen sketches + random_sample(seen sketches, 0.2 × |unseen sketches|)
-            perc = 0.2
+            # Standard GZS-SBIR protocol:
+            #   Query   = S^u_test                          (UNCHANGED from plain ZS-SBIR)
+            #   Gallery = P^s (ALL seen-class train photos)  union  P^u_test
+            # P^s images are read directly off disk (glob over every seen
+            # category folder) -- same source Sketchy.all_photos_path would
+            # enumerate for training, but built independently here so this
+            # class stays self-contained and never touches the train
+            # DataLoader. No subsampling: every seen-class photo is included.
             full_categories = sorted(os.listdir(os.path.join(self.data_dir, 'sketch')))
             if '.ipynb_checkpoints' in full_categories:
                 full_categories.remove('.ipynb_checkpoints')
@@ -358,55 +489,28 @@ class ValidDataset(torch.utils.data.Dataset):
             # photo (gallery) ValidDataset instances, so a category's integer
             # label (self.all_categories.index(category) in __getitem__) is
             # IDENTICAL across both -- required for target = (photo_label ==
-            # sketch_label) in model_hicropl.py to work correctly.
+            # sketch_label) in model_hicropl.py to work correctly: a seen-class
+            # gallery image can never share a label with any query (query
+            # labels only ever come from unseen_classes), so it is correctly
+            # a distractor, never a false positive.
             self.all_categories = sorted(set(unseen_classes) | set(seen_classes))
 
-            self.paths = []
             if self.mode == 'photo':
                 paths_unseen = []
                 for category in sorted(unseen_classes):
                     paths_unseen.extend(sorted(glob.glob(os.path.join(self.data_dir, 'photo', category, '*'))))
-                paths_seen_all = []
+                paths_seen = []
                 for category in seen_classes:
-                    paths_seen_all.extend(sorted(glob.glob(os.path.join(self.data_dir, 'photo', category, '*'))))
-                # Sample 20% of the unseen count from seen photos
-                n_sample = int(perc * len(paths_unseen))
-                n_sample = min(n_sample, len(paths_seen_all))
-                rng = np.random.RandomState(42)  # fixed seed for reproducibility
-                idx = rng.choice(len(paths_seen_all), n_sample, replace=False)
-                idx.sort()
-                paths_seen_sampled = [paths_seen_all[i] for i in idx]
-                self.paths = paths_seen_sampled + paths_unseen
-                self.n_gallery_seen = len(paths_seen_sampled)
+                    paths_seen.extend(sorted(glob.glob(os.path.join(self.data_dir, 'photo', category, '*'))))
+                self.paths = paths_seen + paths_unseen
+                self.n_gallery_seen = len(paths_seen)
                 self.n_gallery_unseen = len(paths_unseen)
-                print(f"GZS_FP | on=1 | protocol=SEM-PCYC | perc={perc} | "
-                      f"n_seen_pool={len(paths_seen_all)} | "
-                      f"n_gallery_seen={self.n_gallery_seen} | "
-                      f"n_gallery_unseen={self.n_gallery_unseen} | "
-                      f"n_gallery_total={self.n_gallery_seen + self.n_gallery_unseen}")
             else:
-                paths_unseen = []
+                # Query stays S^u_test -- no seen-class sketches added.
+                self.paths = []
                 for category in sorted(unseen_classes):
-                    paths_unseen.extend(sorted(glob.glob(os.path.join(self.data_dir, 'sketch', category, '*'))))
-                paths_seen_all = []
-                for category in seen_classes:
-                    paths_seen_all.extend(sorted(glob.glob(os.path.join(self.data_dir, 'sketch', category, '*'))))
-                # Sample 20% of the unseen count from seen sketches
-                n_sample = int(perc * len(paths_unseen))
-                n_sample = min(n_sample, len(paths_seen_all))
-                rng = np.random.RandomState(42)  # same seed for reproducibility
-                idx = rng.choice(len(paths_seen_all), n_sample, replace=False)
-                idx.sort()
-                paths_seen_sampled = [paths_seen_all[i] for i in idx]
-                self.paths = paths_seen_sampled + paths_unseen
-                self.n_query_seen = len(paths_seen_sampled)
-                self.n_query_unseen = len(paths_unseen)
+                    self.paths.extend(sorted(glob.glob(os.path.join(self.data_dir, 'sketch', category, '*'))))
                 self.n_query = len(self.paths)
-                print(f"GZS_FP | on=1 | protocol=SEM-PCYC | perc={perc} | "
-                      f"n_seen_pool={len(paths_seen_all)} | "
-                      f"n_query_seen={self.n_query_seen} | "
-                      f"n_query_unseen={self.n_query_unseen} | "
-                      f"n_query_total={self.n_query}")
             return
 
         # GZS-SBIR (non-standard, existing flag): mix a fixed set of SEEN
@@ -451,7 +555,7 @@ class ValidDatasetFG(torch.utils.data.Dataset):
         self.transform = normal_transform()
         
         # Get unseen categories
-        unseen_classes = UNSEEN_CLASSES.get('sketchy', UNSEEN_CLASSES['sketchy'])
+        unseen_classes = UNSEEN_CLASSES.get('sketchy_1', UNSEEN_CLASSES['sketchy_1'])
         self.all_categories = sorted(set(unseen_classes))
 
         #Collect all file paths
