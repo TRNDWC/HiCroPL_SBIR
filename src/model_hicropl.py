@@ -595,6 +595,14 @@ class CustomCLIP(nn.Module):
         # photo<->sketch mapping blocks inside VisualVisualPromptLearner,
         # which isn't constructed at all when this is set).
         self.use_text_visual_exchange = getattr(cfg, 'use_text_visual_exchange', False)
+        # Ablation of the prompt design: which modality gets learnable prompts.
+        # 'both' (default) = unchanged. See the freeze block further down.
+        self.prompt_branch = getattr(cfg, 'prompt_branch', 'both')
+        # Ablation of the augmentation branch: which side's InfoNCE term exists.
+        # 'both' (default) = unchanged. The dataset still emits both augmented
+        # views either way (skipping one there would shift the torch RNG stream);
+        # only the encoder call and the loss term are dropped.
+        self.aug_side = getattr(cfg, 'aug_side', 'both')
 
         if classnames is None:
             classnames = []
@@ -753,6 +761,31 @@ class CustomCLIP(nn.Module):
             self.visual_encoder_photo = VisualEncoder(self.clip)
             self.visual_encoder_sketch = VisualEncoder(self.clip)
 
+            # --prompt_branch: keep only one prompted modality. Both learners are
+            # still CONSTRUCTED (so the RNG stream, and therefore every other
+            # module's init, is bit-identical to the 'both' baseline -- the same
+            # reason --disable_exchange builds the mapper it never calls), then
+            # the unwanted side is frozen so configure_optimizers' requires_grad
+            # filter drops it: no idle params in the optimizer.
+            # The numeric removal is done by the depth knobs set in
+            # experiments/hicropl_prompt.py BEFORE load_clip_to_cpu:
+            #   text  -> vision_depth=0   (VPT_shallow=False, no deep visual prompts)
+            #   image -> language_depth=0 (no deep text prompts; ctx stays frozen
+            #            at its ctx_init value, which IS the plain template
+            #            embedding, so the text tower reduces to vanilla CLIP)
+            if self.prompt_branch == 'text':
+                for p in self.visual_visual_learner.parameters():
+                    p.requires_grad_(False)
+                print("[ABLATION] --prompt_branch text: image prompts OFF (vision_depth=0, "
+                      "visual_visual_learner frozen -> exchange inert); text prompts trainable.")
+            elif self.prompt_branch == 'image':
+                for p in self.text_prompt_photo.parameters():
+                    p.requires_grad_(False)
+                for p in self.text_prompt_sketch.parameters():
+                    p.requires_grad_(False)
+                print("[ABLATION] --prompt_branch image: text prompts OFF (language_depth=0, ctx "
+                      "frozen at the plain template embedding); image prompts trainable.")
+
         # The default branch already logged DESC_FP with real eot_* values; the
         # other two architectures have no SimpleTextPromptLearner to read them
         # from, so they log the same line with eot_*=n/a.
@@ -909,6 +942,11 @@ class CustomCLIP(nn.Module):
         # were given AND this architecture branch has a SimpleTextPromptLearner.
         text_features_desc_photo = text_features_desc_sketch = None
         run_shared_aug = self.aug_shared_encoder and photo_aug_tensor is not None
+        # --aug_side: drop one side's augmented view entirely -- its encoder call
+        # is skipped here and its InfoNCE term is skipped in loss_fn_hicropl
+        # (the feature arrives as None). 'both' keeps the original behaviour.
+        want_photo_aug = self.aug_side in ('both', 'photo')
+        want_sketch_aug = self.aug_side in ('both', 'sketch')
 
         if self.no_prompt_learning:
             # Plain frozen CLIP forward (only LayerNorm trainable) -- no
@@ -926,10 +964,12 @@ class CustomCLIP(nn.Module):
             with active_domain('sketch'):
                 text_features_all_sketch = self.clip.encode_text(self.tokenized_prompts_sketch)
             if run_shared_aug:
-                with active_domain('photo'):
-                    image_features_photo_aug = self.clip.encode_image(photo_aug_tensor.type(self.dtype))
-                with active_domain('sketch'):
-                    image_features_sketch_aug = self.clip.encode_image(sk_aug_tensor.type(self.dtype))
+                if want_photo_aug:
+                    with active_domain('photo'):
+                        image_features_photo_aug = self.clip.encode_image(photo_aug_tensor.type(self.dtype))
+                if want_sketch_aug:
+                    with active_domain('sketch'):
+                        image_features_sketch_aug = self.clip.encode_image(sk_aug_tensor.type(self.dtype))
         elif self.use_text_visual_exchange:
             # Each branch's learner performs its OWN bidirectional text<->visual
             # exchange -- no coupling between the two learners/branches.
@@ -951,10 +991,12 @@ class CustomCLIP(nn.Module):
 
             if run_shared_aug:
                 # Same encoders, same prompt tensors as the clean views above.
-                with active_domain('photo'):
-                    image_features_photo_aug = self.visual_encoder_photo(photo_aug_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
-                with active_domain('sketch'):
-                    image_features_sketch_aug = self.visual_encoder_sketch(sk_aug_tensor.type(self.dtype), vis_shallow_sketch, vis_deeper_sketch)
+                if want_photo_aug:
+                    with active_domain('photo'):
+                        image_features_photo_aug = self.visual_encoder_photo(photo_aug_tensor.type(self.dtype), vis_shallow_photo, vis_deeper_photo)
+                if want_sketch_aug:
+                    with active_domain('sketch'):
+                        image_features_sketch_aug = self.visual_encoder_sketch(sk_aug_tensor.type(self.dtype), vis_shallow_sketch, vis_deeper_sketch)
         else:
             # 1. Call visual-visual learner ONCE (shared by both branches)
             photo_shallow, sketch_shallow, photo_deeper, sketch_deeper = self.visual_visual_learner()
@@ -998,10 +1040,12 @@ class CustomCLIP(nn.Module):
             # steps 2-3 -- the learner is not called a second time, so the only
             # thing that differs from the clean pass is the input tensor.
             if run_shared_aug:
-                with active_domain('photo'):
-                    image_features_photo_aug = self.visual_encoder_photo(photo_aug_tensor.type(self.dtype), photo_shallow, photo_deeper)
-                with active_domain('sketch'):
-                    image_features_sketch_aug = self.visual_encoder_sketch(sk_aug_tensor.type(self.dtype), sketch_shallow, sketch_deeper)
+                if want_photo_aug:
+                    with active_domain('photo'):
+                        image_features_photo_aug = self.visual_encoder_photo(photo_aug_tensor.type(self.dtype), photo_shallow, photo_deeper)
+                if want_sketch_aug:
+                    with active_domain('sketch'):
+                        image_features_sketch_aug = self.visual_encoder_sketch(sk_aug_tensor.type(self.dtype), sketch_shallow, sketch_deeper)
 
         # 5. Normalize features
         photo_feat = image_features_photo / image_features_photo.norm(dim=-1, keepdim=True)
@@ -1039,18 +1083,25 @@ class CustomCLIP(nn.Module):
         # already produced above by the main encoder, so all that is left is the
         # same L2 normalization. loss_fn_hicropl sees the identical tuple shape
         # either way, so loss_aug keeps its exact structure and 1.0 coefficient.
+        # Each side is normalized independently: under --aug_side photo/sketch
+        # only one of the two was encoded above, and the other must stay None so
+        # loss_fn_hicropl drops exactly that term.
         photo_aug_feat = sketch_aug_feat = None
-        if image_features_photo_aug is not None:
-            photo_aug_feat = image_features_photo_aug / image_features_photo_aug.norm(dim=-1, keepdim=True)
-            sketch_aug_feat = image_features_sketch_aug / image_features_sketch_aug.norm(dim=-1, keepdim=True)
+        if image_features_photo_aug is not None or image_features_sketch_aug is not None:
+            if image_features_photo_aug is not None:
+                photo_aug_feat = image_features_photo_aug / image_features_photo_aug.norm(dim=-1, keepdim=True)
+            if image_features_sketch_aug is not None:
+                sketch_aug_feat = image_features_sketch_aug / image_features_sketch_aug.norm(dim=-1, keepdim=True)
             if self.aug_detach_view:
                 # One-way variant: the aug view becomes a fixed target, only the
                 # clean view is pulled. OFF by default -- the clip_aug branch it
                 # is being compared against is symmetric (its visual LayerNorms
                 # do receive gradient from loss_aug), so a symmetric Run A is the
                 # apples-to-apples setting.
-                photo_aug_feat = photo_aug_feat.detach()
-                sketch_aug_feat = sketch_aug_feat.detach()
+                if photo_aug_feat is not None:
+                    photo_aug_feat = photo_aug_feat.detach()
+                if sketch_aug_feat is not None:
+                    sketch_aug_feat = sketch_aug_feat.detach()
         # `self.clip_aug is not None` used to be a proxy for "the aug branch is
         # on", back when that instance existed for no other reason. It can now
         # be built purely for --text_variant desc_sep, so the aug branch must be
@@ -1058,12 +1109,16 @@ class CustomCLIP(nn.Module):
         # --disable_aug_branch is set would silently revive loss_aug.
         elif (not self.disable_aug_branch and photo_aug_tensor is not None
                 and self.clip_aug is not None):
-            with active_domain('photo'):
-                f_p = self.clip_aug.encode_image(photo_aug_tensor.type(self.dtype))
-            with active_domain('sketch'):
-                f_s = self.clip_aug.encode_image(sk_aug_tensor.type(self.dtype))
-            photo_aug_feat = f_p / f_p.norm(dim=-1, keepdim=True)
-            sketch_aug_feat = f_s / f_s.norm(dim=-1, keepdim=True)
+            # --aug_side applies here too, so the ENC2=1 build can run the same
+            # photo-only / sketch-only ablation as the shared-encoder one.
+            if want_photo_aug:
+                with active_domain('photo'):
+                    f_p = self.clip_aug.encode_image(photo_aug_tensor.type(self.dtype))
+                photo_aug_feat = f_p / f_p.norm(dim=-1, keepdim=True)
+            if want_sketch_aug:
+                with active_domain('sketch'):
+                    f_s = self.clip_aug.encode_image(sk_aug_tensor.type(self.dtype))
+                sketch_aug_feat = f_s / f_s.norm(dim=-1, keepdim=True)
 
         # 7b. Description branch, second-encoder variant -- the text-side twin of
         # the block just above. clip_aug already carries a full text tower that

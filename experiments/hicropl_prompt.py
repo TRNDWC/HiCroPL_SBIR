@@ -37,6 +37,22 @@ if __name__ == '__main__':
             print(f"[CONFIG] --no_prompt_learning: overriding clip_trainer {opts.clip_trainer} -> CoOp (vanilla CLIP, no prompt injection)")
         opts.clip_trainer = 'CoOp'
 
+    # --prompt_branch: the depth knobs are what actually removes a modality's
+    # prompts from the graph, and load_clip_to_cpu bakes them into
+    # design_details, so they must be set BEFORE it runs. CustomCLIP then
+    # freezes the matching learner (see src/model_hicropl.py).
+    if opts.prompt_branch != 'both':
+        if opts.no_prompt_learning:
+            raise ValueError("--prompt_branch and --no_prompt_learning are mutually exclusive "
+                              "(--no_prompt_learning already removes every prompt).")
+        if opts.prompt_branch == 'text':
+            opts.vision_depth = 0
+            print("[CONFIG] --prompt_branch text: forcing vision_depth=0 (visual towers run prompt-free).")
+        else:
+            opts.language_depth = 0
+            print("[CONFIG] --prompt_branch image: forcing language_depth=0 (no deep text prompts; "
+                  "ctx frozen at the plain template embedding).")
+
     def seed_worker(worker_id):
         """Seed numpy và random trong mỗi DataLoader worker (fix np.random.choice non-determinism)."""
         worker_seed = torch.initial_seed() % 2**32

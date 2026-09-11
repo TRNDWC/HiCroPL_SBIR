@@ -99,10 +99,18 @@ def loss_fn_hicropl(args, features, return_components=False):
     # is still built and still runs two ViT forwards per step, and its params
     # stay in the optimizer with zero gradient. --disable_aug_branch is the
     # clean removal (features arrive as None, nothing is constructed).
+    #
+    # --aug_side photo/sketch drops one side: CustomCLIP.forward hands back None
+    # for the view it did not encode, so exactly that term disappears. With
+    # 'both' (default) the sum below is identical to the original expression.
     loss_aug = 0.0
+    aug_terms = []
     if photo_aug_feat is not None:
-        loss_aug = lambda_aug * (cross_loss(photo_feat, photo_aug_feat, temperature)
-                                 + cross_loss(sketch_feat, sketch_aug_feat, temperature))
+        aug_terms.append(cross_loss(photo_feat, photo_aug_feat, temperature))
+    if sketch_aug_feat is not None:
+        aug_terms.append(cross_loss(sketch_feat, sketch_aug_feat, temperature))
+    if aug_terms:
+        loss_aug = lambda_aug * sum(aug_terms)
 
     # --- L6: L_ce sequence <-> auxiliary description sequence, InfoNCE ---
     # Same construction as loss_aug on the image side: two views of the same

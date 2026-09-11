@@ -109,6 +109,29 @@ parser.add_argument('--sketch_self_refine', action='store_true', help='Ablation 
 parser.add_argument('--sketch_self_refine_ln', action='store_true', help='Ablation (capacity-matched no-exchange control, Run D): requires --disable_exchange. Same pipeline as --sketch_self_refine (Run C) but adds one new LayerNorm module (self.ln_selfrefine, standard init) applied to the k/v side only before detaching: query=cross_prompts_sketch[i] (full gradient), key=value=LayerNorm(cross_prompts_sketch[i]).detach() (normalized, still no LKP/proxy/compression, still detached). Isolates whether normalizing the self-refine k/v matters on top of Run C. Adds exactly one nn.LayerNorm(s_dim) module/param set relative to --sketch_self_refine. Mutually exclusive with --sketch_self_refine.')
 parser.add_argument('--proxy_init', type=str, default='randn', choices=['randn', 'small', 'mean'], help='Ablation (L1): init scheme for photo_proxy_token/sketch_proxy_token (the LKP query, AttentionPooling). Applies to both branches, every layer. "randn" (default) = torch.randn(1, dim) std~1.0, the pre-ablation behavior, kept as default for exact backward compat. "small" = nn.init.normal_(std=0.02), syncing scale with every other tensor in the system (independent draw per layer). "mean" = proxy token for layer l initialized to cross_prompts_photo[l].mean(dim=0, keepdim=True).clone() (resp. sketch) at init time -- data-derived from that layer\'s own prompt content, independent nn.Parameter (no shared storage/grad coupling). Does not change tensor shape by itself (still [1, dim] unless combined with --n_proxy). Orthogonal to --n_proxy.')
 parser.add_argument('--n_proxy', type=int, default=1, help='Ablation (L2\'): number of proxy tokens the LKP (AttentionPooling) produces per layer (default 1 = original behavior). photo_proxy_token/sketch_proxy_token shape becomes [n_proxy, dim]; photo2sketch_net/sketch2photo_net then receive cross_layer * n_proxy tokens as k/v instead of cross_layer. n_ctx is unchanged. n_proxy == n_ctx means 1:1 (no compression) by design, not a bug. New proxy rows follow --proxy_init (for "mean", all n_proxy rows start equal, by design). Orthogonal to --proxy_init.')
+parser.add_argument('--prompt_branch', type=str, default='both', choices=['both', 'text', 'image'],
+                    help='Ablation of the prompt design -- which modality keeps LEARNABLE prompts. '
+                         '"both" (default) = unchanged. "text" = text prompts only: vision_depth is '
+                         'forced to 0 so the visual towers run genuinely prompt-free (no shallow VPT '
+                         'tokens, no deep visual prompts) and VisualVisualPromptLearner is frozen, '
+                         'which also makes the photo<->sketch exchange inert. "image" = image prompts '
+                         'only: language_depth is forced to 0 (no deep text prompts) and the text '
+                         'learners are frozen, so ctx stays at its ctx_init value -- which IS the '
+                         'plain "a photo of a" template embedding -- reducing the text tower to '
+                         'vanilla CLIP. Both learners are still CONSTRUCTED in every mode so the RNG '
+                         'stream (and thus every other module init) is bit-identical across the three '
+                         'settings; the frozen side is dropped from the optimizer by the requires_grad '
+                         'filter, so no idle params appear. Combine with --disable_exchange for the '
+                         '"Text/Image Prompt (w/o exchange)" cell.')
+parser.add_argument('--aug_side', type=str, default='both', choices=['both', 'photo', 'sketch'],
+                    help='Ablation of the augmentation branch -- which side keeps its InfoNCE term. '
+                         '"both" (default) = unchanged, loss_aug = cross_loss(photo, photo_aug) + '
+                         'cross_loss(sketch, sketch_aug). "photo"/"sketch" keep only that side: the '
+                         'other augmented view is never encoded (one full ViT forward saved) and its '
+                         'term is absent from the loss, not zero-weighted. The dataset still emits '
+                         'both augmented tensors either way -- dropping one there would shift the '
+                         'torch RNG stream and silently change the clean views. No effect under '
+                         '--disable_aug_branch (nothing to take a side of).')
 parser.add_argument('--no_prompt_learning', action='store_true', help='Ablation: disable ALL prompt learning (no visual or text prompt tokens at all -- forces clip_trainer to a vanilla, non-prompted CLIP). Only LayerNorm stays trainable (CLIP-AT-style baseline), text uses the fixed ctx_init/ctx_init_sketch template with no learnable context. Mutually exclusive in spirit with --disable_exchange (this is a strictly more minimal baseline).')
 parser.add_argument('--use_text_visual_exchange', action='store_true', help='Alternative architecture: per-branch bidirectional text<->visual prompt exchange (LKP+Mapper), one independent pair for photo and one for sketch -- NO photo<->sketch coupling at all (mutually exclusive with the default photo<->sketch VisualVisualPromptLearner architecture). --disable_exchange has NO effect when this is set (it only applies to the photo<->sketch architecture); use the disable_exchange=True baseline as the shared no-exchange reference for comparing both architectures.')
 parser.add_argument('--ctx_init', type=str, default='a photo of a', help='Initial text context for photo prompt learner')
@@ -210,4 +233,16 @@ if opts.disable_aug_branch and (opts.aug_shared_encoder or opts.aug_identity_tra
         "dataset from emitting the augmented tensors at all, so loss_aug is skipped and "
         f"{flag} would be a silent no-op -- the run would be identical to a plain "
         "--disable_aug_branch run while its name/log claims otherwise."
+    )
+if opts.disable_aug_branch and opts.aug_side != 'both':
+    raise ValueError(
+        f"--disable_aug_branch cannot be combined with --aug_side {opts.aug_side}: there is no "
+        "augmentation term left to take a side of, so the run would be a plain "
+        "--disable_aug_branch run under a misleading name."
+    )
+if opts.prompt_branch != 'both' and opts.no_prompt_learning:
+    raise ValueError(
+        f"--prompt_branch {opts.prompt_branch} cannot be combined with --no_prompt_learning: the "
+        "latter already removes every prompt (visual AND text), so the run would be a plain "
+        "--no_prompt_learning run under a misleading name."
     )
