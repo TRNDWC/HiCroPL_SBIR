@@ -93,18 +93,23 @@ if __name__ == '__main__':
                   f"evaluating on '{opts.eval_dataset}' ({opts.eval_data_dir})")
         if opts.eval_mode_gzs and opts.gzs_eval:
             raise ValueError("--eval_mode_gzs and --gzs_eval are mutually exclusive.")
-        if opts.eval_mode_gzs_ocean and (opts.eval_mode_gzs or opts.gzs_eval or opts.cross_dataset_eval):
-            raise ValueError("--eval_mode_gzs_ocean is mutually exclusive with --eval_mode_gzs, "
-                              "--gzs_eval, and --cross_dataset_eval.")
+        if (opts.eval_mode_gzs_ocean or opts.eval_mode_gzs_drclip) and (
+                opts.eval_mode_gzs or opts.gzs_eval or opts.cross_dataset_eval):
+            raise ValueError("--eval_mode_gzs_ocean/--eval_mode_gzs_drclip are mutually exclusive with "
+                              "--eval_mode_gzs, --gzs_eval, and --cross_dataset_eval.")
+        if opts.eval_mode_gzs_ocean and opts.eval_mode_gzs_drclip:
+            raise ValueError("--eval_mode_gzs_ocean and --eval_mode_gzs_drclip are mutually exclusive.")
         if opts.eval_mode_gzs:
             print(f"[CONFIG] --eval_mode_gzs: gallery = P^s (ALL train photos of every seen "
                   f"class of '{opts.dataset}') union P^u_test (unseen-class photos, unchanged); "
                   f"query stays S^u_test (unchanged).")
-        if opts.eval_mode_gzs_ocean:
-            print(f"[CONFIG] --eval_mode_gzs_ocean: OCEAN (Zhu et al., ICME 2020) protocol -- "
-                  f"C^g = C^u union round(0.2*|C^u|) randomly chosen whole seen classes of "
-                  f"'{opts.dataset}'; both query and gallery are drawn from C^g (seen-class "
-                  f"sketches ARE queried, not just distractors).")
+        if opts.eval_mode_gzs_ocean or opts.eval_mode_gzs_drclip:
+            _proto, _basis = (('OCEAN (Zhu et al., ICME 2020)', '|C^u|') if opts.eval_mode_gzs_ocean
+                              else ('Dr. CLIP (Li et al., ACM MM 2024)', '|C^s|'))
+            print(f"[CONFIG] {_proto} GZS-SBIR protocol -- C^g = C^u union "
+                  f"round(0.2*{_basis}) randomly chosen whole seen classes of '{opts.dataset}'; "
+                  f"both query and gallery are drawn from C^g (seen-class sketches ARE queried, "
+                  f"not just distractors).")
         train_dataset = Sketchy(opts, dataset_transforms, mode='train', return_orig=False,
                                 transform_aug_photo=aug_photo, transform_aug_sketch=aug_sketch)
         print(f"[CONFIG] Loading validation data in category mode")
@@ -115,8 +120,9 @@ if __name__ == '__main__':
                   f"n_gallery_unseen={val_photo.n_gallery_unseen} | "
                   f"n_gallery_total={val_photo.n_gallery_seen + val_photo.n_gallery_unseen} | "
                   f"n_query={val_sketch.n_query}")
-        if opts.eval_mode_gzs_ocean:
-            print(f"GZS_OCEAN_FP | on=1 | n_test_classes_total={len(val_photo.all_categories)} | "
+        if opts.eval_mode_gzs_ocean or opts.eval_mode_gzs_drclip:
+            _tag = 'OCEAN' if opts.eval_mode_gzs_ocean else 'Dr.CLIP'
+            print(f"GZS_{_tag}_FP | on=1 | n_test_classes_total={len(val_photo.all_categories)} | "
                   f"n_gallery_seen={val_photo.n_gallery_seen} | "
                   f"n_gallery_unseen={val_photo.n_gallery_unseen} | "
                   f"n_gallery_total={val_photo.n_gallery_seen + val_photo.n_gallery_unseen} | "

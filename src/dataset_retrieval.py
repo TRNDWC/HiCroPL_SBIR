@@ -463,68 +463,80 @@ class ValidDataset(torch.utils.data.Dataset):
                       f"(loại {len(removed)}: {removed})")
 
         eval_mode_gzs_ocean = getattr(self.args, 'eval_mode_gzs_ocean', False)
-        if eval_mode_gzs_ocean and cross_dataset_eval:
-            raise ValueError("--eval_mode_gzs_ocean and --cross_dataset_eval are mutually exclusive.")
-        if eval_mode_gzs_ocean and getattr(self.args, 'gzs_eval', False):
-            raise ValueError("--eval_mode_gzs_ocean and --gzs_eval are mutually exclusive.")
-        if eval_mode_gzs_ocean and getattr(self.args, 'eval_mode_gzs', False):
-            raise ValueError("--eval_mode_gzs_ocean and --eval_mode_gzs are mutually exclusive -- two "
-                              "different GZS-SBIR protocols. --eval_mode_gzs: gallery = P^s (ALL "
-                              "seen-class photos) union P^u_test, query = S^u_test UNCHANGED (seen "
-                              "images are pure distractors, never queried). --eval_mode_gzs_ocean: the "
-                              "OCEAN (Zhu et al., ICME 2020) protocol -- C^g = C^u union a RANDOM "
-                              "subset of whole seen CLASSES (count = round(0.2 * |C^u|), not a sample "
-                              "of images), and BOTH query and gallery are drawn from C^g (seen-class "
-                              "sketches ARE queried, not just used as gallery distractors).")
+        eval_mode_gzs_drclip = getattr(self.args, 'eval_mode_gzs_drclip', False)
+        if eval_mode_gzs_ocean and eval_mode_gzs_drclip:
+            raise ValueError("--eval_mode_gzs_ocean and --eval_mode_gzs_drclip are mutually exclusive -- "
+                              "same mechanism, different fraction basis: OCEAN adds round(0.2 * |C^u|) "
+                              "extra seen classes, Dr. CLIP adds round(0.2 * |C^s|).")
+        if (eval_mode_gzs_ocean or eval_mode_gzs_drclip) and cross_dataset_eval:
+            raise ValueError("--eval_mode_gzs_ocean/--eval_mode_gzs_drclip and --cross_dataset_eval "
+                              "are mutually exclusive.")
+        if (eval_mode_gzs_ocean or eval_mode_gzs_drclip) and getattr(self.args, 'gzs_eval', False):
+            raise ValueError("--eval_mode_gzs_ocean/--eval_mode_gzs_drclip and --gzs_eval are "
+                              "mutually exclusive.")
+        if (eval_mode_gzs_ocean or eval_mode_gzs_drclip) and getattr(self.args, 'eval_mode_gzs', False):
+            raise ValueError("--eval_mode_gzs_ocean/--eval_mode_gzs_drclip and --eval_mode_gzs are "
+                              "mutually exclusive -- different GZS-SBIR protocols. --eval_mode_gzs: "
+                              "gallery = P^s (ALL seen-class photos) union P^u_test, query = S^u_test "
+                              "UNCHANGED (seen images are pure distractors, never queried). The "
+                              "ocean/drclip variants instead put whole extra SEEN CLASSES into C^g and "
+                              "draw BOTH query and gallery from C^g (seen-class sketches ARE queried).")
 
-        if eval_mode_gzs_ocean:
-            # OCEAN (Zhu et al., ICME 2020) GZS-SBIR protocol -- verified against
-            # the paper's Table 1 and Sec 3.1/4.1 text:
-            #   "We randomly choose 20% C^s and all C^u to form the generalized
-            #    test classes C^g. The test set is defined as D^g = {X^g, Y^g},
-            #    which from C^g."
-            # The "20%" is a fraction of |C^u| (not |C^s|) applied to the COUNT
-            # OF WHOLE CLASSES (not images) -- verified by reproducing Table 1's
-            # "Test classes (GZS-SBIR)" numbers exactly: Sketchy 25 unseen +
-            # round(0.2*25)=5 extra seen classes = 30; TU-Berlin 30 unseen +
-            # round(0.2*30)=6 extra seen classes = 36.
-            # Unlike --eval_mode_gzs, D^g spans C^g for BOTH sketch (query) and
-            # photo (gallery) -- every image (all of it, no per-image sampling)
-            # of the selected extra seen classes enters both the query and the
-            # gallery, exactly like an unseen class would.
+        if eval_mode_gzs_ocean or eval_mode_gzs_drclip:
+            # Two published GZS-SBIR protocols sharing one mechanism: C^g = C^u
+            # union a random subset of WHOLE seen classes (not a sample of
+            # images), with the test set D^g = {X^g, Y^g} drawn from C^g for
+            # BOTH sketch (query) and photo (gallery) -- every image of a
+            # selected seen class enters both sides, exactly like an unseen
+            # class would. They differ only in what the 20% is a fraction OF:
+            #
+            #   OCEAN (Zhu et al., ICME 2020), Sec 3.1/4.1 + Table 1:
+            #     "We randomly choose 20% C^s and all C^u to form the
+            #      generalized test classes C^g."
+            #     -> n_extra = round(0.2 * |C^u|), verified by reproducing its
+            #        "Test classes (GZS-SBIR)": Sketchy 25+5=30, TU-Berlin
+            #        30+6=36.
+            #
+            #   Dr. CLIP (Li et al., ACM MM 2024), Sec 5.1 + Table 1:
+            #     "The images of 20% of the seen categories in the training set
+            #      were augmented into the test set, creating generalized
+            #      retrieval datasets (TU-Berlin Ext-G, Sketchy Ext-G)."
+            #     -> n_extra = round(0.2 * |C^s|), verified by reproducing its
+            #        "Testing classes": Sketchy-G 21+round(0.2*104)=21 -> 42,
+            #        TU-Berlin-G 30+(0.2*220)=44 -> 74.
             full_categories = sorted(os.listdir(os.path.join(self.data_dir, 'sketch')))
             if '.ipynb_checkpoints' in full_categories:
                 full_categories.remove('.ipynb_checkpoints')
             seen_pool = sorted(set(full_categories) - set(unseen_classes))
-            n_extra = int(round(0.2 * len(unseen_classes)))
-            n_extra = min(n_extra, len(seen_pool))
+            protocol = 'OCEAN' if eval_mode_gzs_ocean else 'Dr.CLIP'
+            basis = len(unseen_classes) if eval_mode_gzs_ocean else len(seen_pool)
+            n_extra = min(int(round(0.2 * basis)), len(seen_pool))
             rng = np.random.RandomState(42)  # fixed seed: identical pick across the sketch/photo instances
             extra_idx = rng.choice(len(seen_pool), n_extra, replace=False)
             extra_idx.sort()
             extra_seen_classes = [seen_pool[i] for i in extra_idx]
 
             self.all_categories = sorted(set(unseen_classes) | set(extra_seen_classes))
-            all_g_classes = sorted(set(unseen_classes) | set(extra_seen_classes))
 
             self.paths = []
-            for category in all_g_classes:
+            for category in self.all_categories:
                 self.paths.extend(sorted(glob.glob(os.path.join(self.data_dir, self.mode, category, '*'))))
 
+            n_seen_side = sum(
+                len(glob.glob(os.path.join(self.data_dir, self.mode, c, '*'))) for c in extra_seen_classes)
             if self.mode == 'photo':
-                self.n_gallery_seen = sum(
-                    len(glob.glob(os.path.join(self.data_dir, 'photo', c, '*'))) for c in extra_seen_classes)
-                self.n_gallery_unseen = len(self.paths) - self.n_gallery_seen
-                print(f"GZS_OCEAN_FP | on=1 | n_test_classes_unseen={len(unseen_classes)} | "
+                self.n_gallery_seen = n_seen_side
+                self.n_gallery_unseen = len(self.paths) - n_seen_side
+                print(f"GZS_{protocol}_FP | on=1 | n_test_classes_unseen={len(unseen_classes)} | "
                       f"n_test_classes_seen={len(extra_seen_classes)} | "
-                      f"n_test_classes_total={len(all_g_classes)} | "
+                      f"n_test_classes_total={len(self.all_categories)} | "
                       f"n_gallery_seen={self.n_gallery_seen} | n_gallery_unseen={self.n_gallery_unseen} | "
                       f"n_gallery_total={len(self.paths)} | extra_seen_classes={extra_seen_classes}")
             else:
-                self.n_query_seen = sum(
-                    len(glob.glob(os.path.join(self.data_dir, 'sketch', c, '*'))) for c in extra_seen_classes)
-                self.n_query_unseen = len(self.paths) - self.n_query_seen
+                self.n_query_seen = n_seen_side
+                self.n_query_unseen = len(self.paths) - n_seen_side
                 self.n_query = len(self.paths)
-                print(f"GZS_OCEAN_FP | on=1 | n_query_seen={self.n_query_seen} | "
+                print(f"GZS_{protocol}_FP | on=1 | n_query_seen={self.n_query_seen} | "
                       f"n_query_unseen={self.n_query_unseen} | n_query_total={self.n_query}")
             return
 

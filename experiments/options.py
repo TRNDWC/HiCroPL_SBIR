@@ -41,6 +41,16 @@ parser.add_argument('--eval_mode_gzs_ocean', action='store_true',
                          'ARE part of the query here, not just distractors in the gallery. Every image '
                          'of the selected extra seen classes is included (no per-image sampling). '
                          'Mutually exclusive with --eval_mode_gzs, --gzs_eval and --cross_dataset_eval.')
+parser.add_argument('--eval_mode_gzs_drclip', action='store_true',
+                    help='Dr. CLIP (Li et al., ACM MM 2024, "Dr. CLIP: CLIP-Driven Universal '
+                         'Framework for Zero-Shot Sketch Image Retrieval") GZS-SBIR protocol -- '
+                         'reproduces its Table 1 "Testing classes" exactly (Sketchy-G 42, '
+                         'TU-Berlin-G 74). Same mechanism as --eval_mode_gzs_ocean (whole extra SEEN '
+                         'classes join C^g; both query and gallery drawn from C^g) but the 20% is a '
+                         'fraction of |C^s| (seen classes) instead of |C^u|: "the images of 20%% of '
+                         'the seen categories in the training set were augmented into the test set". '
+                         'Mutually exclusive with --eval_mode_gzs_ocean, --eval_mode_gzs, --gzs_eval '
+                         'and --cross_dataset_eval.')
 parser.add_argument('--gzs_seen_frac', type=float, default=1.0,
                     help='DEBUG ONLY, no effect unless --eval_mode_gzs is set. Fraction of P^s '
                          '(seen-class gallery photos) to actually load, sampled deterministically '
