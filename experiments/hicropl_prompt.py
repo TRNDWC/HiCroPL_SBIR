@@ -36,6 +36,19 @@ if __name__ == '__main__':
         if opts.clip_trainer != 'CoOp':
             print(f"[CONFIG] --no_prompt_learning: overriding clip_trainer {opts.clip_trainer} -> CoOp (vanilla CLIP, no prompt injection)")
         opts.clip_trainer = 'CoOp'
+        # clip_trainer='CoOp' alone is NOT prompt-free on the visual side.
+        # VisionTransformer only skips its shallow VPT tokens when
+        # vision_depth == 0 (src/clip/model.py:443); with the default
+        # --vision_depth -1 it falls back to prompt_depth, builds
+        # self.VPT = nn.Parameter(randn, std=0.02) -- which the pretrained
+        # state_dict has no weights for ("missing keys: ['visual.VPT']") --
+        # and concatenates those random tokens to EVERY image. freeze_all_but_bn
+        # then freezes them, so the "no prompt" baseline would silently carry
+        # n_ctx frozen noise tokens. Forcing 0 makes the tower genuinely vanilla.
+        opts.vision_depth = 0
+        opts.language_depth = 0
+        print("[CONFIG] --no_prompt_learning: forcing vision_depth=language_depth=0 "
+              "(no VPT tokens at all -- the visual tower is genuinely prompt-free).")
 
     # --prompt_branch: the depth knobs are what actually removes a modality's
     # prompts from the graph, and load_clip_to_cpu bakes them into
