@@ -2,6 +2,33 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+def aug_pair_loss(f_clean, f_aug, temperature, kind='infonce'):
+    """The agreement term between a clean view and its augmented view.
+
+    Both inputs arrive ALREADY L2-normalized from CustomCLIP.forward, so every
+    variant below operates on unit vectors and the four are directly swappable.
+
+    'infonce' (default) is the original cross_loss and the only variant with a
+    NEGATIVE term: it pushes non-matching pairs in the batch apart as well as
+    pulling matching ones together. 'mse'/'l1'/'cosine' are positive-pair only
+    -- that asymmetry IS the ablation, not an oversight.
+
+    Note the variants live on very different scales (see --aug_loss_fn help):
+    on unit vectors MSE is ~1e-3 while InfoNCE is ~1e0, so the same
+    --lambda_aug means a very different effective weight.
+    """
+    if kind == 'infonce':
+        return cross_loss(f_clean, f_aug, temperature)
+    if kind == 'mse':
+        return F.mse_loss(f_clean, f_aug)
+    if kind == 'l1':
+        return F.l1_loss(f_clean, f_aug)
+    if kind == 'cosine':
+        return (1.0 - F.cosine_similarity(f_clean, f_aug, dim=-1)).mean()
+    raise ValueError(f"unknown aug_loss_fn: {kind!r}")
+
+
 def cross_loss(feature_1, feature_2, temperature):
     device = feature_1.device
     labels = torch.cat([torch.arange(len(feature_1)) for _ in range(2)], dim=0)
@@ -103,12 +130,16 @@ def loss_fn_hicropl(args, features, return_components=False):
     # --aug_side photo/sketch drops one side: CustomCLIP.forward hands back None
     # for the view it did not encode, so exactly that term disappears. With
     # 'both' (default) the sum below is identical to the original expression.
+    #
+    # --aug_loss_fn swaps the agreement term itself (infonce/mse/l1/cosine)
+    # without touching anything else -- same views, same lambda, same sides.
+    aug_loss_fn = getattr(args, 'aug_loss_fn', 'infonce')
     loss_aug = 0.0
     aug_terms = []
     if photo_aug_feat is not None:
-        aug_terms.append(cross_loss(photo_feat, photo_aug_feat, temperature))
+        aug_terms.append(aug_pair_loss(photo_feat, photo_aug_feat, temperature, aug_loss_fn))
     if sketch_aug_feat is not None:
-        aug_terms.append(cross_loss(sketch_feat, sketch_aug_feat, temperature))
+        aug_terms.append(aug_pair_loss(sketch_feat, sketch_aug_feat, temperature, aug_loss_fn))
     if aug_terms:
         loss_aug = lambda_aug * sum(aug_terms)
 

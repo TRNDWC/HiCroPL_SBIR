@@ -123,6 +123,20 @@ parser.add_argument('--prompt_branch', type=str, default='both', choices=['both'
                          'settings; the frozen side is dropped from the optimizer by the requires_grad '
                          'filter, so no idle params appear. Combine with --disable_exchange for the '
                          '"Text/Image Prompt (w/o exchange)" cell.')
+parser.add_argument('--aug_loss_fn', type=str, default='infonce',
+                    choices=['infonce', 'mse', 'l1', 'cosine'],
+                    help='Which agreement term loss_aug uses between a clean view and its '
+                         'augmented view. Both features are already L2-normalized, so the four are '
+                         'directly swappable. "infonce" (default) = the original cross_loss, the '
+                         'ONLY variant with a negative term (it also pushes non-matching pairs in '
+                         'the batch apart). "mse"/"l1"/"cosine" are positive-pair only. SCALE '
+                         'WARNING: on unit vectors these live on very different scales -- measured '
+                         'at cos(clean,aug)~0.3 with B=64,D=512: infonce~1.21, cosine~0.70, '
+                         'l1~0.042, mse~0.0028. With an unchanged --lambda_aug 1.0 the mse variant '
+                         'contributes ~400x less than infonce, i.e. it is close to no aug at all. '
+                         'Use the LOSS_FP aug_share log line to pick a --lambda_aug that matches '
+                         'the share infonce gets, if the goal is comparing loss SHAPES rather than '
+                         'loss magnitudes. No effect under --disable_aug_branch.')
 parser.add_argument('--aug_side', type=str, default='both', choices=['both', 'photo', 'sketch'],
                     help='Ablation of the augmentation branch -- which side keeps its InfoNCE term. '
                          '"both" (default) = unchanged, loss_aug = cross_loss(photo, photo_aug) + '
