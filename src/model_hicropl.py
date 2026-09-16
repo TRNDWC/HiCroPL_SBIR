@@ -83,7 +83,10 @@ def _classify_group(name):
         return ('exchange', 'lkp')
     if any(k in name for k in _MAPPER_NAMES):
         return ('exchange', 'mapper')
-    if 'proxy_token' in name:
+    if 'proxy_token' in name or 'text_proxy_b_photo_token' in name or 'text_proxy_b_sketch_token' in name:
+        # Mechanism B's proxy tokens are named text_proxy_b_{photo,sketch}_token
+        # -- 'proxy_token' is not a contiguous substring there ('proxy_b_photo_token'),
+        # so both exact names are matched explicitly.
         return ('exchange', 'proxy_token')
     if 'free_source' in name or 'ln_selfrefine' in name:
         return ('exchange', 'other')
@@ -801,12 +804,19 @@ class CustomCLIP(nn.Module):
             # visual_visual_learner's photo2sketch_net/sketch2photo_net/LKP).
             # Source = text_prompt_photo/sketch.cross_prompts_text, the SAME
             # tensors already used for L_ce (read, not detached, so gradient from
-            # this mechanism also flows back into the text ctx). Only the 11
-            # "deeper" layers (index 1..prompt_depth-1) participate, matching
-            # cross_prompts_text_deeper / the range TextEncoder actually injects
-            # as deep prompts -- layer 0 (ctx_photo/ctx_sketch/self.ctx) is left
-            # untouched by this mechanism, exactly as it is when
-            # --disable_exchange is on alone.
+            # this mechanism also flows back into the text ctx).
+            #
+            # Matches the ORIGINAL HiCroPL CrossModalPromptLearner's T->I block
+            # at cross_layer=prompt_depth exactly (github.com/zzeoZheng/HiCroPL,
+            # trainers/hicropl.py lines ~298-318): ALL prompt_depth layers
+            # participate, INCLUDING layer 0 -- the original's T->I loop is
+            # `for i in range(self.cross_layer)`, which at cross_layer=depth is
+            # range(depth) = 0..depth-1, and current_visual_prompts[0] (the
+            # value later returned as visual_ctx / first_visual_prompt) is
+            # overwritten there exactly like every other layer. So layer 0
+            # (ctx_photo/ctx_sketch on the visual side, self.ctx on the text
+            # side) is NOT special-cased here, unlike an earlier version of
+            # this mechanism that excluded it.
             #
             # Built ONLY when the flag is on: unlike the Mechanism-A
             # build-then-discard pattern (which preserves RNG parity between an
@@ -819,22 +829,45 @@ class CustomCLIP(nn.Module):
                       "Mapper_B/LKP_B (photo + sketch, independent instances)...")
                 v_dim = 768
                 ctx_dim = self.clip.ln_final.weight.shape[0]
-                n_deep_b = self.visual_visual_learner.prompt_depth - 1
+                n_layers_b = self.visual_visual_learner.prompt_depth  # ALL layers, incl. 0
 
                 def _build_text_to_visual_side():
                     lkp_proto = AttentionPooling(hidden_size=ctx_dim, num_attention_heads=8)
-                    lkp_nets = _get_clones(lkp_proto, n_deep_b)
+                    lkp_nets = _get_clones(lkp_proto, n_layers_b)
                     mapper = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=ctx_dim,
                                                   num_attention_heads=8)
                     base_token = torch.randn(1, ctx_dim, dtype=self.dtype)
                     proxy_tokens = nn.ParameterList(
-                        [nn.Parameter(base_token.clone()) for _ in range(n_deep_b)])
+                        [nn.Parameter(base_token.clone()) for _ in range(n_layers_b)])
                     return lkp_nets, mapper, proxy_tokens
 
                 (self.attn_pooling_text_b_photo_nets, self.mapper_b_photo,
                  self.text_proxy_b_photo_token) = _build_text_to_visual_side()
                 (self.attn_pooling_text_b_sketch_nets, self.mapper_b_sketch,
                  self.text_proxy_b_sketch_token) = _build_text_to_visual_side()
+
+                # --exchange_detach_source extended to Mechanism B (on request):
+                # mirrors EXACTLY what it already does to Mechanism A's LKP_A
+                # (attn_pooling_photo_nets/photo_proxy_token in
+                # _freeze_gradientless_params, src/hicropl.py) -- freeze LKP_B +
+                # its proxy tokens (requires_grad=False, so they drop out of the
+                # optimizer and out of log_param_breakdown's table exactly like
+                # LKP_A does), while Mapper_B stays trainable (like
+                # photo2sketch_net stays trainable under Mechanism A). The
+                # actual gradient cut happens in forward() via .detach() on the
+                # LKP_B output before it reaches mapper_b_photo/sketch --
+                # freezing here only stops these provably-gradient-less params
+                # from sitting idle in the optimizer, it does not by itself
+                # change any forward value. Mechanism A's own behavior under
+                # this flag is completely unchanged; this only adds a new
+                # branch that fires when Mechanism B is on.
+                if getattr(cfg, 'exchange_detach_source', False):
+                    for net in (self.attn_pooling_text_b_photo_nets,
+                               self.attn_pooling_text_b_sketch_nets,
+                               self.text_proxy_b_photo_token,
+                               self.text_proxy_b_sketch_token):
+                        for p in net.parameters():
+                            p.requires_grad_(False)
 
             # -- Encoders (both branches wrap the SAME shared backbone) --
             self.text_encoder_photo = TextEncoder(self.clip)
@@ -984,31 +1017,51 @@ class CustomCLIP(nn.Module):
         """L2-normalize feature tensors."""
         return feat_prenorm / feat_prenorm.norm(dim=-1, keepdim=True)
 
-    def _apply_text_to_visual(self, visual_deeper, text_cross_prompts, lkp_nets, mapper, proxy_tokens):
-        """Mechanism B: overwrite `visual_deeper` (this domain's own deeper
-        visual prompts, layers 1..prompt_depth-1) with a text->visual mix.
+    def _apply_text_to_visual(self, visual_shallow, visual_deeper, text_cross_prompts,
+                              lkp_nets, mapper, proxy_tokens, detach_source=False):
+        """Mechanism B: overwrite this domain's ENTIRE visual prompt stack
+        (layer 0 = visual_shallow, layers 1..prompt_depth-1 = visual_deeper)
+        with a text->visual mix.
 
-        Query = visual_deeper itself (this domain's own current value, exactly
-        the role cross_prompts_sketch/photo plays as query in
+        Matches the original HiCroPL CrossModalPromptLearner's T->I block at
+        cross_layer=prompt_depth exactly: ALL layers participate, including
+        layer 0 -- `text_cross_prompts[0]` (the domain's own ctx, the same
+        tensor embedded into the token sequence for L_ce) is a valid LKP
+        source here just like every deeper layer, and visual_shallow is
+        overwritten by the Mapper just like every deeper layer.
+
+        Query = [visual_shallow] + visual_deeper (this domain's own current
+        values, exactly the role cross_prompts_photo/sketch plays as query in
         VisualVisualPromptLearner). Key/value = per-layer proxy tokens produced
-        by lkp_nets pooling over `text_cross_prompts[i + 1]` (the SAME domain's
-        text deep prompt at that layer; index+1 skips text_cross_prompts[0],
-        which is the ctx embedded into the token sequence, not a deep prompt).
-        No cross-domain tensor is read here at all.
+        by lkp_nets pooling over the matching text_cross_prompts[i]. No
+        cross-domain tensor is read here at all.
+
+        detach_source=True (--exchange_detach_source, extended to Mechanism B):
+        mirrors Mechanism A's Photo->Sketch block exactly -- the LKP output
+        (proxy_flat) is detached before reaching `mapper`, cutting the
+        gradient path back into lkp_nets/proxy_tokens (frozen at construction
+        time, see __init__) AND into text_cross_prompts (so this mechanism no
+        longer contributes gradient to the text ctx; L_ce still does). Does
+        NOT change the forward VALUE -- detach() is a no-op numerically.
+
+        Returns (new_shallow, new_deeper).
         """
-        n_deep = len(visual_deeper)
+        n_layers = 1 + len(visual_deeper)
         proxy_list = [
             lkp_nets[i](token_query=proxy_tokens[i],
-                        sequence_key=text_cross_prompts[i + 1],
-                        sequence_value=text_cross_prompts[i + 1])
-            for i in range(n_deep)
+                        sequence_key=text_cross_prompts[i],
+                        sequence_value=text_cross_prompts[i])
+            for i in range(n_layers)
         ]
         proxy_flat = torch.cat(proxy_list, dim=0)
-        visual_flat = torch.cat([v.unsqueeze(0) for v in visual_deeper], dim=0)
+        if detach_source:
+            proxy_flat = proxy_flat.detach()
+        visual_all = [visual_shallow] + list(visual_deeper)
+        visual_flat = torch.cat([v.unsqueeze(0) for v in visual_all], dim=0)
         visual_flat = visual_flat.view(-1, visual_flat.shape[-1])
         updated = mapper(visual_flat, proxy_flat, proxy_flat)
-        updated = updated.view(n_deep, -1, updated.shape[-1])
-        return [updated[i] for i in range(n_deep)]
+        updated = updated.view(n_layers, -1, updated.shape[-1])
+        return updated[0], [updated[i] for i in range(1, n_layers)]
 
     def forward(self, x, classnames):
         """
@@ -1111,20 +1164,24 @@ class CustomCLIP(nn.Module):
             # 1b. Mechanism B (--enable_text_to_visual): mutually exclusive with
             # Mechanism A above (enforced in __init__ -- mechanism_a_on and
             # mechanism_b_on can never both be True, and mechanism_b_on requires
-            # --disable_exchange, so photo_deeper/sketch_deeper here are still
-            # each domain's OWN untouched values at this point). Overwrites them
-            # with the text->visual, same-domain mix. Reads ONLY
+            # --disable_exchange, so photo_shallow/deeper and
+            # sketch_shallow/deeper here are still each domain's OWN untouched
+            # values at this point). Overwrites ALL of them (layer 0 included --
+            # matches the original HiCroPL repo's T->I block at
+            # cross_layer=prompt_depth, see _apply_text_to_visual) with the
+            # text->visual, same-domain mix. Reads ONLY
             # text_prompt_photo/sketch.cross_prompts_text (same domain) and this
-            # domain's own photo_deeper/sketch_deeper -- no cross-domain tensor.
+            # domain's own visual prompts -- no cross-domain tensor.
             if self.mechanism_b_on:
-                photo_deeper = self._apply_text_to_visual(
-                    photo_deeper, self.text_prompt_photo.cross_prompts_text,
+                _detach_b = getattr(self.cfg, 'exchange_detach_source', False)
+                photo_shallow, photo_deeper = self._apply_text_to_visual(
+                    photo_shallow, photo_deeper, self.text_prompt_photo.cross_prompts_text,
                     self.attn_pooling_text_b_photo_nets, self.mapper_b_photo,
-                    self.text_proxy_b_photo_token)
-                sketch_deeper = self._apply_text_to_visual(
-                    sketch_deeper, self.text_prompt_sketch.cross_prompts_text,
+                    self.text_proxy_b_photo_token, detach_source=_detach_b)
+                sketch_shallow, sketch_deeper = self._apply_text_to_visual(
+                    sketch_shallow, sketch_deeper, self.text_prompt_sketch.cross_prompts_text,
                     self.attn_pooling_text_b_sketch_nets, self.mapper_b_sketch,
-                    self.text_proxy_b_sketch_token)
+                    self.text_proxy_b_sketch_token, detach_source=_detach_b)
 
             # 2. Photo branch: text learner + visual routing
             # Compute text features for ALL classes (not just batch) - needed for loss computation

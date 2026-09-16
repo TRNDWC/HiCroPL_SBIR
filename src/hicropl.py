@@ -663,11 +663,18 @@ class VisualVisualPromptLearner(nn.Module):
         Net effect across all flags: declared trainable == actually trained.
         """
         dead = []
-        if self.cross_layer > 0 and (self.exchange_detach_source
+        if (not self.disable_exchange) and self.cross_layer > 0 and (self.exchange_detach_source
                                      or self.exchange_self_source
                                      or self.exchange_free_source):
             # Output detached before the Mapper (src/hicropl.py:644-647), or the
-            # module is bypassed entirely under --exchange_free_source.
+            # module is bypassed entirely under --exchange_free_source. Guarded
+            # by `not self.disable_exchange` to match the Sketch->Photo block
+            # below: under --disable_exchange, attn_pooling_photo_nets/
+            # photo_proxy_token are never ASSIGNED (build_exchange=False in
+            # __init__), so referencing them here would raise AttributeError --
+            # this combination is reachable via Mechanism B
+            # (--enable_text_to_visual requires --disable_exchange) combined
+            # with --exchange_detach_source, which is now a supported run.
             dead += [self.attn_pooling_photo_nets, self.photo_proxy_token]
         n_deep = self.prompt_depth - self.cross_layer
         if (not self.disable_exchange) and n_deep > 0 and self.exchange_detach_source:
