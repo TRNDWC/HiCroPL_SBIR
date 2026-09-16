@@ -13,6 +13,9 @@ from src.hicropl import (
     VisualVisualPromptLearner,
     SimpleTextPromptLearner,
     CrossModalPromptLearner,
+    AttentionPooling,
+    CrossPromptAttention,
+    _get_clones,
 )
 
 
@@ -43,7 +46,8 @@ def freeze_all_but_bn(model):
 
 
 
-_MAPPER_NAMES = ('photo2sketch_net', 'sketch2photo_net', 'text2visual_net', 'visual2text_net')
+_MAPPER_NAMES = ('photo2sketch_net', 'sketch2photo_net', 'text2visual_net', 'visual2text_net',
+                 'mapper_b_photo', 'mapper_b_sketch')
 
 
 def _classify_group(name):
@@ -190,6 +194,13 @@ def _is_idle(name, cfg, group):
 
     if getattr(cfg, 'use_text_visual_exchange', False):
         return None  # --disable_exchange has no effect on this architecture
+
+    if 'mapper_b_' in name or 'attn_pooling_text_b_' in name or 'text_proxy_b_' in name:
+        # Mechanism B (--enable_text_to_visual) params. Requires --disable_exchange
+        # to be set (enforced at __init__), so the disable_exchange branch below
+        # would otherwise misclassify them as idle -- they are always called in
+        # forward() whenever they exist (built only when the flag is on).
+        return None
 
     if getattr(cfg, 'disable_exchange', False):
         # Both mapping blocks are skipped entirely. The only survivors are the
@@ -581,6 +592,35 @@ class CustomCLIP(nn.Module):
     def __init__(self, cfg, clip_model, classnames=None, sample_photo_images=None, sample_sketch_images=None):
         super().__init__()
         self.cfg = cfg
+
+        # Mechanism A (photo<->sketch exchange, VisualVisualPromptLearner, gated
+        # by --disable_exchange) and Mechanism B (same-domain text->visual,
+        # --enable_text_to_visual) are MUTUALLY EXCLUSIVE. Checked first, before
+        # any module is built, so a misconfiguration stops the program
+        # immediately instead of silently picking one or running both.
+        mechanism_a_on = not getattr(cfg, 'disable_exchange', False)
+        mechanism_b_on = getattr(cfg, 'enable_text_to_visual', False)
+
+        if mechanism_a_on and mechanism_b_on:
+            raise ValueError(
+                "Xung dot cau hinh: Co che A (exchange anh-anh, dieu khien boi "
+                "--disable_exchange) va Co che B (--enable_text_to_visual) dang "
+                "CUNG duoc bat. Hai co che loai tru lan nhau - phai chon DUNG MOT. "
+                "Neu muon dung Co che B, them --disable_exchange. "
+                "Neu muon dung Co che A, bo --enable_text_to_visual."
+            )
+        if mechanism_b_on and (getattr(cfg, 'no_prompt_learning', False)
+                               or getattr(cfg, 'use_text_visual_exchange', False)):
+            raise ValueError(
+                "Xung dot cau hinh: --enable_text_to_visual (Co che B) yeu cau kien "
+                "truc mac dinh (VisualVisualPromptLearner + text_prompt_photo/sketch). "
+                "Khong the dung dong thoi voi --no_prompt_learning hoac "
+                "--use_text_visual_exchange (2 kien truc do khong co "
+                "text_prompt_photo/text_prompt_sketch de Co che B doc."
+            )
+        self.mechanism_a_on = mechanism_a_on
+        self.mechanism_b_on = mechanism_b_on
+
         # Ablation: no visual/text prompt learning at all -- only LayerNorm
         # trainable (matches ducta/baseline's CLIP-AT recipe). Requires
         # clip_model to already be a vanilla (non-prompted) build --
@@ -755,6 +795,47 @@ class CustomCLIP(nn.Module):
                 aux_encoder=({'desc_sep': 'vanilla', 'desc_shared': 'main'}
                              .get(self.text_variant, 'none')))
 
+            # -- Mechanism B (--enable_text_to_visual): NEW, dedicated LKP+Mapper
+            # instances (same classes as Mechanism A -- AttentionPooling,
+            # CrossPromptAttention -- but separate weights, no sharing with
+            # visual_visual_learner's photo2sketch_net/sketch2photo_net/LKP).
+            # Source = text_prompt_photo/sketch.cross_prompts_text, the SAME
+            # tensors already used for L_ce (read, not detached, so gradient from
+            # this mechanism also flows back into the text ctx). Only the 11
+            # "deeper" layers (index 1..prompt_depth-1) participate, matching
+            # cross_prompts_text_deeper / the range TextEncoder actually injects
+            # as deep prompts -- layer 0 (ctx_photo/ctx_sketch/self.ctx) is left
+            # untouched by this mechanism, exactly as it is when
+            # --disable_exchange is on alone.
+            #
+            # Built ONLY when the flag is on: unlike the Mechanism-A
+            # build-then-discard pattern (which preserves RNG parity between an
+            # ON/OFF PAIR of the exchange itself), the DEFAULT behavior (this
+            # flag absent) must stay bit-exact with every pre-existing script
+            # that has never heard of --enable_text_to_visual -- so no extra RNG
+            # draw may happen when it is False.
+            if self.mechanism_b_on:
+                print("Initializing Mechanism B (text->visual, same-domain) "
+                      "Mapper_B/LKP_B (photo + sketch, independent instances)...")
+                v_dim = 768
+                ctx_dim = self.clip.ln_final.weight.shape[0]
+                n_deep_b = self.visual_visual_learner.prompt_depth - 1
+
+                def _build_text_to_visual_side():
+                    lkp_proto = AttentionPooling(hidden_size=ctx_dim, num_attention_heads=8)
+                    lkp_nets = _get_clones(lkp_proto, n_deep_b)
+                    mapper = CrossPromptAttention(hidden_size=v_dim, encoder_hidden_size=ctx_dim,
+                                                  num_attention_heads=8)
+                    base_token = torch.randn(1, ctx_dim, dtype=self.dtype)
+                    proxy_tokens = nn.ParameterList(
+                        [nn.Parameter(base_token.clone()) for _ in range(n_deep_b)])
+                    return lkp_nets, mapper, proxy_tokens
+
+                (self.attn_pooling_text_b_photo_nets, self.mapper_b_photo,
+                 self.text_proxy_b_photo_token) = _build_text_to_visual_side()
+                (self.attn_pooling_text_b_sketch_nets, self.mapper_b_sketch,
+                 self.text_proxy_b_sketch_token) = _build_text_to_visual_side()
+
             # -- Encoders (both branches wrap the SAME shared backbone) --
             self.text_encoder_photo = TextEncoder(self.clip)
             self.text_encoder_sketch = TextEncoder(self.clip)
@@ -903,6 +984,32 @@ class CustomCLIP(nn.Module):
         """L2-normalize feature tensors."""
         return feat_prenorm / feat_prenorm.norm(dim=-1, keepdim=True)
 
+    def _apply_text_to_visual(self, visual_deeper, text_cross_prompts, lkp_nets, mapper, proxy_tokens):
+        """Mechanism B: overwrite `visual_deeper` (this domain's own deeper
+        visual prompts, layers 1..prompt_depth-1) with a text->visual mix.
+
+        Query = visual_deeper itself (this domain's own current value, exactly
+        the role cross_prompts_sketch/photo plays as query in
+        VisualVisualPromptLearner). Key/value = per-layer proxy tokens produced
+        by lkp_nets pooling over `text_cross_prompts[i + 1]` (the SAME domain's
+        text deep prompt at that layer; index+1 skips text_cross_prompts[0],
+        which is the ctx embedded into the token sequence, not a deep prompt).
+        No cross-domain tensor is read here at all.
+        """
+        n_deep = len(visual_deeper)
+        proxy_list = [
+            lkp_nets[i](token_query=proxy_tokens[i],
+                        sequence_key=text_cross_prompts[i + 1],
+                        sequence_value=text_cross_prompts[i + 1])
+            for i in range(n_deep)
+        ]
+        proxy_flat = torch.cat(proxy_list, dim=0)
+        visual_flat = torch.cat([v.unsqueeze(0) for v in visual_deeper], dim=0)
+        visual_flat = visual_flat.view(-1, visual_flat.shape[-1])
+        updated = mapper(visual_flat, proxy_flat, proxy_flat)
+        updated = updated.view(n_deep, -1, updated.shape[-1])
+        return [updated[i] for i in range(n_deep)]
+
     def forward(self, x, classnames):
         """
         Forward pass for training with optimized redundancy.
@@ -1000,6 +1107,24 @@ class CustomCLIP(nn.Module):
         else:
             # 1. Call visual-visual learner ONCE (shared by both branches)
             photo_shallow, sketch_shallow, photo_deeper, sketch_deeper = self.visual_visual_learner()
+
+            # 1b. Mechanism B (--enable_text_to_visual): mutually exclusive with
+            # Mechanism A above (enforced in __init__ -- mechanism_a_on and
+            # mechanism_b_on can never both be True, and mechanism_b_on requires
+            # --disable_exchange, so photo_deeper/sketch_deeper here are still
+            # each domain's OWN untouched values at this point). Overwrites them
+            # with the text->visual, same-domain mix. Reads ONLY
+            # text_prompt_photo/sketch.cross_prompts_text (same domain) and this
+            # domain's own photo_deeper/sketch_deeper -- no cross-domain tensor.
+            if self.mechanism_b_on:
+                photo_deeper = self._apply_text_to_visual(
+                    photo_deeper, self.text_prompt_photo.cross_prompts_text,
+                    self.attn_pooling_text_b_photo_nets, self.mapper_b_photo,
+                    self.text_proxy_b_photo_token)
+                sketch_deeper = self._apply_text_to_visual(
+                    sketch_deeper, self.text_prompt_sketch.cross_prompts_text,
+                    self.attn_pooling_text_b_sketch_nets, self.mapper_b_sketch,
+                    self.text_proxy_b_sketch_token)
 
             # 2. Photo branch: text learner + visual routing
             # Compute text features for ALL classes (not just batch) - needed for loss computation
@@ -1238,6 +1363,18 @@ class HiCroPL_SBIR(pl.LightningModule):
             add_unique_params(self.model.text_prompt_photo.parameters(), prompt_params, seen_ids)
             add_unique_params(self.model.text_prompt_sketch.parameters(), prompt_params, seen_ids)
             learner_modules = {'visual_visual_learner', 'text_prompt_photo', 'text_prompt_sketch'}
+            # Mechanism B (--enable_text_to_visual): new dedicated LKP+Mapper
+            # instances, live top-level attributes on CustomCLIP (not nested
+            # inside visual_visual_learner). Absent unless the flag is on.
+            if self.model.mechanism_b_on:
+                add_unique_params(self.model.attn_pooling_text_b_photo_nets.parameters(), prompt_params, seen_ids)
+                add_unique_params(self.model.mapper_b_photo.parameters(), prompt_params, seen_ids)
+                add_unique_params(self.model.text_proxy_b_photo_token.parameters(), prompt_params, seen_ids)
+                add_unique_params(self.model.attn_pooling_text_b_sketch_nets.parameters(), prompt_params, seen_ids)
+                add_unique_params(self.model.mapper_b_sketch.parameters(), prompt_params, seen_ids)
+                add_unique_params(self.model.text_proxy_b_sketch_token.parameters(), prompt_params, seen_ids)
+                learner_modules |= {'attn_pooling_text_b_photo_nets', 'mapper_b_photo', 'text_proxy_b_photo_token',
+                                    'attn_pooling_text_b_sketch_nets', 'mapper_b_sketch', 'text_proxy_b_sketch_token'}
 
         ln_params = []
         # Only collect LayerNorms from clip encoders (NOT from learners, already included above)
@@ -1267,6 +1404,20 @@ class HiCroPL_SBIR(pl.LightningModule):
         # Full diagnostic table (replaces the old two "Number of trainable ...
         # params" prints, whose exact numbers are reproduced in section [1]).
         log_param_breakdown(self.model, printer=self.print)
+
+        # MECH_FP: Mechanism A / Mechanism B fingerprint. mechanism_a and
+        # mechanism_b must never both read 1 -- if they ever do, the __init__
+        # mutual-exclusion check (2.2) has failed.
+        proj_added = 0    # no projection layer needed -- see Part 1.4 / CrossPromptAttention's own linear_k/linear_v
+        proj_params = 0
+        mapper_b_instances = 2 if self.model.mechanism_b_on else 0
+        trainable_total = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        self.print(
+            f"MECH_FP | mechanism_a={int(self.model.mechanism_a_on)} | "
+            f"mechanism_b={int(self.model.mechanism_b_on)} | proj_added={proj_added} | "
+            f"proj_params={proj_params} | mapper_b_instances={mapper_b_instances} | "
+            f"trainable_total={trainable_total}"
+        )
 
         # No weight_decay (matches ducta/baseline's Adam call, which also omits it -> default 0).
         return torch.optim.Adam(param_groups)
