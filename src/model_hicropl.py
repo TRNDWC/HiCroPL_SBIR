@@ -621,8 +621,30 @@ class CustomCLIP(nn.Module):
                 "--use_text_visual_exchange (2 kien truc do khong co "
                 "text_prompt_photo/text_prompt_sketch de Co che B doc."
             )
+        b_photo_only = getattr(cfg, 'text_to_visual_photo_only', False)
+        b_sketch_only = getattr(cfg, 'text_to_visual_sketch_only', False)
+        if b_photo_only and b_sketch_only:
+            raise ValueError(
+                "Xung dot cau hinh: --text_to_visual_photo_only va "
+                "--text_to_visual_sketch_only dang CUNG duoc bat. Chon DUNG MOT, "
+                "hoac bo ca hai de Co che B tac dong ca 2 domain."
+            )
+        if (b_photo_only or b_sketch_only) and not mechanism_b_on:
+            raise ValueError(
+                "Xung dot cau hinh: --text_to_visual_photo_only / "
+                "--text_to_visual_sketch_only chi co nghia khi Co che B dang bat. "
+                "Them --enable_text_to_visual (kem --disable_exchange)."
+            )
         self.mechanism_a_on = mechanism_a_on
         self.mechanism_b_on = mechanism_b_on
+        if not mechanism_b_on:
+            self.mechanism_b_domains = ()
+        elif b_photo_only:
+            self.mechanism_b_domains = ('photo',)
+        elif b_sketch_only:
+            self.mechanism_b_domains = ('sketch',)
+        else:
+            self.mechanism_b_domains = ('photo', 'sketch')
 
         # Ablation: no visual/text prompt learning at all -- only LayerNorm
         # trainable (matches ducta/baseline's CLIP-AT recipe). Requires
@@ -826,7 +848,7 @@ class CustomCLIP(nn.Module):
             # draw may happen when it is False.
             if self.mechanism_b_on:
                 print("Initializing Mechanism B (text->visual, same-domain) "
-                      "Mapper_B/LKP_B (photo + sketch, independent instances)...")
+                      f"Mapper_B/LKP_B, active domains={'+'.join(self.mechanism_b_domains)}...")
                 v_dim = 768
                 ctx_dim = self.clip.ln_final.weight.shape[0]
                 n_layers_b = self.visual_visual_learner.prompt_depth  # ALL layers, incl. 0
@@ -841,10 +863,22 @@ class CustomCLIP(nn.Module):
                         [nn.Parameter(base_token.clone()) for _ in range(n_layers_b)])
                     return lkp_nets, mapper, proxy_tokens
 
-                (self.attn_pooling_text_b_photo_nets, self.mapper_b_photo,
-                 self.text_proxy_b_photo_token) = _build_text_to_visual_side()
-                (self.attn_pooling_text_b_sketch_nets, self.mapper_b_sketch,
-                 self.text_proxy_b_sketch_token) = _build_text_to_visual_side()
+                # Build-then-discard across the two domains: both sides are
+                # constructed in the same order regardless of
+                # --text_to_visual_photo_only/_sketch_only, and only the active
+                # side is assigned. Skipping the photo build under sketch_only
+                # would shift the RNG stream, giving the sketch modules a
+                # different init than in the both-domains run and confounding
+                # that comparison. An unassigned side never reaches the
+                # optimizer or the checkpoint.
+                photo_side = _build_text_to_visual_side()
+                sketch_side = _build_text_to_visual_side()
+                if 'photo' in self.mechanism_b_domains:
+                    (self.attn_pooling_text_b_photo_nets, self.mapper_b_photo,
+                     self.text_proxy_b_photo_token) = photo_side
+                if 'sketch' in self.mechanism_b_domains:
+                    (self.attn_pooling_text_b_sketch_nets, self.mapper_b_sketch,
+                     self.text_proxy_b_sketch_token) = sketch_side
 
                 # --exchange_detach_source extended to Mechanism B (on request):
                 # mirrors EXACTLY what it already does to Mechanism A's LKP_A
@@ -862,12 +896,11 @@ class CustomCLIP(nn.Module):
                 # this flag is completely unchanged; this only adds a new
                 # branch that fires when Mechanism B is on.
                 if getattr(cfg, 'exchange_detach_source', False):
-                    for net in (self.attn_pooling_text_b_photo_nets,
-                               self.attn_pooling_text_b_sketch_nets,
-                               self.text_proxy_b_photo_token,
-                               self.text_proxy_b_sketch_token):
-                        for p in net.parameters():
-                            p.requires_grad_(False)
+                    for domain in self.mechanism_b_domains:
+                        for net in (getattr(self, f'attn_pooling_text_b_{domain}_nets'),
+                                    getattr(self, f'text_proxy_b_{domain}_token')):
+                            for p in net.parameters():
+                                p.requires_grad_(False)
 
             # -- Encoders (both branches wrap the SAME shared backbone) --
             self.text_encoder_photo = TextEncoder(self.clip)
@@ -1016,6 +1049,25 @@ class CustomCLIP(nn.Module):
     def normalize_features(self, feat_prenorm):
         """L2-normalize feature tensors."""
         return feat_prenorm / feat_prenorm.norm(dim=-1, keepdim=True)
+
+    def apply_mechanism_b(self, domain, visual_shallow, visual_deeper):
+        """Single entry point for Mechanism B, shared by forward() and eval.
+
+        Returns the prompts unchanged when Mechanism B is off or `domain` is
+        not one of its active domains (--text_to_visual_photo_only /
+        --text_to_visual_sketch_only). Both training and
+        HiCroPL_SBIR.extract_eval_features route through here, so the two
+        paths cannot drift apart again.
+        """
+        if domain not in self.mechanism_b_domains:
+            return visual_shallow, visual_deeper
+        return self._apply_text_to_visual(
+            visual_shallow, visual_deeper,
+            getattr(self, f'text_prompt_{domain}').cross_prompts_text,
+            getattr(self, f'attn_pooling_text_b_{domain}_nets'),
+            getattr(self, f'mapper_b_{domain}'),
+            getattr(self, f'text_proxy_b_{domain}_token'),
+            detach_source=getattr(self.cfg, 'exchange_detach_source', False))
 
     def _apply_text_to_visual(self, visual_shallow, visual_deeper, text_cross_prompts,
                               lkp_nets, mapper, proxy_tokens, detach_source=False):
@@ -1172,16 +1224,8 @@ class CustomCLIP(nn.Module):
             # text->visual, same-domain mix. Reads ONLY
             # text_prompt_photo/sketch.cross_prompts_text (same domain) and this
             # domain's own visual prompts -- no cross-domain tensor.
-            if self.mechanism_b_on:
-                _detach_b = getattr(self.cfg, 'exchange_detach_source', False)
-                photo_shallow, photo_deeper = self._apply_text_to_visual(
-                    photo_shallow, photo_deeper, self.text_prompt_photo.cross_prompts_text,
-                    self.attn_pooling_text_b_photo_nets, self.mapper_b_photo,
-                    self.text_proxy_b_photo_token, detach_source=_detach_b)
-                sketch_shallow, sketch_deeper = self._apply_text_to_visual(
-                    sketch_shallow, sketch_deeper, self.text_prompt_sketch.cross_prompts_text,
-                    self.attn_pooling_text_b_sketch_nets, self.mapper_b_sketch,
-                    self.text_proxy_b_sketch_token, detach_source=_detach_b)
+            photo_shallow, photo_deeper = self.apply_mechanism_b('photo', photo_shallow, photo_deeper)
+            sketch_shallow, sketch_deeper = self.apply_mechanism_b('sketch', sketch_shallow, sketch_deeper)
 
             # 2. Photo branch: text learner + visual routing
             # Compute text features for ALL classes (not just batch) - needed for loss computation
@@ -1423,15 +1467,11 @@ class HiCroPL_SBIR(pl.LightningModule):
             # Mechanism B (--enable_text_to_visual): new dedicated LKP+Mapper
             # instances, live top-level attributes on CustomCLIP (not nested
             # inside visual_visual_learner). Absent unless the flag is on.
-            if self.model.mechanism_b_on:
-                add_unique_params(self.model.attn_pooling_text_b_photo_nets.parameters(), prompt_params, seen_ids)
-                add_unique_params(self.model.mapper_b_photo.parameters(), prompt_params, seen_ids)
-                add_unique_params(self.model.text_proxy_b_photo_token.parameters(), prompt_params, seen_ids)
-                add_unique_params(self.model.attn_pooling_text_b_sketch_nets.parameters(), prompt_params, seen_ids)
-                add_unique_params(self.model.mapper_b_sketch.parameters(), prompt_params, seen_ids)
-                add_unique_params(self.model.text_proxy_b_sketch_token.parameters(), prompt_params, seen_ids)
-                learner_modules |= {'attn_pooling_text_b_photo_nets', 'mapper_b_photo', 'text_proxy_b_photo_token',
-                                    'attn_pooling_text_b_sketch_nets', 'mapper_b_sketch', 'text_proxy_b_sketch_token'}
+            for domain in self.model.mechanism_b_domains:
+                for attr in (f'attn_pooling_text_b_{domain}_nets', f'mapper_b_{domain}',
+                             f'text_proxy_b_{domain}_token'):
+                    add_unique_params(getattr(self.model, attr).parameters(), prompt_params, seen_ids)
+                    learner_modules.add(attr)
 
         ln_params = []
         # Only collect LayerNorms from clip encoders (NOT from learners, already included above)
@@ -1467,12 +1507,13 @@ class HiCroPL_SBIR(pl.LightningModule):
         # mutual-exclusion check (2.2) has failed.
         proj_added = 0    # no projection layer needed -- see Part 1.4 / CrossPromptAttention's own linear_k/linear_v
         proj_params = 0
-        mapper_b_instances = 2 if self.model.mechanism_b_on else 0
+        mapper_b_instances = len(self.model.mechanism_b_domains)
         trainable_total = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         self.print(
             f"MECH_FP | mechanism_a={int(self.model.mechanism_a_on)} | "
             f"mechanism_b={int(self.model.mechanism_b_on)} | proj_added={proj_added} | "
             f"proj_params={proj_params} | mapper_b_instances={mapper_b_instances} | "
+            f"mechanism_b_domains={'+'.join(self.model.mechanism_b_domains) or 'none'} | "
             f"trainable_total={trainable_total}"
         )
 
@@ -1789,20 +1830,12 @@ class HiCroPL_SBIR(pl.LightningModule):
             # added). Mechanism B's modules hold plain nn.LayerNorm, not
             # DomainLayerNorm, so running inside active_domain() here changes
             # nothing about its result: it reproduces forward() bit-exactly.
-            if self.model.mechanism_b_on:
-                _detach_b = getattr(self.model.cfg, 'exchange_detach_source', False)
-                if modality == 'photo':
-                    photo_shallow, photo_deeper = self.model._apply_text_to_visual(
-                        photo_shallow, photo_deeper,
-                        self.model.text_prompt_photo.cross_prompts_text,
-                        self.model.attn_pooling_text_b_photo_nets, self.model.mapper_b_photo,
-                        self.model.text_proxy_b_photo_token, detach_source=_detach_b)
-                else:
-                    sketch_shallow, sketch_deeper = self.model._apply_text_to_visual(
-                        sketch_shallow, sketch_deeper,
-                        self.model.text_prompt_sketch.cross_prompts_text,
-                        self.model.attn_pooling_text_b_sketch_nets, self.model.mapper_b_sketch,
-                        self.model.text_proxy_b_sketch_token, detach_source=_detach_b)
+            if modality == 'photo':
+                photo_shallow, photo_deeper = self.model.apply_mechanism_b(
+                    'photo', photo_shallow, photo_deeper)
+            else:
+                sketch_shallow, sketch_deeper = self.model.apply_mechanism_b(
+                    'sketch', sketch_shallow, sketch_deeper)
 
             if modality == 'photo':
                 visual_encoder = self.model.visual_encoder_photo
