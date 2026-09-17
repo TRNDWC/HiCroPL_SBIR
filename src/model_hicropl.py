@@ -1779,6 +1779,31 @@ class HiCroPL_SBIR(pl.LightningModule):
             # Call visual learner once, cache outputs
             photo_shallow, sketch_shallow, photo_deeper, sketch_deeper = self.model.visual_visual_learner()
 
+            # Mechanism B lives in CustomCLIP.forward(), NOT inside
+            # visual_visual_learner (unlike Mechanism A, which is inside it and
+            # therefore already reflected in the tuple above). It must be
+            # replayed here identically, otherwise eval feeds the encoder the
+            # RAW cross_prompts_photo/sketch while training fed it the Mapper_B
+            # output -- a train/eval mismatch that silently collapses mAP
+            # (measured cos(train_feat, eval_feat) = 0.55 before this was
+            # added). Mechanism B's modules hold plain nn.LayerNorm, not
+            # DomainLayerNorm, so running inside active_domain() here changes
+            # nothing about its result: it reproduces forward() bit-exactly.
+            if self.model.mechanism_b_on:
+                _detach_b = getattr(self.model.cfg, 'exchange_detach_source', False)
+                if modality == 'photo':
+                    photo_shallow, photo_deeper = self.model._apply_text_to_visual(
+                        photo_shallow, photo_deeper,
+                        self.model.text_prompt_photo.cross_prompts_text,
+                        self.model.attn_pooling_text_b_photo_nets, self.model.mapper_b_photo,
+                        self.model.text_proxy_b_photo_token, detach_source=_detach_b)
+                else:
+                    sketch_shallow, sketch_deeper = self.model._apply_text_to_visual(
+                        sketch_shallow, sketch_deeper,
+                        self.model.text_prompt_sketch.cross_prompts_text,
+                        self.model.attn_pooling_text_b_sketch_nets, self.model.mapper_b_sketch,
+                        self.model.text_proxy_b_sketch_token, detach_source=_detach_b)
+
             if modality == 'photo':
                 visual_encoder = self.model.visual_encoder_photo
                 vis_shallow, vis_deeper = photo_shallow, photo_deeper
