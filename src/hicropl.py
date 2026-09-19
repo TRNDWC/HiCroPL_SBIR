@@ -461,6 +461,34 @@ class VisualVisualPromptLearner(nn.Module):
         # as k/v instead of cross_layer. Orthogonal to proxy_init.
         self.n_proxy = getattr(cfg, 'n_proxy', 1)
         assert self.n_proxy >= 1, "--n_proxy must be >= 1"
+        # Component ablation of the Photo->Sketch block: which of the two
+        # modules (LKP, Mapper) actually participates.
+        #   --exchange_no_mapper : LKP only. The per-layer proxy is ADDED to
+        #       that layer's sketch prompt (broadcast over n_ctx) instead of
+        #       being mixed in by photo2sketch_net. Note this also changes the
+        #       update rule from REPLACEMENT to ADDITION -- unavoidable, since
+        #       replacing n_ctx sketch tokens by a single proxy would discard
+        #       cross_prompts_sketch entirely. Report it as such.
+        #   --exchange_no_lkp    : Mapper only. The RAW photo prompts of every
+        #       layer are concatenated and fed to photo2sketch_net as k/v
+        #       (cross_layer * n_ctx tokens instead of cross_layer proxies), so
+        #       no compression happens. Update rule stays REPLACEMENT.
+        self.exchange_no_mapper = getattr(cfg, 'exchange_no_mapper', False)
+        self.exchange_no_lkp = getattr(cfg, 'exchange_no_lkp', False)
+        assert not (self.exchange_no_mapper and self.exchange_no_lkp), \
+            "--exchange_no_mapper and --exchange_no_lkp are mutually exclusive " \
+            "(removing both leaves no Photo->Sketch path at all -- use --disable_exchange)"
+        assert not (self.exchange_no_mapper and self.n_proxy != 1), \
+            "--exchange_no_mapper requires --n_proxy 1: the proxy is broadcast-added to the " \
+            "sketch prompt, which is only defined for a single proxy token per layer"
+        assert not (self.exchange_no_mapper and self.mapper_single_scale), \
+            "--mapper_single_scale has no meaning under --exchange_no_mapper (no Mapper to scope)"
+        assert not (self.exchange_no_lkp and self.mapper_single_scale), \
+            "--mapper_single_scale has no meaning under --exchange_no_lkp (no per-layer proxy to " \
+            "restrict the Mapper's k/v to)"
+        assert not (self.exchange_no_lkp and (self.exchange_free_source or self.exchange_self_source)), \
+            "--exchange_free_source/--exchange_self_source replace the LKP's proxy, which does not " \
+            "exist under --exchange_no_lkp"
 
         assert self.prompt_depth >= 1
         assert 0 <= self.cross_layer <= self.prompt_depth, "cross_layer must be in [0, prompt_depth]"
@@ -615,9 +643,15 @@ class VisualVisualPromptLearner(nn.Module):
 
             # forward() still calls photo2sketch_net in the self-refine branches,
             # so it survives --disable_exchange there.
-            if build_exchange or needs_selfrefine_mapper:
+            #
+            # --exchange_no_mapper / --exchange_no_lkp drop one module each.
+            # Both are still CONSTRUCTED above and merely not assigned, so the
+            # RNG stream -- and therefore the init of every other parameter --
+            # is identical across all four component ablations. Only the
+            # trainable set differs.
+            if (build_exchange and not self.exchange_no_mapper) or needs_selfrefine_mapper:
                 self.photo2sketch_net = photo2sketch_net
-            if build_exchange:
+            if build_exchange and not self.exchange_no_lkp:
                 self.attn_pooling_photo_nets = attn_pooling_photo_nets
                 self.photo_proxy_token = photo_proxy_token
                 if free_source is not None:
@@ -663,7 +697,8 @@ class VisualVisualPromptLearner(nn.Module):
         Net effect across all flags: declared trainable == actually trained.
         """
         dead = []
-        if (not self.disable_exchange) and self.cross_layer > 0 and (self.exchange_detach_source
+        if (not self.disable_exchange) and self.cross_layer > 0 and not self.exchange_no_lkp \
+                and (self.exchange_detach_source
                                      or self.exchange_self_source
                                      or self.exchange_free_source):
             # Output detached before the Mapper (src/hicropl.py:644-647), or the
@@ -699,7 +734,17 @@ class VisualVisualPromptLearner(nn.Module):
 
         ######## Photo -> Sketch mapping (shallow layers [0, cross_layer)) ########
         if not self.disable_exchange and self.cross_layer > 0:
-            if self.exchange_free_source:
+            if self.exchange_no_lkp:
+                # Mapper-only ablation: NO compression. The raw photo prompts of
+                # every layer in the range go to photo2sketch_net as k/v, so the
+                # Mapper sees cross_layer * n_ctx tokens instead of cross_layer
+                # proxies. Isolates what the LKP's per-layer compression buys.
+                proxy_photo_flat = torch.cat(
+                    [current_photo_prompts[i] for i in range(self.cross_layer)], dim=0
+                )
+                if self.exchange_detach_source:
+                    proxy_photo_flat = proxy_photo_flat.detach()
+            elif self.exchange_free_source:
                 # Branch B: source k/v is an independent learned parameter,
                 # unrelated to photo -- attn_pooling_photo is skipped entirely
                 # (its output would be discarded anyway).
@@ -725,7 +770,18 @@ class VisualVisualPromptLearner(nn.Module):
                     # gradient cut before the Mapper.
                     proxy_photo_flat = proxy_photo_flat.detach()
 
-            if self.mapper_single_scale:
+            if self.exchange_no_mapper:
+                # LKP-only ablation: no photo2sketch_net at all. Layer i's proxy
+                # (shape [1, dim], n_proxy==1 is asserted in __init__) is
+                # broadcast-ADDED to that layer's n_ctx sketch prompt tokens.
+                # The update rule therefore changes from replacement to
+                # addition -- see the flag's note in __init__: replacing n_ctx
+                # tokens by one proxy would throw cross_prompts_sketch away.
+                updated_sketch_prompts = [
+                    current_sketch_prompts[i] + proxy_photo_flat[i:i + 1]
+                    for i in range(self.cross_layer)
+                ]
+            elif self.mapper_single_scale:
                 # Single-scale: same photo2sketch_net module, same query per
                 # layer, but key/value restricted to that layer's own proxy
                 # p~^i only (shape [1, dim]) -- no cross-layer proxy scope.
