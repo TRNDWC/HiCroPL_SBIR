@@ -463,12 +463,14 @@ class VisualVisualPromptLearner(nn.Module):
         assert self.n_proxy >= 1, "--n_proxy must be >= 1"
         # Component ablation of the Photo->Sketch block: which of the two
         # modules (LKP, Mapper) actually participates.
-        #   --exchange_no_mapper : LKP only. The per-layer proxy is ADDED to
-        #       that layer's sketch prompt (broadcast over n_ctx) instead of
-        #       being mixed in by photo2sketch_net. Note this also changes the
-        #       update rule from REPLACEMENT to ADDITION -- unavoidable, since
-        #       replacing n_ctx sketch tokens by a single proxy would discard
-        #       cross_prompts_sketch entirely. Report it as such.
+        #   --exchange_no_mapper : LKP only. The per-layer proxy is broadcast
+        #       over the n_ctx positions and REPLACES that layer's sketch
+        #       prompt, instead of being mixed in by photo2sketch_net. Update
+        #       rule stays REPLACEMENT, matching the full mechanism. Since
+        #       nothing then reads cross_prompts_sketch[0:cross_layer], those
+        #       entries are frozen (see _freeze_gradientless_params) and the
+        #       sketch prompts at those layers cease to be learnable at all --
+        #       state this when reporting.
         #   --exchange_no_lkp    : Mapper only. The RAW photo prompts of every
         #       layer are concatenated and fed to photo2sketch_net as k/v
         #       (cross_layer * n_ctx tokens instead of cross_layer proxies), so
@@ -720,6 +722,14 @@ class VisualVisualPromptLearner(nn.Module):
         if self.sketch_self_refine_ln:
             # Applied only on the k/v side, which is detached.
             dead.append(self.ln_selfrefine)
+        if (not self.disable_exchange) and self.exchange_no_mapper:
+            # Every layer in [0, cross_layer) has its sketch prompt REPLACED by
+            # the broadcast photo proxy, and without a Mapper there is no query
+            # path through which the replaced tensor could still receive
+            # gradient -- unlike the full mechanism, where cross_prompts_sketch
+            # is the Mapper's query. Those entries are therefore dead weight.
+            for i in range(self.cross_layer):
+                self.cross_prompts_sketch[i].requires_grad_(False)
 
         for module in dead:
             for p in module.parameters():
@@ -773,12 +783,16 @@ class VisualVisualPromptLearner(nn.Module):
             if self.exchange_no_mapper:
                 # LKP-only ablation: no photo2sketch_net at all. Layer i's proxy
                 # (shape [1, dim], n_proxy==1 is asserted in __init__) is
-                # broadcast-ADDED to that layer's n_ctx sketch prompt tokens.
-                # The update rule therefore changes from replacement to
-                # addition -- see the flag's note in __init__: replacing n_ctx
-                # tokens by one proxy would throw cross_prompts_sketch away.
+                # broadcast to the layer's n_ctx positions and REPLACES the
+                # sketch prompt there -- the same update rule as the full
+                # mechanism, so the two are directly comparable.
+                #
+                # Consequence: cross_prompts_sketch[0:cross_layer] no longer
+                # reaches the encoder and can receive no gradient (there is no
+                # Mapper query path left to carry one). __init__ freezes exactly
+                # those entries so declared trainable == actually trained.
                 updated_sketch_prompts = [
-                    current_sketch_prompts[i] + proxy_photo_flat[i:i + 1]
+                    proxy_photo_flat[i:i + 1].expand(self.n_ctx, -1)
                     for i in range(self.cross_layer)
                 ]
             elif self.mapper_single_scale:
