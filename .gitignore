@@ -4,3 +4,4 @@ src/__pycache__/
 src/clip/__pycache__/
 claude.md
 .gitignore
+PROMPT_FLOW.md

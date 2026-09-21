@@ -477,6 +477,28 @@ class VisualVisualPromptLearner(nn.Module):
         #       no compression happens. Update rule stays REPLACEMENT.
         self.exchange_no_mapper = getattr(cfg, 'exchange_no_mapper', False)
         self.exchange_no_lkp = getattr(cfg, 'exchange_no_lkp', False)
+        # Where the photo branch is cut off from the sketch-side gradient.
+        #   --exchange_detach_source    : detach the LKP OUTPUT (the proxy).
+        #       Cuts the path to cross_prompts_photo AND to the LKP's own
+        #       weights, which therefore get frozen -- the compression becomes a
+        #       fixed random projection.
+        #   --exchange_detach_lkp_input : detach the LKP INPUT instead. The path
+        #       to cross_prompts_photo is cut just the same (photo stays
+        #       read-only), but the LKP sits BELOW the cut and keeps learning
+        #       how to compress. Isolates "photo must not move" from "the
+        #       compressor must not learn", which the output-side variant
+        #       conflates.
+        self.exchange_detach_lkp_input = getattr(cfg, 'exchange_detach_lkp_input', False)
+        assert not (self.exchange_detach_lkp_input and self.exchange_detach_source), \
+            "--exchange_detach_lkp_input and --exchange_detach_source are two placements of the " \
+            "same cut -- pick one"
+        assert not (self.exchange_detach_lkp_input and self.exchange_no_lkp), \
+            "--exchange_detach_lkp_input needs an LKP to detach the input of; under " \
+            "--exchange_no_lkp it would be identical to --exchange_detach_source"
+        assert not (self.exchange_detach_lkp_input
+                    and (self.exchange_free_source or self.exchange_self_source)), \
+            "--exchange_detach_lkp_input is not combinable with --exchange_free_source/" \
+            "--exchange_self_source (those already redefine or detach the LKP source)"
         assert not (self.exchange_no_mapper and self.exchange_no_lkp), \
             "--exchange_no_mapper and --exchange_no_lkp are mutually exclusive " \
             "(removing both leaves no Photo->Sketch path at all -- use --disable_exchange)"
@@ -767,10 +789,14 @@ class VisualVisualPromptLearner(nn.Module):
                 pooling_source = current_sketch_prompts if self.exchange_self_source else current_photo_prompts
                 proxy_photo_tokens = []
                 for i in range(self.cross_layer):
+                    # Input-side cut: the LKP still sits in the graph and still
+                    # receives gradient; only the path further back into
+                    # cross_prompts_photo is severed.
+                    src_i = pooling_source[i].detach() if self.exchange_detach_lkp_input else pooling_source[i]
                     photo_proxy_token = self.attn_pooling_photo_nets[i](
                         token_query=self.photo_proxy_token[i],
-                        sequence_key=pooling_source[i],
-                        sequence_value=pooling_source[i],
+                        sequence_key=src_i,
+                        sequence_value=src_i,
                     )
                     proxy_photo_tokens.append(photo_proxy_token)
                 proxy_photo_prompts = torch.cat(proxy_photo_tokens, dim=0)
