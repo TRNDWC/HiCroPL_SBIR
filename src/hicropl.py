@@ -151,6 +151,22 @@ class CrossPromptAttention(nn.Module):
         q_proj = q_proj + self.ffn(self.ln_2(q_proj))
         return q_proj
 
+    def forward_delta(self, q, k, v):
+        """forward() WITHOUT the query residual -- returns the UPDATE only.
+
+        Used by --exchange_sketch_driven, where the caller applies its own gated
+        residual `Z + tanh(gamma) * delta`. Keeping `linear_q(q) +` here would
+        put a copy of the query inside delta and count it twice.
+
+        forward() above is left byte-identical, so every existing run is
+        unaffected by the presence of this method.
+        """
+        q_proj = self.linear_q(q)
+        k_proj = self.linear_k(k)
+        v_proj = self.linear_v(v)
+        a = self.attn(self.ln_1(q_proj), self.ln_1(k_proj), self.ln_1(v_proj), need_weights=False)[0]
+        return a + self.ffn(self.ln_2(a))
+
 
 class CrossModalPromptLearner(nn.Module):
     """Bidirectional text<->visual prompt exchange for ONE branch (photo OR
@@ -488,7 +504,35 @@ class VisualVisualPromptLearner(nn.Module):
         #       how to compress. Isolates "photo must not move" from "the
         #       compressor must not learn", which the output-side variant
         #       conflates.
+        # Sketch-driven extraction + zero-init depth gate. Two coupled changes:
+        #   (a) the LKP query stops being a free parameter (photo_proxy_token)
+        #       and becomes W_q^l . mean(Z_l), i.e. derived from the SKETCH
+        #       prompt of that layer -- photo only supplies knowledge, sketch
+        #       decides what to take. Also gives cross_prompts_sketch a second
+        #       gradient path (it was ~45x weaker than the photo side).
+        #   (b) the Mapper's query residual is dropped (forward_delta) and its
+        #       output is injected as P_hat = Z + tanh(gamma_l) . delta with
+        #       gamma init 0, so at step 0 the sketch prompt is preserved
+        #       EXACTLY instead of being overwritten by a randomly initialised
+        #       projection (measured cos with the k-means init: -0.034).
+        # The photo prompts are detached at the LKP input (built in, matching
+        # the proposed `Pp[l].detach()`), so photo stays read-only while the LKP
+        # keeps learning.
+        self.exchange_sketch_driven = getattr(cfg, 'exchange_sketch_driven', False)
         self.exchange_detach_lkp_input = getattr(cfg, 'exchange_detach_lkp_input', False)
+        if self.exchange_sketch_driven:
+            for other, why in (
+                ('exchange_detach_source', 'it detaches the proxy, but this design needs gradient '
+                                           'to flow through the proxy back into W_q and the LKP'),
+                ('exchange_detach_lkp_input', 'redundant -- this design already detaches the photo '
+                                              'prompts at the LKP input'),
+                ('exchange_no_lkp', 'there is no LKP left to query from the sketch side'),
+                ('exchange_no_mapper', 'there is no Mapper output to gate'),
+                ('exchange_free_source', 'it replaces the proxy the sketch query is supposed to produce'),
+                ('exchange_self_source', 'it redefines the LKP source'),
+                ('mapper_single_scale', 'not implemented for the gated delta path'),
+            ):
+                assert not getattr(self, other), f"--exchange_sketch_driven is not combinable with --{other}: {why}"
         assert not (self.exchange_detach_lkp_input and self.exchange_detach_source), \
             "--exchange_detach_lkp_input and --exchange_detach_source are two placements of the " \
             "same cut -- pick one"
@@ -677,9 +721,27 @@ class VisualVisualPromptLearner(nn.Module):
                 self.photo2sketch_net = photo2sketch_net
             if build_exchange and not self.exchange_no_lkp:
                 self.attn_pooling_photo_nets = attn_pooling_photo_nets
-                self.photo_proxy_token = photo_proxy_token
+                # Under --exchange_sketch_driven the LKP query is computed from
+                # the sketch prompt, so the free query token is unused and must
+                # not sit in the optimizer. It is still CONSTRUCTED above (build
+                # -then-discard) to keep this block's RNG draw unchanged.
+                if not self.exchange_sketch_driven:
+                    self.photo_proxy_token = photo_proxy_token
                 if free_source is not None:
                     self.free_source = free_source
+
+            # Built LAST inside this block and only when the flag is on, so a
+            # run without it keeps every parameter bit-identical to before this
+            # feature existed. NOTE: turning it ON does shift the global RNG
+            # stream for modules built afterwards (the text prompt learners), so
+            # an ON/OFF pair is not seed-identical -- unavoidable without
+            # perturbing every existing run, and minor next to the ~7M params
+            # this adds.
+            if build_exchange and self.exchange_sketch_driven:
+                self.sketch_query_proj = nn.ModuleList(
+                    [nn.Linear(s_dim, p_dim) for _ in range(self.cross_layer)]
+                )
+                self.exchange_gamma = nn.Parameter(torch.zeros(self.cross_layer, dtype=dtype))
 
             if self.sketch_self_refine_ln:
                 # Run D: LayerNorm applied to the k/v side only, standard init
@@ -766,7 +828,34 @@ class VisualVisualPromptLearner(nn.Module):
 
         ######## Photo -> Sketch mapping (shallow layers [0, cross_layer)) ########
         if not self.disable_exchange and self.cross_layer > 0:
-            if self.exchange_no_lkp:
+            if self.exchange_sketch_driven:
+                # (a) sketch-queried extraction: q_l = W_q^l . mean(Z_l), and
+                # the photo prompts enter detached so photo stays read-only.
+                proxy_tokens = []
+                for i in range(self.cross_layer):
+                    seed = current_sketch_prompts[i].mean(dim=0, keepdim=True)   # [1, d]
+                    src_i = current_photo_prompts[i].detach()
+                    proxy_tokens.append(self.attn_pooling_photo_nets[i](
+                        token_query=self.sketch_query_proj[i](seed),
+                        sequence_key=src_i,
+                        sequence_value=src_i,
+                    ))
+                proxy_photo_flat = torch.cat(proxy_tokens, dim=0)                # [L, d]
+
+                # (b) gated delta injection. forward_delta drops the Mapper's
+                # own query residual, so `delta` is a pure update and
+                # tanh(gamma)=0 at init makes this an exact identity.
+                sketch_flat = torch.cat(
+                    [current_sketch_prompts[i] for i in range(self.cross_layer)], dim=0
+                )                                                                # [L*n_ctx, d]
+                delta = self.photo2sketch_net.forward_delta(
+                    sketch_flat, proxy_photo_flat, proxy_photo_flat)
+                gate = torch.tanh(self.exchange_gamma).repeat_interleave(self.n_ctx)[:, None]
+                updated_sketch_prompts = (sketch_flat + gate * delta).view(
+                    self.cross_layer, self.n_ctx, -1)
+                for i in range(self.cross_layer):
+                    current_sketch_prompts[i] = updated_sketch_prompts[i]
+            elif self.exchange_no_lkp:
                 # Mapper-only ablation: NO compression. The raw photo prompts of
                 # every layer in the range go to photo2sketch_net as k/v, so the
                 # Mapper sees cross_layer * n_ctx tokens instead of cross_layer
@@ -806,7 +895,11 @@ class VisualVisualPromptLearner(nn.Module):
                     # gradient cut before the Mapper.
                     proxy_photo_flat = proxy_photo_flat.detach()
 
-            if self.exchange_no_mapper:
+            if self.exchange_sketch_driven:
+                # Already applied its own gated update above; the Mapper-call
+                # block below must not run a second time.
+                pass
+            elif self.exchange_no_mapper:
                 # LKP-only ablation: no photo2sketch_net at all. Layer i's proxy
                 # (shape [1, dim], n_proxy==1 is asserted in __init__) is
                 # broadcast to the layer's n_ctx positions and REPLACES the
@@ -841,8 +934,9 @@ class VisualVisualPromptLearner(nn.Module):
                 updated_sketch_prompts = updated_sketch_prompts.view(
                     self.cross_layer, -1, updated_sketch_prompts.shape[-1]
                 )
-            for i in range(self.cross_layer):
-                current_sketch_prompts[i] = updated_sketch_prompts[i]
+            if not self.exchange_sketch_driven:
+                for i in range(self.cross_layer):
+                    current_sketch_prompts[i] = updated_sketch_prompts[i]
         elif self.sketch_self_refine and self.cross_layer > 0:
             # Run C: photo2sketch_net as a per-layer self-attention refine,
             # q=sk (undetached), k=v=sk.detach() -- no LKP, no proxy, no
