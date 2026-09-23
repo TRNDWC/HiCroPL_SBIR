@@ -558,6 +558,30 @@ class VisualVisualPromptLearner(nn.Module):
             "--exchange_free_source/--exchange_self_source replace the LKP's proxy, which does not " \
             "exist under --exchange_no_lkp"
 
+        # Clean two-variable ablation vs. --exchange_detach_source: SAME
+        # photo2sketch_net.forward() (full replacement, keeps its own internal
+        # linear_q(Q) residual -- no forward_delta, no external gate, unlike
+        # --exchange_sketch_driven). Only two things change relative to
+        # --exchange_detach_source: (1) the LKP query is
+        # W_q^l . mean(cross_prompts_sketch[i]) instead of the free parameter
+        # photo_proxy_token, and (2) the cut moves from the LKP's OUTPUT to its
+        # INPUT, so the LKP keeps learning instead of being frozen. Everything
+        # else -- Mapper call, replacement rule, detach on the source -- is
+        # bit-identical code path to the default mechanism.
+        self.exchange_query_from_sketch = getattr(cfg, 'exchange_query_from_sketch', False)
+        if self.exchange_query_from_sketch:
+            for other, why in (
+                ('exchange_sketch_driven', 'a different (gated, forward_delta) variant of the same idea -- pick one'),
+                ('exchange_detach_source', 'that cuts the LKP OUTPUT and freezes the LKP; this flag cuts the '
+                                           'INPUT and keeps the LKP trainable -- contradictory placements'),
+                ('exchange_no_lkp', 'there is no LKP left to query from the sketch side'),
+                ('exchange_no_mapper', 'there is no Mapper output to replace with'),
+                ('exchange_free_source', 'it replaces the proxy the sketch query is supposed to produce'),
+                ('exchange_self_source', 'it redefines the LKP source'),
+            ):
+                assert not getattr(self, other), \
+                    f"--exchange_query_from_sketch is not combinable with --{other}: {why}"
+
         assert self.prompt_depth >= 1
         assert 0 <= self.cross_layer <= self.prompt_depth, "cross_layer must be in [0, prompt_depth]"
 
@@ -721,27 +745,31 @@ class VisualVisualPromptLearner(nn.Module):
                 self.photo2sketch_net = photo2sketch_net
             if build_exchange and not self.exchange_no_lkp:
                 self.attn_pooling_photo_nets = attn_pooling_photo_nets
-                # Under --exchange_sketch_driven the LKP query is computed from
-                # the sketch prompt, so the free query token is unused and must
-                # not sit in the optimizer. It is still CONSTRUCTED above (build
-                # -then-discard) to keep this block's RNG draw unchanged.
-                if not self.exchange_sketch_driven:
+                # Under --exchange_sketch_driven / --exchange_query_from_sketch
+                # the LKP query is computed from the sketch prompt, so the free
+                # query token is unused and must not sit in the optimizer. It is
+                # still CONSTRUCTED above (build-then-discard) to keep this
+                # block's RNG draw unchanged.
+                if not (self.exchange_sketch_driven or self.exchange_query_from_sketch):
                     self.photo_proxy_token = photo_proxy_token
                 if free_source is not None:
                     self.free_source = free_source
 
-            # Built LAST inside this block and only when the flag is on, so a
-            # run without it keeps every parameter bit-identical to before this
-            # feature existed. NOTE: turning it ON does shift the global RNG
-            # stream for modules built afterwards (the text prompt learners), so
-            # an ON/OFF pair is not seed-identical -- unavoidable without
-            # perturbing every existing run, and minor next to the ~7M params
-            # this adds.
-            if build_exchange and self.exchange_sketch_driven:
+            # Built LAST inside this block and only when a flag needing it is
+            # on, so a run without either keeps every parameter bit-identical
+            # to before this feature existed. NOTE: turning either ON does
+            # shift the global RNG stream for modules built afterwards (the
+            # text prompt learners), so an ON/OFF pair is not seed-identical --
+            # unavoidable without perturbing every existing run, and minor next
+            # to the ~7M params this adds. The two flags share sketch_query_proj
+            # (mutually exclusive, so no ambiguity); only --exchange_sketch_driven
+            # also needs the gate.
+            if build_exchange and (self.exchange_sketch_driven or self.exchange_query_from_sketch):
                 self.sketch_query_proj = nn.ModuleList(
                     [nn.Linear(s_dim, p_dim) for _ in range(self.cross_layer)]
                 )
-                self.exchange_gamma = nn.Parameter(torch.zeros(self.cross_layer, dtype=dtype))
+                if self.exchange_sketch_driven:
+                    self.exchange_gamma = nn.Parameter(torch.zeros(self.cross_layer, dtype=dtype))
 
             if self.sketch_self_refine_ln:
                 # Run D: LayerNorm applied to the k/v side only, standard init
@@ -876,14 +904,27 @@ class VisualVisualPromptLearner(nn.Module):
                 # cross_prompts_sketch[i] instead of cross_prompts_photo[i] --
                 # no photo tensor enters this block at all when self_source is on.
                 pooling_source = current_sketch_prompts if self.exchange_self_source else current_photo_prompts
+                # --exchange_query_from_sketch always cuts at the LKP INPUT
+                # (photo stays read-only, LKP keeps learning) -- same placement
+                # as --exchange_detach_lkp_input, just implied rather than
+                # requiring the user to also pass that flag.
+                detach_input = self.exchange_detach_lkp_input or self.exchange_query_from_sketch
                 proxy_photo_tokens = []
                 for i in range(self.cross_layer):
                     # Input-side cut: the LKP still sits in the graph and still
                     # receives gradient; only the path further back into
                     # cross_prompts_photo is severed.
-                    src_i = pooling_source[i].detach() if self.exchange_detach_lkp_input else pooling_source[i]
+                    src_i = pooling_source[i].detach() if detach_input else pooling_source[i]
+                    if self.exchange_query_from_sketch:
+                        # Sketch decides what to pull from photo: query is
+                        # derived from THIS layer's own current sketch prompt,
+                        # not a free parameter.
+                        query_i = self.sketch_query_proj[i](
+                            current_sketch_prompts[i].mean(dim=0, keepdim=True))
+                    else:
+                        query_i = self.photo_proxy_token[i]
                     photo_proxy_token = self.attn_pooling_photo_nets[i](
-                        token_query=self.photo_proxy_token[i],
+                        token_query=query_i,
                         sequence_key=src_i,
                         sequence_value=src_i,
                     )
