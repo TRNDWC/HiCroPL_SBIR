@@ -90,6 +90,14 @@ def _classify_group(name):
         return ('exchange', 'proxy_token')
     if 'free_source' in name or 'ln_selfrefine' in name:
         return ('exchange', 'other')
+    # --exchange_sketch_driven. Must be tested BEFORE the token checks below:
+    # 'sketch_query_proj' contains 'sketch' and would be misread as a sketch
+    # prompt token, and neither name matches any cross_prompts_* pattern, so
+    # both would otherwise land in 'ungrouped'.
+    if 'sketch_query_proj' in name:
+        return ('exchange', 'sketch_query')
+    if 'exchange_gamma' in name:
+        return ('exchange', 'gate')
 
     if 'cross_prompts_text' in name or name.endswith('.ctx'):
         modality = 'text'
@@ -1575,8 +1583,20 @@ class HiCroPL_SBIR(pl.LightningModule):
         checked against reality.
         """
         if not getattr(self, '_grad_audit_done', False):
-            self._grad_audit_done = True
-            self._audit_predicted_vs_actual_grads()
+            # --exchange_sketch_driven injects the Mapper output through
+            # tanh(gamma) with gamma init 0, so on the FIRST backward every
+            # parameter downstream of that gate legitimately has zero gradient
+            # -- only gamma itself moves (ReZero). Auditing then would report
+            # the whole exchange block as "live but no grad" on every single
+            # run. Wait until the gate has actually opened; the audit stays
+            # one-shot, just deferred.
+            gate = getattr(getattr(self.model, 'visual_visual_learner', None),
+                           'exchange_gamma', None)
+            if gate is not None and bool((gate == 0).all()):
+                pass
+            else:
+                self._grad_audit_done = True
+                self._audit_predicted_vs_actual_grads()
 
         if self.model.no_prompt_learning:
             return
@@ -1588,6 +1608,19 @@ class HiCroPL_SBIR(pl.LightningModule):
         param_norm = ctx_photo.detach().norm().item()
         self.log('ctx_photo_grad_norm', grad_norm, on_step=True, on_epoch=True, prog_bar=False, logger=True)
         self.log('ctx_photo_param_norm', param_norm, on_step=True, on_epoch=True, prog_bar=False, logger=True)
+
+        # --exchange_sketch_driven: track how far the ReZero gate has opened.
+        # gamma stuck near 0 for most of a short run means the exchange path
+        # barely contributed anything that epoch -- the model is training
+        # close to a --disable_exchange baseline while carrying 44.3M idle-ish
+        # extra params (sketch_query_proj + LKP + Mapper) that dilute the
+        # optimizer's attention. No effect on any other configuration.
+        gamma = getattr(getattr(self.model, 'visual_visual_learner', None), 'exchange_gamma', None)
+        if gamma is not None:
+            with torch.no_grad():
+                g = torch.tanh(gamma)
+            self.log('exchange_gate_mean', g.mean().item(), on_step=False, on_epoch=True, prog_bar=False, logger=True)
+            self.log('exchange_gate_max', g.abs().max().item(), on_step=False, on_epoch=True, prog_bar=False, logger=True)
 
     def training_step(self, batch, batch_idx):
         from src.losses_hicropl import loss_fn_hicropl
@@ -1960,6 +1993,12 @@ class HiCroPL_SBIR(pl.LightningModule):
         param_norm = self.trainer.callback_metrics.get("ctx_photo_param_norm", None)
         if grad_norm is not None and param_norm is not None:
             self.print(f"[DEBUG] ctx_photo grad_norm (epoch avg): {grad_norm.item():.8f}, param_norm: {param_norm.item():.6f}")
+
+        gate_mean = self.trainer.callback_metrics.get("exchange_gate_mean", None)
+        gate_max = self.trainer.callback_metrics.get("exchange_gate_max", None)
+        if gate_mean is not None and gate_max is not None:
+            self.print(f"GATE_FP | tanh(gamma)_mean: {gate_mean.item():.6f}, "
+                       f"tanh(gamma)_max: {gate_max.item():.6f}")
 
         self.test_photo_features.clear()
         self.test_sketch_features.clear()
