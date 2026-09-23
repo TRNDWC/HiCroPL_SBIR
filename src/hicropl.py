@@ -582,6 +582,25 @@ class VisualVisualPromptLearner(nn.Module):
                 assert not getattr(self, other), \
                     f"--exchange_query_from_sketch is not combinable with --{other}: {why}"
 
+        # Fallback capacity control (Part 2 of the sketch-driven redesign):
+        # route R (the concatenated LKP output, the k/v fed to the Mapper)
+        # through a rank-r bottleneck W_down.W_up before it reaches
+        # photo2sketch_net. Restricts the photo->sketch information channel to
+        # r dimensions instead of the full 768, on the hypothesis that a
+        # smaller search space is easier for the Mapper to learn to use well
+        # within a short (10-epoch) budget. Currently scoped to
+        # --exchange_query_from_sketch only (the variant that already showed a
+        # real improvement, 80.17 mAP@200 vs 79.44 for the gated
+        # --exchange_sketch_driven) -- not --exchange_sketch_driven, where the
+        # zero-init gate already provides its own (different) answer to the
+        # same short-budget problem; combining the two was not requested.
+        self.exchange_bottleneck_rank = getattr(cfg, 'exchange_bottleneck_rank', 0)
+        assert self.exchange_bottleneck_rank >= 0, "--exchange_bottleneck_rank must be >= 0"
+        if self.exchange_bottleneck_rank > 0:
+            assert self.exchange_query_from_sketch, \
+                "--exchange_bottleneck_rank > 0 currently requires --exchange_query_from_sketch " \
+                "(the only variant it has been wired up for)"
+
         assert self.prompt_depth >= 1
         assert 0 <= self.cross_layer <= self.prompt_depth, "cross_layer must be in [0, prompt_depth]"
 
@@ -770,6 +789,10 @@ class VisualVisualPromptLearner(nn.Module):
                 )
                 if self.exchange_sketch_driven:
                     self.exchange_gamma = nn.Parameter(torch.zeros(self.cross_layer, dtype=dtype))
+                if self.exchange_bottleneck_rank > 0:
+                    r = self.exchange_bottleneck_rank
+                    self.exchange_bottleneck_down = nn.Linear(p_dim, r, bias=False)
+                    self.exchange_bottleneck_up = nn.Linear(r, p_dim, bias=False)
 
             if self.sketch_self_refine_ln:
                 # Run D: LayerNorm applied to the k/v side only, standard init
@@ -935,6 +958,15 @@ class VisualVisualPromptLearner(nn.Module):
                     # Branch A (or self_source control): same numeric value,
                     # gradient cut before the Mapper.
                     proxy_photo_flat = proxy_photo_flat.detach()
+                if self.exchange_bottleneck_rank > 0:
+                    # R -> W_down -> W_up -> R_hat, replacing R as the Mapper's
+                    # k/v. No gate protects this (--exchange_query_from_sketch
+                    # has none), but none is needed: identity at step 0 is
+                    # already not preserved on this path (photo2sketch_net's
+                    # own linear_q is randomly initialised regardless), so this
+                    # bottleneck does not newly break anything that was intact.
+                    proxy_photo_flat = self.exchange_bottleneck_up(
+                        self.exchange_bottleneck_down(proxy_photo_flat))
 
             if self.exchange_sketch_driven:
                 # Already applied its own gated update above; the Mapper-call

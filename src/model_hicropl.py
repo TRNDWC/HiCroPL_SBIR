@@ -98,6 +98,8 @@ def _classify_group(name):
         return ('exchange', 'sketch_query')
     if 'exchange_gamma' in name:
         return ('exchange', 'gate')
+    if 'exchange_bottleneck_down' in name or 'exchange_bottleneck_up' in name:
+        return ('exchange', 'bottleneck')
 
     if 'cross_prompts_text' in name or name.endswith('.ctx'):
         modality = 'text'
