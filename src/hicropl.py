@@ -168,6 +168,119 @@ class CrossPromptAttention(nn.Module):
         return a + self.ffn(self.ln_2(a))
 
 
+class TokenSelfRefine(nn.Module):
+    """LKP pre-processing stage for --lkp_perceiver_refine (Perceiver-style).
+
+    One standard pre-LN self-attention + FFN block applied to the RAW source
+    tokens (e.g. cross_prompts_photo[i], shape [n_ctx, dim]) BEFORE they are
+    fed as key/value into the existing AttentionPooling query. Lets the n_ctx
+    tokens exchange information with each other (suppress redundancy, surface
+    what is distinctive) prior to being compressed by the fixed/derived query,
+    instead of the query having to distill directly from raw, un-mixed tokens.
+    Does not touch the pooling step itself (AttentionPooling is reused as-is).
+    """
+    def __init__(self, hidden_size, num_attention_heads):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_attention_heads)
+        self.ln_1 = nn.LayerNorm(hidden_size)
+        self.ffn = nn.Sequential(OrderedDict([
+            ("c_fc", nn.Linear(hidden_size, hidden_size * 4)),
+            ("gelu", QuickGELU()),
+            ("c_proj", nn.Linear(hidden_size * 4, hidden_size))
+        ]))
+        self.ln_2 = nn.LayerNorm(hidden_size)
+
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x), self.ln_1(x), self.ln_1(x), need_weights=False)[0]
+        x = x + self.ffn(self.ln_2(x))
+        return x
+
+
+class QFormerPooling(nn.Module):
+    """LKP replacement for --lkp_qformer (BLIP-2 Q-Former-style pooling).
+
+    Same call signature as AttentionPooling (token_query, sequence_key,
+    sequence_value) so it is a drop-in replacement at the construction site --
+    forward() elsewhere in this file does not need to know which variant it
+    holds. Two cross-attention rounds into the source tokens, with one
+    self-attention round over the queries themselves in between so multiple
+    proxy tokens (--n_proxy > 1) can specialize/de-duplicate against each
+    other instead of independently reading the same source. With --n_proxy 1
+    the middle self-attention step is a no-op on a single token (still valid,
+    just does not do anything useful) -- --n_proxy > 1 is where this variant
+    is expected to matter.
+    """
+    def __init__(self, hidden_size, num_attention_heads):
+        super().__init__()
+        self.cross1 = AttentionPooling(hidden_size, num_attention_heads)
+        self.self_attn = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_attention_heads)
+        self.ln_self = nn.LayerNorm(hidden_size)
+        self.cross2 = AttentionPooling(hidden_size, num_attention_heads)
+
+    def forward(self, token_query, sequence_key, sequence_value):
+        q = self.cross1(token_query, sequence_key, sequence_value)
+        q = q + self.self_attn(self.ln_self(q), self.ln_self(q), self.ln_self(q), need_weights=False)[0]
+        q = self.cross2(q, sequence_key, sequence_value)
+        return q
+
+
+class SlotAttentionPooling(nn.Module):
+    """LKP replacement for --lkp_slot_attention (Locatello et al. 2020).
+
+    Same call signature as AttentionPooling. Key difference from ordinary
+    (cross-)attention: the attention weights are normalized ACROSS THE SLOTS
+    (softmax over the n_proxy/query dimension for each source token, dim=0
+    below) instead of across the source tokens -- slots COMPETE for each
+    source token instead of each slot independently averaging over all of
+    them. Combined with a GRU update over `--lkp_slot_iters` iterations
+    (default 3, matching the original paper), this is meant to encourage
+    multiple proxy tokens (--n_proxy > 1) to specialize on disjoint parts of
+    the source instead of collapsing to near-duplicate summaries. With
+    --n_proxy 1 there is only one slot so the competitive softmax has nothing
+    to compete against (reduces to a plain normalized average) -- --n_proxy > 1
+    is where this variant is expected to matter, same caveat as QFormerPooling.
+    token_query is used only as the slots' initial value (replacing the
+    original paper's random slot init with our existing learned/derived query
+    tokens, so --proxy_init and --exchange_query_from_sketch still apply).
+    """
+    def __init__(self, hidden_size, num_iters=3):
+        super().__init__()
+        self.num_iters = num_iters
+        self.norm_input = nn.LayerNorm(hidden_size)
+        self.norm_slots = nn.LayerNorm(hidden_size)
+        self.norm_mlp = nn.LayerNorm(hidden_size)
+        self.to_q = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.to_k = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.to_v = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.gru = nn.GRUCell(hidden_size, hidden_size)
+        self.mlp = nn.Sequential(OrderedDict([
+            ("c_fc", nn.Linear(hidden_size, hidden_size * 4)),
+            ("gelu", QuickGELU()),
+            ("c_proj", nn.Linear(hidden_size * 4, hidden_size))
+        ]))
+        self.scale = hidden_size ** -0.5
+
+    def forward(self, token_query, sequence_key, sequence_value):
+        # sequence_key/sequence_value are the same tensor everywhere this is
+        # called in this file (both always receive src_i) -- only
+        # sequence_key is used, matching the original Slot Attention's single
+        # "inputs" tensor.
+        slots = token_query
+        inputs = self.norm_input(sequence_key)
+        k = self.to_k(inputs)
+        v = self.to_v(inputs)
+        for _ in range(self.num_iters):
+            slots_prev = slots
+            q = self.to_q(self.norm_slots(slots))
+            attn_logits = torch.matmul(q, k.transpose(-1, -2)) * self.scale   # [n_proxy, n_ctx]
+            attn = attn_logits.softmax(dim=0)                                 # compete across slots
+            attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-8)             # normalize per slot
+            updates = torch.matmul(attn, v)                                   # [n_proxy, dim]
+            slots = self.gru(updates, slots_prev)
+            slots = slots + self.mlp(self.norm_mlp(slots))
+        return slots
+
+
 class CrossModalPromptLearner(nn.Module):
     """Bidirectional text<->visual prompt exchange for ONE branch (photo OR
     sketch) -- faithful port of the original HiCroPL T<->I mapping
@@ -477,6 +590,27 @@ class VisualVisualPromptLearner(nn.Module):
         # as k/v instead of cross_layer. Orthogonal to proxy_init.
         self.n_proxy = getattr(cfg, 'n_proxy', 1)
         assert self.n_proxy >= 1, "--n_proxy must be >= 1"
+        # LKP variants: alternative pooling/compression mechanisms, each a
+        # drop-in replacement for AttentionPooling at the Photo->Sketch LKP
+        # call site only (the Sketch->Photo block, when n_deep > 0, always
+        # keeps plain AttentionPooling -- these are scoped to the direction
+        # the exchange has actually been validated on). Mutually exclusive
+        # with each other (each replaces the same call site) and require the
+        # DEFAULT LKP call path to exist, so incompatible with flags that skip
+        # or redefine it entirely. Freely combinable with
+        # exchange_detach_source/exchange_detach_lkp_input/
+        # exchange_query_from_sketch/mapper_single_scale/n_proxy/proxy_init --
+        # those affect WHERE the gradient is cut, WHAT the query is derived
+        # from, or WHAT the Mapper's k/v scope is, all orthogonal to HOW the
+        # LKP itself pools.
+        self.lkp_perceiver_refine = getattr(cfg, 'lkp_perceiver_refine', False)
+        self.lkp_qformer = getattr(cfg, 'lkp_qformer', False)
+        self.lkp_slot_attention = getattr(cfg, 'lkp_slot_attention', False)
+        self.lkp_slot_iters = getattr(cfg, 'lkp_slot_iters', 3)
+        assert self.lkp_slot_iters >= 1, "--lkp_slot_iters must be >= 1"
+        assert sum([self.lkp_perceiver_refine, self.lkp_qformer, self.lkp_slot_attention]) <= 1, \
+            "--lkp_perceiver_refine, --lkp_qformer, and --lkp_slot_attention are mutually exclusive " \
+            "(each replaces the same LKP call site with a different mechanism)"
         # Component ablation of the Photo->Sketch block: which of the two
         # modules (LKP, Mapper) actually participates.
         #   --exchange_no_mapper : LKP only. The per-layer proxy is broadcast
@@ -531,6 +665,9 @@ class VisualVisualPromptLearner(nn.Module):
                 ('exchange_free_source', 'it replaces the proxy the sketch query is supposed to produce'),
                 ('exchange_self_source', 'it redefines the LKP source'),
                 ('mapper_single_scale', 'not implemented for the gated delta path'),
+                ('lkp_perceiver_refine', 'not yet validated together -- keep scope minimal for now, pick one'),
+                ('lkp_qformer', 'not yet validated together -- keep scope minimal for now, pick one'),
+                ('lkp_slot_attention', 'not yet validated together -- keep scope minimal for now, pick one'),
             ):
                 assert not getattr(self, other), f"--exchange_sketch_driven is not combinable with --{other}: {why}"
         assert not (self.exchange_detach_lkp_input and self.exchange_detach_source), \
@@ -557,6 +694,18 @@ class VisualVisualPromptLearner(nn.Module):
         assert not (self.exchange_no_lkp and (self.exchange_free_source or self.exchange_self_source)), \
             "--exchange_free_source/--exchange_self_source replace the LKP's proxy, which does not " \
             "exist under --exchange_no_lkp"
+        if self.lkp_perceiver_refine or self.lkp_qformer or self.lkp_slot_attention:
+            for other, why in (
+                ('exchange_no_lkp', 'there is no LKP call site left to replace'),
+                ('exchange_free_source', 'the LKP is skipped entirely under this flag'),
+                ('exchange_self_source', 'reuses the LKP call site but redefines its source -- keep '
+                                         'that control experiment on the plain AttentionPooling'),
+                ('exchange_no_mapper', 'the proxy is broadcast-replaced with no Mapper downstream -- '
+                                       'changing how the LKP pools is moot without a Mapper to feed'),
+            ):
+                assert not getattr(self, other), \
+                    f"--lkp_perceiver_refine/--lkp_qformer/--lkp_slot_attention are not combinable " \
+                    f"with --{other}: {why}"
 
         # Clean two-variable ablation vs. --exchange_detach_source: SAME
         # photo2sketch_net.forward() (full replacement, keeps its own internal
@@ -735,7 +884,16 @@ class VisualVisualPromptLearner(nn.Module):
         if self.cross_layer > 0:
             photo2sketch_net = CrossPromptAttention(hidden_size=s_dim, encoder_hidden_size=p_dim, num_attention_heads=8)
 
-            attn_pooling_photo = AttentionPooling(hidden_size=p_dim, num_attention_heads=8)
+            # LKP variant selection: QFormerPooling/SlotAttentionPooling are
+            # drop-in replacements for AttentionPooling (same forward(token_query,
+            # sequence_key, sequence_value) signature), so no other code path
+            # needs to know which one it is calling.
+            if self.lkp_qformer:
+                attn_pooling_photo = QFormerPooling(hidden_size=p_dim, num_attention_heads=8)
+            elif self.lkp_slot_attention:
+                attn_pooling_photo = SlotAttentionPooling(hidden_size=p_dim, num_iters=self.lkp_slot_iters)
+            else:
+                attn_pooling_photo = AttentionPooling(hidden_size=p_dim, num_attention_heads=8)
             attn_pooling_photo_nets = _get_clones(attn_pooling_photo, self.cross_layer)
 
             photo_proxy_token = _make_proxy_tokens(
@@ -799,6 +957,15 @@ class VisualVisualPromptLearner(nn.Module):
                 # (weight=1, bias=0 -- nn.LayerNorm default, no custom init).
                 self.ln_selfrefine = nn.LayerNorm(s_dim)
 
+            if build_exchange and self.lkp_perceiver_refine:
+                # Built LAST and only when the flag is on, same rationale as
+                # sketch_query_proj above -- a run without this flag stays
+                # bit-identical to before it existed; ON/OFF is not
+                # seed-identical for modules built afterwards, which is
+                # accepted practice throughout this file.
+                lkp_refine_photo = TokenSelfRefine(hidden_size=p_dim, num_attention_heads=8)
+                self.lkp_refine_photo_nets = _get_clones(lkp_refine_photo, self.cross_layer)
+
         n_deep = self.prompt_depth - self.cross_layer
         if n_deep > 0:
             sketch2photo_net = CrossPromptAttention(hidden_size=p_dim, encoder_hidden_size=s_dim, num_attention_heads=8)
@@ -848,6 +1015,14 @@ class VisualVisualPromptLearner(nn.Module):
             # (--enable_text_to_visual requires --disable_exchange) combined
             # with --exchange_detach_source, which is now a supported run.
             dead += [self.attn_pooling_photo_nets, self.photo_proxy_token]
+            if self.lkp_perceiver_refine:
+                # Sits upstream of attn_pooling_photo_nets in the same chain --
+                # --exchange_detach_source cuts the proxy AFTER both have run,
+                # so neither can receive gradient. (--exchange_free_source
+                # bypasses this whole chain and --exchange_self_source is not
+                # combinable with --lkp_perceiver_refine, so this only fires
+                # for --exchange_detach_source in practice.)
+                dead.append(self.lkp_refine_photo_nets)
         n_deep = self.prompt_depth - self.cross_layer
         if (not self.disable_exchange) and n_deep > 0 and self.exchange_detach_source:
             # Same reasoning as the photo side: the sketch proxy is detached
@@ -938,6 +1113,12 @@ class VisualVisualPromptLearner(nn.Module):
                     # receives gradient; only the path further back into
                     # cross_prompts_photo is severed.
                     src_i = pooling_source[i].detach() if detach_input else pooling_source[i]
+                    if self.lkp_perceiver_refine:
+                        # Perceiver-style: let the n_ctx raw tokens attend to
+                        # each other (de-duplicate/surface distinctive content)
+                        # BEFORE the query compresses them, instead of the
+                        # query distilling directly from raw, un-mixed tokens.
+                        src_i = self.lkp_refine_photo_nets[i](src_i)
                     if self.exchange_query_from_sketch:
                         # Sketch decides what to pull from photo: query is
                         # derived from THIS layer's own current sketch prompt,

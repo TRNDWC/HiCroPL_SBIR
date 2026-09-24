@@ -79,7 +79,7 @@ def _classify_group(name):
             or name == 'logit_scale':
         return ('backbone', 'main')
 
-    if 'attn_pooling' in name:
+    if 'attn_pooling' in name or 'lkp_refine_photo_nets' in name:
         return ('exchange', 'lkp')
     if any(k in name for k in _MAPPER_NAMES):
         return ('exchange', 'mapper')
