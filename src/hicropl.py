@@ -750,6 +750,53 @@ class VisualVisualPromptLearner(nn.Module):
                 "--exchange_bottleneck_rank > 0 currently requires --exchange_query_from_sketch " \
                 "(the only variant it has been wired up for)"
 
+        # Per-token RETRIEVAL instead of per-layer COMPRESSION. In every other
+        # Photo->Sketch variant above, the LKP squashes n_ctx photo tokens down
+        # to a single proxy [1, dim] (or, under --exchange_query_from_sketch, a
+        # single query derived from mean(sketch)). Here the LKP query is
+        # cross_prompts_sketch[i] ITSELF -- all n_ctx rows, no projection, no
+        # averaging -- so AttentionPooling's own built-in residual
+        # (`token_query + attn(...)`) means each of the n_ctx sketch tokens
+        # independently pulls whatever it needs from photo and keeps its own
+        # identity blended in. Output shape stays [n_ctx, dim]: NO compression
+        # at any layer. attn_pooling_photo_nets and photo2sketch_net are the
+        # SAME existing modules (embed_dim already matches, since p_dim ==
+        # s_dim) -- no new nn.Module, no sketch_query_proj, hence FEWER
+        # trainable params than --exchange_query_from_sketch (no ~7M
+        # projection layer).
+        #
+        # Mapper call: query = cross_prompts_sketch RAW (not the LKP output),
+        # key/value = R (concat of the n_ctx-wide LKP outputs across all
+        # cross_layer layers, i.e. cross_layer*n_ctx rows instead of
+        # cross_layer). Sketch therefore appears TWICE on the path to the
+        # final output -- once as the LKP's own residual (baked into R), once
+        # as the Mapper's linear_q(Q) residual -- versus once for
+        # --exchange_query_from_sketch and zero times for
+        # --exchange_detach_source.
+        self.exchange_sketch_retrieval = getattr(cfg, 'exchange_sketch_retrieval', False)
+        if self.exchange_sketch_retrieval:
+            for other, why in (
+                ('exchange_sketch_driven', 'a different (gated) variant -- pick one'),
+                ('exchange_query_from_sketch', 'a different (compressing) variant of the sketch-driven '
+                                               'idea -- pick one'),
+                ('exchange_detach_source', 'that cuts the LKP OUTPUT and freezes the LKP; this design '
+                                           'cuts the INPUT (built in) and keeps the LKP trainable'),
+                ('exchange_detach_lkp_input', 'redundant -- this design already detaches the photo '
+                                              'prompts at the LKP input'),
+                ('exchange_no_lkp', 'there is no LKP left to retrieve through'),
+                ('exchange_no_mapper', 'there is no Mapper output to replace with'),
+                ('exchange_free_source', 'it replaces the proxy this design derives from sketch+photo'),
+                ('exchange_self_source', 'the query is already sketch itself; feeding sketch back in as '
+                                         'the source too is degenerate'),
+                ('mapper_single_scale', "assumes 1 row per layer in proxy_photo_flat; breaks under "
+                                        "this design's n_ctx rows per layer"),
+            ):
+                assert not getattr(self, other), \
+                    f"--exchange_sketch_retrieval is not combinable with --{other}: {why}"
+            assert self.n_proxy == 1, \
+                "--n_proxy is not used by --exchange_sketch_retrieval (no proxy compression happens); " \
+                "leave it at the default 1"
+
         assert self.prompt_depth >= 1
         assert 0 <= self.cross_layer <= self.prompt_depth, "cross_layer must be in [0, prompt_depth]"
 
@@ -922,12 +969,13 @@ class VisualVisualPromptLearner(nn.Module):
                 self.photo2sketch_net = photo2sketch_net
             if build_exchange and not self.exchange_no_lkp:
                 self.attn_pooling_photo_nets = attn_pooling_photo_nets
-                # Under --exchange_sketch_driven / --exchange_query_from_sketch
-                # the LKP query is computed from the sketch prompt, so the free
-                # query token is unused and must not sit in the optimizer. It is
-                # still CONSTRUCTED above (build-then-discard) to keep this
-                # block's RNG draw unchanged.
-                if not (self.exchange_sketch_driven or self.exchange_query_from_sketch):
+                # Under --exchange_sketch_driven / --exchange_query_from_sketch /
+                # --exchange_sketch_retrieval the LKP query is derived from the
+                # sketch prompt, so the free query token is unused and must not
+                # sit in the optimizer. It is still CONSTRUCTED above (build
+                # -then-discard) to keep this block's RNG draw unchanged.
+                if not (self.exchange_sketch_driven or self.exchange_query_from_sketch
+                        or self.exchange_sketch_retrieval):
                     self.photo_proxy_token = photo_proxy_token
                 if free_source is not None:
                     self.free_source = free_source
@@ -1081,6 +1129,22 @@ class VisualVisualPromptLearner(nn.Module):
                     self.cross_layer, self.n_ctx, -1)
                 for i in range(self.cross_layer):
                     current_sketch_prompts[i] = updated_sketch_prompts[i]
+            elif self.exchange_sketch_retrieval:
+                # Per-token retrieval, no compression: query = the sketch
+                # prompt of this layer ITSELF (all n_ctx rows), not a single
+                # proxy summary. AttentionPooling's own residual
+                # (token_query + attn(...)) means each output row already
+                # blends this token's own identity with whatever it pulled
+                # from photo -- output shape stays [n_ctx, dim] per layer.
+                proxy_tokens = []
+                for i in range(self.cross_layer):
+                    src_i = current_photo_prompts[i].detach()
+                    proxy_tokens.append(self.attn_pooling_photo_nets[i](
+                        token_query=current_sketch_prompts[i],
+                        sequence_key=src_i,
+                        sequence_value=src_i,
+                    ))
+                proxy_photo_flat = torch.cat(proxy_tokens, dim=0)   # [cross_layer*n_ctx, dim]
             elif self.exchange_no_lkp:
                 # Mapper-only ablation: NO compression. The raw photo prompts of
                 # every layer in the range go to photo2sketch_net as k/v, so the
