@@ -797,6 +797,34 @@ class VisualVisualPromptLearner(nn.Module):
                 "--n_proxy is not used by --exchange_sketch_retrieval (no proxy compression happens); " \
                 "leave it at the default 1"
 
+        # New, fully separate propagator (--propagator_sketch_queried). Own
+        # modules (q_proj/pool/mapper_update), no sharing with
+        # attn_pooling_photo_nets/photo2sketch_net or any --exchange_* variant
+        # above. Constructs NOTHING and changes NOTHING when off -- see the
+        # `if self.propagator_sketch_queried:` guard around every new
+        # nn.Module below and the new forward() branch.
+        self.propagator_sketch_queried = getattr(cfg, 'propagator_sketch_queried', False)
+        self.propagator_gate_mode = getattr(cfg, 'propagator_gate_mode', 'none')
+        self.propagator_bottleneck_rank = getattr(cfg, 'propagator_bottleneck_rank', 0)
+        assert self.propagator_gate_mode in ('none', 'zero_init', 'learned'), \
+            f"--propagator_gate_mode must be one of none/zero_init/learned, got {self.propagator_gate_mode!r}"
+        if not self.propagator_sketch_queried:
+            assert self.propagator_gate_mode == 'none', \
+                "--propagator_gate_mode has no effect without --propagator_sketch_queried"
+            assert self.propagator_bottleneck_rank == 0, \
+                "--propagator_bottleneck_rank has no effect without --propagator_sketch_queried"
+        if self.propagator_sketch_queried:
+            for other in ('exchange_detach_source', 'exchange_detach_lkp_input', 'exchange_free_source',
+                          'exchange_self_source', 'mapper_single_scale', 'sketch_self_refine',
+                          'sketch_self_refine_ln'):
+                assert not getattr(self, other), \
+                    f"--propagator_sketch_queried is not combinable with --{other}: that flag " \
+                    f"belongs to the OLD LKP/Mapper architecture, which this propagator does not use"
+            assert not self.disable_exchange, \
+                "--propagator_sketch_queried is not combinable with --disable_exchange: the new " \
+                "propagator IS the Photo->Sketch mechanism, replacing the old one -- " \
+                "--disable_exchange only gates the OLD mechanism and is meaningless here"
+
         assert self.prompt_depth >= 1
         assert 0 <= self.cross_layer <= self.prompt_depth, "cross_layer must be in [0, prompt_depth]"
 
@@ -1032,6 +1060,41 @@ class VisualVisualPromptLearner(nn.Module):
                 self.sketch_proxy_token = sketch_proxy_token
         ######## Knowledge mapper end ########
 
+        ######## NEW propagator (--propagator_sketch_queried), fully separate ########
+        # Own instances only -- q_proj/pool/mapper_update never alias
+        # attn_pooling_photo_nets/photo_proxy_token/photo2sketch_net above.
+        # Nothing here is built (and no RNG is consumed) unless the flag is on.
+        if self.propagator_sketch_queried and self.cross_layer > 0:
+            L = self.cross_layer
+            self.q_proj = nn.ModuleList([nn.Linear(p_dim, p_dim) for _ in range(L)])
+            pool_proto = AttentionPooling(hidden_size=p_dim, num_attention_heads=8)
+            self.pool = _get_clones(pool_proto, L)
+            self.mapper_update = CrossPromptAttention(
+                hidden_size=p_dim, encoder_hidden_size=p_dim, num_attention_heads=8)
+
+            if self.propagator_gate_mode == 'zero_init':
+                # See class-level design note: forward_delta() returns
+                # `a + ffn(ln_2(a))`, two ADDITIVE branches, not one chain
+                # ending in a single linear. Zeroing only ffn.c_proj leaves
+                # `a` (the raw attn output, via nn.MultiheadAttention's own
+                # internal out_proj) nonzero -- delta would NOT be exactly 0.
+                # Zeroing BOTH attn.out_proj and ffn.c_proj makes delta == 0
+                # for ANY input, exactly, regardless of q_proj/k_proj/v_proj/
+                # c_fc's (still-random) init -- verified by
+                # scripts/check_propagator_identity.py.
+                nn.init.zeros_(self.mapper_update.attn.out_proj.weight)
+                nn.init.zeros_(self.mapper_update.attn.out_proj.bias)
+                nn.init.zeros_(self.mapper_update.ffn.c_proj.weight)
+                nn.init.zeros_(self.mapper_update.ffn.c_proj.bias)
+            elif self.propagator_gate_mode == 'learned':
+                self.gamma = nn.Parameter(torch.zeros(L, dtype=dtype))
+
+            if self.propagator_bottleneck_rank > 0:
+                r = self.propagator_bottleneck_rank
+                self.bottleneck_down = nn.Linear(p_dim, r, bias=False)
+                self.bottleneck_up = nn.Linear(r, p_dim, bias=False)
+        ######## NEW propagator end ########
+
         self._freeze_gradientless_params()
 
     def _freeze_gradientless_params(self):
@@ -1101,7 +1164,46 @@ class VisualVisualPromptLearner(nn.Module):
         current_sketch_prompts = list(self.cross_prompts_sketch)
 
         ######## Photo -> Sketch mapping (shallow layers [0, cross_layer)) ########
-        if not self.disable_exchange and self.cross_layer > 0:
+        if self.propagator_sketch_queried and self.cross_layer > 0:
+            # NEW propagator -- fully separate from the block below (own
+            # modules: q_proj/pool/mapper_update, no sharing with
+            # attn_pooling_photo_nets/photo2sketch_net). __init__ asserts
+            # --propagator_sketch_queried requires --disable_exchange False,
+            # so without this `if`/`elif` split both this block and the old
+            # one below would fire; `elif` is what keeps them mutually
+            # exclusive at runtime.
+            L = self.cross_layer
+            Z = [current_sketch_prompts[l] for l in range(L)]   # list of [n_ctx, dim]
+            Pp = [current_photo_prompts[l] for l in range(L)]
+
+            r = []
+            for l in range(L):
+                q_l = self.q_proj[l](Z[l].mean(dim=0, keepdim=True))      # [1, dim]
+                src_l = Pp[l].detach()                                     # read-only photo
+                r.append(self.pool[l](q_l, src_l, src_l))                  # [1, dim]
+            R = torch.cat(r, dim=0)                                        # [L, dim]
+
+            if self.propagator_bottleneck_rank > 0:
+                R = self.bottleneck_up(self.bottleneck_down(R))
+
+            Q = torch.cat(Z, dim=0)                                        # [L*n_ctx, dim]
+            delta = self.mapper_update.forward_delta(Q, R, R)              # no query residual
+
+            if self.propagator_gate_mode == 'learned':
+                gate = torch.tanh(self.gamma).repeat_interleave(self.n_ctx)[:, None]
+                P_hat = Q + gate * delta
+            else:
+                # 'none' and 'zero_init' both use this formula -- they differ
+                # only in mapper_update's init (see __init__), not in the
+                # forward-time expression.
+                P_hat = Q + delta
+
+            updated_sketch_prompts = P_hat.view(L, self.n_ctx, -1)
+            for i in range(L):
+                current_sketch_prompts[i] = updated_sketch_prompts[i]
+            # current_photo_prompts intentionally left untouched -- photo stays
+            # read-only, exactly as documented for this propagator.
+        elif not self.disable_exchange and self.cross_layer > 0:
             if self.exchange_sketch_driven:
                 # (a) sketch-queried extraction: q_l = W_q^l . mean(Z_l), and
                 # the photo prompts enter detached so photo stays read-only.
