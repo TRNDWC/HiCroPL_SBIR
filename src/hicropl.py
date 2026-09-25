@@ -848,6 +848,31 @@ class VisualVisualPromptLearner(nn.Module):
                 "propagator IS the Photo->Sketch mechanism, replacing the old one -- " \
                 "--disable_exchange only gates the OLD mechanism and is meaningless here"
 
+        # Simplest possible baseline for the ablation table's "Linear
+        # projection theo từng layer (kiểu MaPLe/CLIP-AT)" row: one
+        # nn.Linear(768, 768) per layer, applied directly to the photo
+        # prompt, REPLACING the sketch prompt at that layer -- no LKP, no
+        # attention, no compression, no query of any kind. nn.Linear operates
+        # on the last dim, so it is applied per-token (same weight across the
+        # n_ctx tokens of a layer), matching MaPLe's coupling function. NO
+        # detach -- gradient flows both ways, matching MaPLe/CLIP-AT's own
+        # coupling (a design choice, not a bug; flag it if a read-only
+        # variant is wanted instead).
+        self.exchange_linear_projection = getattr(cfg, 'exchange_linear_projection', False)
+        if self.exchange_linear_projection:
+            for other in ('exchange_detach_source', 'exchange_detach_lkp_input', 'exchange_free_source',
+                          'exchange_self_source', 'exchange_no_mapper', 'exchange_no_lkp',
+                          'mapper_single_scale', 'sketch_self_refine', 'sketch_self_refine_ln',
+                          'exchange_sketch_driven', 'exchange_query_from_sketch',
+                          'exchange_sketch_retrieval', 'propagator_sketch_queried'):
+                assert not getattr(self, other), \
+                    f"--exchange_linear_projection is not combinable with --{other}: it replaces " \
+                    f"the WHOLE Photo->Sketch block with a single Linear per layer, no LKP/Mapper " \
+                    f"of any kind is built, so flags governing the old mechanism have no target"
+            assert not self.disable_exchange, \
+                "--exchange_linear_projection is not combinable with --disable_exchange: this flag " \
+                "IS the Photo->Sketch mechanism, replacing the old one"
+
         assert self.prompt_depth >= 1
         assert 0 <= self.cross_layer <= self.prompt_depth, "cross_layer must be in [0, prompt_depth]"
 
@@ -957,6 +982,20 @@ class VisualVisualPromptLearner(nn.Module):
         # so it must exist even though disable_exchange is set.
         build_exchange = not self.disable_exchange
         needs_selfrefine_mapper = self.sketch_self_refine or self.sketch_self_refine_ln
+        # BUG FIX: --propagator_sketch_queried and --exchange_linear_projection
+        # both require disable_exchange=False (asserted above), so
+        # build_exchange alone was True for them too -- the OLD P->S modules
+        # (photo2sketch_net/attn_pooling_photo_nets/photo_proxy_token) were
+        # being built AND ASSIGNED even though neither is ever called in
+        # forward() under these flags, silently adding ~37M genuinely idle
+        # params to the optimizer (declared trainable != actually trained,
+        # exactly what log_param_breakdown's EFFECTIVE column exists to catch
+        # -- it did not catch this because _is_idle() does not know about
+        # these two flags either). Scoped to the P->S assignments ONLY (the
+        # two lines below); the S->P block (n_deep>0) is untouched since
+        # neither new flag governs that direction.
+        build_old_p2s = build_exchange and not self.propagator_sketch_queried \
+            and not self.exchange_linear_projection
 
         # BUILD-THEN-DISCARD. Every module below is CONSTRUCTED unconditionally,
         # in the original order, but only ASSIGNED to self when this run really
@@ -1016,9 +1055,9 @@ class VisualVisualPromptLearner(nn.Module):
             # RNG stream -- and therefore the init of every other parameter --
             # is identical across all four component ablations. Only the
             # trainable set differs.
-            if (build_exchange and not self.exchange_no_mapper) or needs_selfrefine_mapper:
+            if (build_old_p2s and not self.exchange_no_mapper) or needs_selfrefine_mapper:
                 self.photo2sketch_net = photo2sketch_net
-            if build_exchange and not self.exchange_no_lkp:
+            if build_old_p2s and not self.exchange_no_lkp:
                 self.attn_pooling_photo_nets = attn_pooling_photo_nets
                 # Under --exchange_sketch_driven / --exchange_query_from_sketch /
                 # --exchange_sketch_retrieval the LKP query is derived from the
@@ -1117,6 +1156,12 @@ class VisualVisualPromptLearner(nn.Module):
                 self.bottleneck_down = nn.Linear(p_dim, r, bias=False)
                 self.bottleneck_up = nn.Linear(r, p_dim, bias=False)
         ######## NEW propagator end ########
+
+        ######## Linear-projection baseline (--exchange_linear_projection) ########
+        if self.exchange_linear_projection and self.cross_layer > 0:
+            self.linear_proj = nn.ModuleList(
+                [nn.Linear(p_dim, s_dim) for _ in range(self.cross_layer)])
+        ######## Linear-projection baseline end ########
 
         self._freeze_gradientless_params()
 
@@ -1237,6 +1282,13 @@ class VisualVisualPromptLearner(nn.Module):
                 current_sketch_prompts[i] = updated_sketch_prompts[i]
             # current_photo_prompts intentionally left untouched -- photo stays
             # read-only, exactly as documented for this propagator.
+        elif self.exchange_linear_projection and self.cross_layer > 0:
+            # MaPLe/CLIP-AT-style coupling: one Linear per layer, applied
+            # per-token (nn.Linear broadcasts over n_ctx), REPLACES the
+            # sketch prompt directly. No LKP, no attention, no query,
+            # undetached (gradient flows both ways).
+            for i in range(self.cross_layer):
+                current_sketch_prompts[i] = self.linear_proj[i](current_photo_prompts[i])
         elif not self.disable_exchange and self.cross_layer > 0:
             if self.exchange_sketch_driven:
                 # (a) sketch-queried extraction: q_l = W_q^l . mean(Z_l), and

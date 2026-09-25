@@ -96,10 +96,25 @@ def _classify_group(name):
     # both would otherwise land in 'ungrouped'.
     if 'sketch_query_proj' in name:
         return ('exchange', 'sketch_query')
-    if 'exchange_gamma' in name:
+    # --propagator_sketch_queried (src/hicropl.py). BUG FIX: the actual
+    # attribute names are q_proj/pool/mapper_update/gamma/bottleneck_down/
+    # bottleneck_up -- NOT prefixed with 'exchange_'/'propagator_' as the two
+    # checks below this comment used to assume (they never matched anything,
+    # silently sending every propagator param to 'ungrouped'). Scoped with the
+    # 'visual_visual_learner.' prefix to avoid any accidental collision
+    # elsewhere in the model (e.g. 'pool' alone is too generic a substring).
+    if 'visual_visual_learner.q_proj' in name:
+        return ('exchange', 'propagator_query')
+    if 'visual_visual_learner.pool' in name:
+        return ('exchange', 'propagator_lkp')
+    if 'visual_visual_learner.mapper_update' in name:
+        return ('exchange', 'propagator_mapper')
+    if 'visual_visual_learner.gamma' in name:
         return ('exchange', 'gate')
-    if 'exchange_bottleneck_down' in name or 'exchange_bottleneck_up' in name:
+    if 'visual_visual_learner.bottleneck_down' in name or 'visual_visual_learner.bottleneck_up' in name:
         return ('exchange', 'bottleneck')
+    if 'visual_visual_learner.linear_proj' in name:
+        return ('exchange', 'linear_projection')
 
     if 'cross_prompts_text' in name or name.endswith('.ctx'):
         modality = 'text'
