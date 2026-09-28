@@ -241,7 +241,7 @@ class SlotAttentionPooling(nn.Module):
     is where this variant is expected to matter, same caveat as QFormerPooling.
     token_query is used only as the slots' initial value (replacing the
     original paper's random slot init with our existing learned/derived query
-    tokens, so --proxy_init and --exchange_query_from_sketch still apply).
+    tokens, so --proxy_init and --exchange_query_from_target still apply).
     """
     def __init__(self, hidden_size, num_iters=3):
         super().__init__()
@@ -599,7 +599,7 @@ class VisualVisualPromptLearner(nn.Module):
         # DEFAULT LKP call path to exist, so incompatible with flags that skip
         # or redefine it entirely. Freely combinable with
         # exchange_detach_source/exchange_detach_lkp_input/
-        # exchange_query_from_sketch/mapper_single_scale/n_proxy/proxy_init --
+        # exchange_query_from_target/mapper_single_scale/n_proxy/proxy_init --
         # those affect WHERE the gradient is cut, WHAT the query is derived
         # from, or WHAT the Mapper's k/v scope is, all orthogonal to HOW the
         # LKP itself pools.
@@ -707,75 +707,63 @@ class VisualVisualPromptLearner(nn.Module):
                     f"--lkp_perceiver_refine/--lkp_qformer/--lkp_slot_attention are not combinable " \
                     f"with --{other}: {why}"
 
-        # Clean two-variable ablation vs. --exchange_detach_source: SAME
-        # photo2sketch_net.forward() (full replacement, keeps its own internal
-        # linear_q(Q) residual -- no forward_delta, no external gate, unlike
-        # --exchange_sketch_driven). Only two things change relative to
-        # --exchange_detach_source: (1) the LKP query is
-        # W_q^l . mean(cross_prompts_sketch[i]) instead of the free parameter
-        # photo_proxy_token, and (2) the cut moves from the LKP's OUTPUT to its
-        # INPUT, so the LKP keeps learning instead of being frozen. Everything
-        # else -- Mapper call, replacement rule, detach on the source -- is
-        # bit-identical code path to the default mechanism.
-        self.exchange_query_from_sketch = getattr(cfg, 'exchange_query_from_sketch', False)
-        if self.exchange_query_from_sketch:
+        # Single flag governing BOTH directions: "the LKP query comes from the
+        # domain being updated (the target of that block), not a free
+        # parameter." Applies to whichever cross-domain block(s) currently
+        # exist, per --cross_layer:
+        #   - Photo->Sketch (cross_layer > 0): query = W_q^l . mean(cross_prompts_sketch[i]),
+        #     replacing the free parameter photo_proxy_token. Reuses
+        #     photo2sketch_net.forward() UNCHANGED (full replacement, keeps its
+        #     own internal linear_q(Q) residual -- no forward_delta, no
+        #     external gate, unlike --exchange_sketch_driven).
+        #   - Sketch->Photo (n_deep = prompt_depth - cross_layer > 0): query =
+        #     W_q^l . mean(cross_prompts_photo[i]), replacing the free
+        #     parameter sketch_proxy_token. Reuses sketch2photo_net.forward()
+        #     the same way.
+        # A run with cross_layer == prompt_depth or cross_layer == 0 only ever
+        # exercises one of the two halves; both halves are active together
+        # when 0 < cross_layer < prompt_depth. BY DEFAULT the cut is at each
+        # active block's LKP INPUT (the source domain's prompt is detached
+        # before entering the LKP), so the LKP keeps learning instead of being
+        # frozen. Combinable with --exchange_detach_source (already
+        # direction-symmetric, see its own docstring): doing so moves the cut
+        # back to the LKP OUTPUT and freezes both the LKP and the query
+        # projection in whichever block(s) it applies to, reproducing
+        # --exchange_detach_source's original freeze/read-only semantics while
+        # keeping the target-derived query. See also
+        # --exchange_query_from_target_no_detach (removes the cut entirely)
+        # and --exchange_bottleneck_rank (Photo->Sketch side only).
+        self.exchange_query_from_target = getattr(cfg, 'exchange_query_from_target', False)
+        if self.exchange_query_from_target:
             for other, why in (
                 ('exchange_sketch_driven', 'a different (gated, forward_delta) variant of the same idea -- pick one'),
-                ('exchange_no_lkp', 'there is no LKP left to query from the sketch side'),
+                ('exchange_no_lkp', 'there is no LKP left to query from the target side'),
                 ('exchange_no_mapper', 'there is no Mapper output to replace with'),
-                ('exchange_free_source', 'it replaces the proxy the sketch query is supposed to produce'),
+                ('exchange_free_source', 'it replaces the proxy the target-derived query is supposed to produce'),
                 ('exchange_self_source', 'it redefines the LKP source'),
             ):
                 assert not getattr(self, other), \
-                    f"--exchange_query_from_sketch is not combinable with --{other}: {why}"
+                    f"--exchange_query_from_target is not combinable with --{other}: {why}"
             # --exchange_detach_source is DELIBERATELY allowed together with
-            # --exchange_query_from_sketch (no longer in the exclusion list
-            # above): it swaps the cut from the LKP INPUT to its OUTPUT and
-            # freezes both the LKP and sketch_query_proj (see the forward()
-            # detach_input formula and _freeze_gradientless_params below) --
-            # i.e. it reproduces the ORIGINAL --exchange_detach_source
-            # freeze/read-only semantics while keeping the sketch-derived
-            # query source.
+            # --exchange_query_from_target (no longer in the exclusion list
+            # above): see the docstring above for what it does when combined.
 
-        # --exchange_query_from_sketch always detaches cross_prompts_photo at
-        # the LKP input (photo stays read-only) -- this override removes that
-        # cut, letting sketch-side loss flow all the way back into
-        # cross_prompts_photo through the LKP, exactly like the very first
-        # "Command 1" (no flags at all) does for the free-parameter-query
-        # mechanism, but now for the sketch-queried one. No effect and no
-        # meaning without --exchange_query_from_sketch.
-        self.exchange_query_from_sketch_no_detach = getattr(
-            cfg, 'exchange_query_from_sketch_no_detach', False)
-        if self.exchange_query_from_sketch_no_detach:
-            assert self.exchange_query_from_sketch, \
-                "--exchange_query_from_sketch_no_detach has no effect without " \
-                "--exchange_query_from_sketch"
+        # --exchange_query_from_target always detaches the SOURCE domain's
+        # prompt at the LKP input in whichever block is active (source stays
+        # read-only) -- this override removes that cut, letting the target
+        # domain's loss flow all the way back into the source through the LKP,
+        # exactly like the plain no-flag baseline does for the
+        # free-parameter-query mechanism, but now for the target-queried one.
+        # No effect and no meaning without --exchange_query_from_target.
+        self.exchange_query_from_target_no_detach = getattr(
+            cfg, 'exchange_query_from_target_no_detach', False)
+        if self.exchange_query_from_target_no_detach:
+            assert self.exchange_query_from_target, \
+                "--exchange_query_from_target_no_detach has no effect without " \
+                "--exchange_query_from_target"
             assert not self.exchange_detach_source, \
-                "--exchange_query_from_sketch_no_detach and --exchange_detach_source contradict " \
+                "--exchange_query_from_target_no_detach and --exchange_detach_source contradict " \
                 "each other (no cut anywhere vs. cut at the LKP output) -- pick one"
-
-        # Modifier for --exchange_query_from_sketch (requires it; no effect and
-        # no meaning without it): extends the SAME idea -- "the LKP query comes
-        # from the domain being updated (the target), not a free parameter" --
-        # to the Sketch->Photo block too, when --cross_layer < --prompt_depth
-        # (n_deep > 0) makes that block exist. Without this flag, the
-        # Sketch->Photo block always uses the free-parameter query
-        # (self.sketch_proxy_token), regardless of --exchange_query_from_sketch
-        # -- that flag alone only ever touched the Photo->Sketch block. With it,
-        # self.sketch_proxy_token is not built at all; self.photo_query_proj
-        # (one Linear(p_dim, s_dim) per Sketch->Photo layer) replaces it, and
-        # the query becomes photo_query_proj[i] . mean(cross_prompts_photo[i]).
-        # Detach conventions mirror the Photo->Sketch side exactly: input-side
-        # cut by default (sketch stays read-only, LKP keeps learning),
-        # overridable by --exchange_query_from_sketch_no_detach, moved to the
-        # LKP OUTPUT and frozen by --exchange_detach_source (already
-        # direction-symmetric -- see the Sketch->Photo forward() block).
-        self.exchange_query_from_target = getattr(cfg, 'exchange_query_from_target', False)
-        if self.exchange_query_from_target:
-            assert self.exchange_query_from_sketch, \
-                "--exchange_query_from_target has no effect without " \
-                "--exchange_query_from_sketch -- it only extends that flag's idea to the " \
-                "Sketch->Photo block, it does not stand on its own"
 
         # Fallback capacity control (Part 2 of the sketch-driven redesign):
         # route R (the concatenated LKP output, the k/v fed to the Mapper)
@@ -783,22 +771,23 @@ class VisualVisualPromptLearner(nn.Module):
         # photo2sketch_net. Restricts the photo->sketch information channel to
         # r dimensions instead of the full 768, on the hypothesis that a
         # smaller search space is easier for the Mapper to learn to use well
-        # within a short (10-epoch) budget. Currently scoped to
-        # --exchange_query_from_sketch only (the variant that already showed a
-        # real improvement, 80.17 mAP@200 vs 79.44 for the gated
-        # --exchange_sketch_driven) -- not --exchange_sketch_driven, where the
-        # zero-init gate already provides its own (different) answer to the
-        # same short-budget problem; combining the two was not requested.
+        # within a short (10-epoch) budget. Currently scoped to the
+        # Photo->Sketch half of --exchange_query_from_target only (the variant
+        # that already showed a real improvement, 80.17 mAP@200 vs 79.44 for
+        # the gated --exchange_sketch_driven) -- not --exchange_sketch_driven,
+        # where the zero-init gate already provides its own (different) answer
+        # to the same short-budget problem; combining the two was not
+        # requested, and not wired up for the Sketch->Photo half either.
         self.exchange_bottleneck_rank = getattr(cfg, 'exchange_bottleneck_rank', 0)
         assert self.exchange_bottleneck_rank >= 0, "--exchange_bottleneck_rank must be >= 0"
         if self.exchange_bottleneck_rank > 0:
-            assert self.exchange_query_from_sketch, \
-                "--exchange_bottleneck_rank > 0 currently requires --exchange_query_from_sketch " \
+            assert self.exchange_query_from_target, \
+                "--exchange_bottleneck_rank > 0 currently requires --exchange_query_from_target " \
                 "(the only variant it has been wired up for)"
 
         # Per-token RETRIEVAL instead of per-layer COMPRESSION. In every other
         # Photo->Sketch variant above, the LKP squashes n_ctx photo tokens down
-        # to a single proxy [1, dim] (or, under --exchange_query_from_sketch, a
+        # to a single proxy [1, dim] (or, under --exchange_query_from_target, a
         # single query derived from mean(sketch)). Here the LKP query is
         # cross_prompts_sketch[i] ITSELF -- all n_ctx rows, no projection, no
         # averaging -- so AttentionPooling's own built-in residual
@@ -808,7 +797,7 @@ class VisualVisualPromptLearner(nn.Module):
         # at any layer. attn_pooling_photo_nets and photo2sketch_net are the
         # SAME existing modules (embed_dim already matches, since p_dim ==
         # s_dim) -- no new nn.Module, no sketch_query_proj, hence FEWER
-        # trainable params than --exchange_query_from_sketch (no ~7M
+        # trainable params than --exchange_query_from_target (no ~7M
         # projection layer).
         #
         # Mapper call: query = cross_prompts_sketch RAW (not the LKP output),
@@ -817,13 +806,13 @@ class VisualVisualPromptLearner(nn.Module):
         # cross_layer). Sketch therefore appears TWICE on the path to the
         # final output -- once as the LKP's own residual (baked into R), once
         # as the Mapper's linear_q(Q) residual -- versus once for
-        # --exchange_query_from_sketch and zero times for
+        # --exchange_query_from_target and zero times for
         # --exchange_detach_source.
         self.exchange_sketch_retrieval = getattr(cfg, 'exchange_sketch_retrieval', False)
         if self.exchange_sketch_retrieval:
             for other, why in (
                 ('exchange_sketch_driven', 'a different (gated) variant -- pick one'),
-                ('exchange_query_from_sketch', 'a different (compressing) variant of the sketch-driven '
+                ('exchange_query_from_target', 'a different (compressing) variant of the sketch-driven '
                                                'idea -- pick one'),
                 ('exchange_detach_source', 'that cuts the LKP OUTPUT and freezes the LKP; this design '
                                            'cuts the INPUT (built in) and keeps the LKP trainable'),
@@ -886,7 +875,7 @@ class VisualVisualPromptLearner(nn.Module):
             for other in ('exchange_detach_source', 'exchange_detach_lkp_input', 'exchange_free_source',
                           'exchange_self_source', 'exchange_no_mapper', 'exchange_no_lkp',
                           'mapper_single_scale', 'sketch_self_refine', 'sketch_self_refine_ln',
-                          'exchange_sketch_driven', 'exchange_query_from_sketch',
+                          'exchange_sketch_driven', 'exchange_query_from_target',
                           'exchange_sketch_retrieval', 'propagator_sketch_queried'):
                 assert not getattr(self, other), \
                     f"--exchange_linear_projection is not combinable with --{other}: it replaces " \
@@ -1082,12 +1071,12 @@ class VisualVisualPromptLearner(nn.Module):
                 self.photo2sketch_net = photo2sketch_net
             if build_old_p2s and not self.exchange_no_lkp:
                 self.attn_pooling_photo_nets = attn_pooling_photo_nets
-                # Under --exchange_sketch_driven / --exchange_query_from_sketch /
+                # Under --exchange_sketch_driven / --exchange_query_from_target /
                 # --exchange_sketch_retrieval the LKP query is derived from the
                 # sketch prompt, so the free query token is unused and must not
                 # sit in the optimizer. It is still CONSTRUCTED above (build
                 # -then-discard) to keep this block's RNG draw unchanged.
-                if not (self.exchange_sketch_driven or self.exchange_query_from_sketch
+                if not (self.exchange_sketch_driven or self.exchange_query_from_target
                         or self.exchange_sketch_retrieval):
                     self.photo_proxy_token = photo_proxy_token
                 if free_source is not None:
@@ -1102,7 +1091,7 @@ class VisualVisualPromptLearner(nn.Module):
             # to the ~7M params this adds. The two flags share sketch_query_proj
             # (mutually exclusive, so no ambiguity); only --exchange_sketch_driven
             # also needs the gate.
-            if build_exchange and (self.exchange_sketch_driven or self.exchange_query_from_sketch):
+            if build_exchange and (self.exchange_sketch_driven or self.exchange_query_from_target):
                 self.sketch_query_proj = nn.ModuleList(
                     [nn.Linear(s_dim, p_dim) for _ in range(self.cross_layer)]
                 )
@@ -1135,7 +1124,7 @@ class VisualVisualPromptLearner(nn.Module):
             attn_pooling_sketch_nets = _get_clones(attn_pooling_sketch, n_deep)
 
             # Built regardless of --exchange_query_from_target (build-then-discard,
-            # same rationale as photo_proxy_token under --exchange_query_from_sketch)
+            # same rationale as photo_proxy_token under --exchange_query_from_target)
             # so the RNG stream -- and therefore every module built afterwards --
             # stays identical whether or not the flag is on.
             sketch_proxy_token = _make_proxy_tokens(
@@ -1149,7 +1138,7 @@ class VisualVisualPromptLearner(nn.Module):
                 # Under --exchange_query_from_target the query is derived from
                 # cross_prompts_photo instead, so the free query token is
                 # unused and must not sit in the optimizer (mirrors
-                # photo_proxy_token's handling under --exchange_query_from_sketch).
+                # photo_proxy_token's handling under --exchange_query_from_target).
                 if not self.exchange_query_from_target:
                     self.sketch_proxy_token = sketch_proxy_token
 
@@ -1235,7 +1224,7 @@ class VisualVisualPromptLearner(nn.Module):
             # with --exchange_detach_source, which is now a supported run.
             dead.append(self.attn_pooling_photo_nets)
             # photo_proxy_token (the free-parameter query) does not exist under
-            # --exchange_query_from_sketch / --exchange_sketch_driven (the
+            # --exchange_query_from_target / --exchange_sketch_driven (the
             # query is derived from sketch instead) -- referencing it
             # unconditionally would raise AttributeError. sketch_query_proj is
             # its replacement there and must be frozen instead: it sits
@@ -1401,18 +1390,18 @@ class VisualVisualPromptLearner(nn.Module):
                 # cross_prompts_sketch[i] instead of cross_prompts_photo[i] --
                 # no photo tensor enters this block at all when self_source is on.
                 pooling_source = current_sketch_prompts if self.exchange_self_source else current_photo_prompts
-                # --exchange_query_from_sketch cuts at the LKP INPUT by default
+                # --exchange_query_from_target cuts at the LKP INPUT by default
                 # (photo stays read-only, LKP keeps learning) -- same placement
                 # as --exchange_detach_lkp_input, just implied rather than
                 # requiring the user to also pass that flag. Overridden off by
-                # --exchange_query_from_sketch_no_detach (photo becomes NOT
+                # --exchange_query_from_target_no_detach (photo becomes NOT
                 # read-only: sketch-side loss reaches cross_prompts_photo) OR
                 # by --exchange_detach_source, which moves the cut to the LKP
                 # OUTPUT instead (below) and freezes the LKP -- reproducing the
                 # original --exchange_detach_source semantics with a
                 # sketch-derived query.
                 detach_input = self.exchange_detach_lkp_input or (
-                    self.exchange_query_from_sketch and not self.exchange_query_from_sketch_no_detach
+                    self.exchange_query_from_target and not self.exchange_query_from_target_no_detach
                     and not self.exchange_detach_source)
                 proxy_photo_tokens = []
                 for i in range(self.cross_layer):
@@ -1426,7 +1415,7 @@ class VisualVisualPromptLearner(nn.Module):
                         # BEFORE the query compresses them, instead of the
                         # query distilling directly from raw, un-mixed tokens.
                         src_i = self.lkp_refine_photo_nets[i](src_i)
-                    if self.exchange_query_from_sketch:
+                    if self.exchange_query_from_target:
                         # Sketch decides what to pull from photo: query is
                         # derived from THIS layer's own current sketch prompt,
                         # not a free parameter.
@@ -1448,7 +1437,7 @@ class VisualVisualPromptLearner(nn.Module):
                     proxy_photo_flat = proxy_photo_flat.detach()
                 if self.exchange_bottleneck_rank > 0:
                     # R -> W_down -> W_up -> R_hat, replacing R as the Mapper's
-                    # k/v. No gate protects this (--exchange_query_from_sketch
+                    # k/v. No gate protects this (--exchange_query_from_target
                     # has none), but none is needed: identity at step 0 is
                     # already not preserved on this path (photo2sketch_net's
                     # own linear_q is randomly initialised regardless), so this
@@ -1520,21 +1509,21 @@ class VisualVisualPromptLearner(nn.Module):
         ######## Sketch -> Photo mapping (deep layers [cross_layer, prompt_depth)) ########
         n_deep = self.prompt_depth - self.cross_layer
         if not self.disable_exchange and n_deep > 0:
-            # Mirror of the --exchange_query_from_sketch input-side cut on the
+            # Mirror of the --exchange_query_from_target input-side cut on the
             # Photo->Sketch side: by default the LKP INPUT is detached (sketch
             # stays read-only, LKP keeps learning), overridden off by
-            # --exchange_query_from_sketch_no_detach, or moved to the LKP
+            # --exchange_query_from_target_no_detach, or moved to the LKP
             # OUTPUT (below, existing --exchange_detach_source handling) which
             # freezes both the LKP and photo_query_proj instead.
             target_detach_input = self.exchange_query_from_target and (
                 self.exchange_detach_lkp_input or (
-                    not self.exchange_query_from_sketch_no_detach
+                    not self.exchange_query_from_target_no_detach
                     and not self.exchange_detach_source))
             proxy_sketch_tokens = []
             for i in range(self.cross_layer, self.prompt_depth):
                 j = i - self.cross_layer
                 if self.exchange_query_from_target:
-                    # Symmetric to --exchange_query_from_sketch: the LKP query
+                    # Symmetric to --exchange_query_from_target: the LKP query
                     # comes from the domain being updated (photo here) instead
                     # of the free parameter sketch_proxy_token.
                     seed = current_photo_prompts[i].mean(dim=0, keepdim=True)
