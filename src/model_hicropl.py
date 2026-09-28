@@ -96,6 +96,11 @@ def _classify_group(name):
     # both would otherwise land in 'ungrouped'.
     if 'sketch_query_proj' in name:
         return ('exchange', 'sketch_query')
+    # --exchange_query_from_target (symmetric counterpart on the Sketch->Photo
+    # side). Same ordering reasoning as sketch_query_proj above: 'photo_query_proj'
+    # contains 'photo' and would otherwise be misread as a photo prompt token.
+    if 'photo_query_proj' in name:
+        return ('exchange', 'photo_query')
     # --propagator_sketch_queried (src/hicropl.py). BUG FIX: the actual
     # attribute names are q_proj/pool/mapper_update/gamma/bottleneck_down/
     # bottleneck_up -- NOT prefixed with 'exchange_'/'propagator_' as the two
