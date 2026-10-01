@@ -607,21 +607,52 @@ class ValidDataset(torch.utils.data.Dataset):
                 self.n_query = len(self.paths)
             return
 
-        # GZS-SBIR (non-standard, existing flag): mix a fixed set of SEEN
-        # classes into the eval gallery/query on top of the unseen ones. See
-        # GENERALIZED_CLASSES docstring for the train/test image-leakage
-        # caveat this implies for the seen classes. Mutually exclusive with
-        # --cross_dataset_eval (enforced in the training script), so
-        # dataset_key here always refers to args.dataset.
+        # GZS-SBIR using the fixed, hand-picked GENERALIZED_CLASSES subset as
+        # the extra seen classes (instead of --eval_mode_gzs's ALL seen-class
+        # photos). Standard protocol (matches the paper description): ONLY the
+        # GALLERY grows with seen-class photos as pure distractors --
+        #   Query   = S^u_test                          (UNCHANGED)
+        #   Gallery = P^g (GENERALIZED_CLASSES photos)   union  P^u_test
+        # Query must NOT gain seen-class sketches -- those are classes the
+        # model was trained on, so retrieving them is easy and would inflate
+        # mAP/P@k rather than making the task harder, defeating the purpose of
+        # a generalized/seen-bias evaluation. (Previously this block mixed the
+        # seen classes into BOTH sketch and photo, which is the bug this fixes.)
+        # self.all_categories is still the UNION for both the sketch and photo
+        # instances, so a category's integer label (self.all_categories.index)
+        # is identical across both -- required for target = (photo_label ==
+        # sketch_label) in model_hicropl.py: a seen-class gallery image can
+        # never share a label with any query, so it is correctly a distractor,
+        # never a false positive.
         if getattr(self.args, 'gzs_eval', False):
             seen_classes = GENERALIZED_CLASSES.get(dataset_key, [])
             if len(seen_classes) == 0:
                 print(f"[WARN] --gzs_eval set but no GENERALIZED_CLASSES entry for dataset '{dataset_key}'; "
                       f"falling back to unseen-only evaluation.")
             self.all_categories = sorted(set(unseen_classes) | set(seen_classes))
-        else:
-            self.all_categories = sorted(set(unseen_classes))
 
+            self.paths = []
+            if self.mode == "photo":
+                for category in sorted(unseen_classes):
+                    self.paths.extend(sorted(glob.glob(os.path.join(self.data_dir, 'photo', category, '*'))))
+                self.n_gallery_unseen = len(self.paths)
+                for category in seen_classes:
+                    self.paths.extend(sorted(glob.glob(os.path.join(self.data_dir, 'photo', category, '*'))))
+                self.n_gallery_seen = len(self.paths) - self.n_gallery_unseen
+                print(f"GZS_GENCLASSES_FP | on=1 | n_test_classes_unseen={len(unseen_classes)} | "
+                      f"n_test_classes_seen={len(seen_classes)} | "
+                      f"n_test_classes_total={len(self.all_categories)} | "
+                      f"n_gallery_seen={self.n_gallery_seen} | n_gallery_unseen={self.n_gallery_unseen} | "
+                      f"n_gallery_total={len(self.paths)} | seen_classes={seen_classes}")
+            else:
+                # Query stays S^u_test -- no seen-class sketches added.
+                for category in sorted(unseen_classes):
+                    self.paths.extend(sorted(glob.glob(os.path.join(self.data_dir, 'sketch', category, '*'))))
+                self.n_query = len(self.paths)
+                print(f"GZS_GENCLASSES_FP | on=1 | n_query_unseen={self.n_query} | n_query_total={self.n_query}")
+            return
+
+        self.all_categories = sorted(set(unseen_classes))
         self.paths = []
         for category in self.all_categories:
             if self.mode == "photo":
