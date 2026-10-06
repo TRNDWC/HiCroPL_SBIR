@@ -105,9 +105,15 @@ if __name__ == '__main__':
                 print("[ABLATION] --aug_identity_transform (Run B): aug transforms replaced by "
                       "Sketchy.data_transform for BOTH photo and sketch -- clip_aug still built, "
                       "aug views must be bit-wise equal to the clean ones (checked on batch 0).")
-            if opts.aug_shared_encoder:
+            if opts.aug_shared_encoder and opts.aug_shared_side == 'both':
                 print("[ABLATION] --aug_shared_encoder (Run A): clip_aug NOT built; the augmented "
                       "views go through the main encoder with the same prompts. "
+                      f"aug_detach_view={int(opts.aug_detach_view)}.")
+            elif opts.aug_shared_encoder:
+                shared = opts.aug_shared_side
+                sep = 'sketch' if shared == 'photo' else 'photo'
+                print(f"[ABLATION] --aug_shared_side {shared}: {shared} augmented view rides the main "
+                      f"encoder; {sep} augmented view goes through clip_aug (separate backbone). "
                       f"aug_detach_view={int(opts.aug_detach_view)}.")
         if opts.cross_dataset_eval:
             if not opts.eval_dataset or not opts.eval_data_dir:

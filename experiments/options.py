@@ -201,6 +201,10 @@ parser.add_argument('--disable_aug_branch', action='store_true', help='Ablation:
 # bit-identically. They are mutually exclusive (see the check below).
 # ----------------------
 parser.add_argument('--aug_shared_encoder', action='store_true', help='Run A -- isolates variable (ii), the augmented view, by deleting variable (i). clip_aug is NEVER constructed (no load_clip_to_cpu, so 151M params and ~605MB VRAM are saved and nothing of it can reach the optimizer or the checkpoint). The augmented views instead go through the EXACT main forward path: same backbone (self.clip), same visual_encoder_photo/sketch, same prompt tensors computed once in that same forward, same LayerNorms -- only the input tensor changes to photo_aug/sketch_aug. loss_aug keeps its exact structure and its 1.0 coefficient: cross_loss(photo_feat, photo_aug_feat, T) + cross_loss(sketch_feat, sketch_aug_feat, T). Mutually exclusive with --aug_identity_transform.')
+parser.add_argument('--aug_shared_side', type=str, default='both', choices=['both', 'photo', 'sketch'],
+                    help='Per-side selector for --aug_shared_encoder. "both" (default) = unchanged: both augmented views ride the main encoder. '
+                         '"photo" = only the photo augmented view rides the main encoder; the sketch augmented view goes through clip_aug (separate backbone, sketch LayerNorm set). '
+                         '"sketch" = the mirror image. Only meaningful with --aug_shared_encoder; clip_aug is built whenever at least one side is not shared.')
 parser.add_argument('--aug_detach_view', action='store_true', help='Sub-flag of --aug_shared_encoder (no effect otherwise): .detach() the augmented-view features before cross_loss, turning the term into a one-way pull of the clean view toward a fixed augmented target. Default OFF = symmetric siamese, which is what the current clip_aug branch actually does (its visual LayerNorms receive gradient from loss_aug -- there is no no_grad on that path, src/model_hicropl.py:542-562), so OFF is the setting that keeps Run A comparable to the 80.13 reference.')
 parser.add_argument('--allow_degenerate_aug', action='store_true', help='Run D -- escape hatch that permits --aug_shared_encoder together with --aug_identity_transform, a combination otherwise rejected. It is NOT a no-op: photo_aug_feat comes out bit-identical to photo_feat, so the InfoNCE positive term is saturated (cos=1, nothing left to align), but the NEGATIVE term still pushes the batch apart -- the aug term degenerates into a pure intra-domain uniformity regularizer with the alignment half switched off. That separates the two things loss_aug does at once, which no other flag combination can. Off by default; the ValueError stays exactly as before without it.')
 parser.add_argument('--aug_identity_transform', action='store_true', help='Run B -- isolates variable (i), the second encoder, by neutralizing variable (ii). clip_aug is still built, still gets its visual LayerNorms opened, still runs its two forward passes, and loss_aug keeps its exact structure -- but the augmented transform for BOTH photo and sketch is replaced by Sketchy.data_transform (the very transform used for the clean view), so photo_aug is bit-wise equal to photo and sketch_aug to sketch. Verified once on the first batch with torch.allclose (prints IDENTITY TRANSFORM: OK). Any gain that survives here comes from the second encoder itself, not from the perturbation. Mutually exclusive with --aug_shared_encoder.')
@@ -267,6 +271,11 @@ if opts.disable_aug_branch and (opts.aug_shared_encoder or opts.aug_identity_tra
         f"{flag} would be a silent no-op -- the run would be identical to a plain "
         "--disable_aug_branch run while its name/log claims otherwise."
     )
+if opts.aug_shared_side != 'both' and not opts.aug_shared_encoder:
+    raise ValueError(f"--aug_shared_side {opts.aug_shared_side} has no effect without --aug_shared_encoder -- "
+                     "the run would silently use separate clip_aug for both sides and be mislabelled.")
+if opts.aug_shared_side != 'both' and opts.disable_aug_branch:
+    raise ValueError(f"--aug_shared_side {opts.aug_shared_side} cannot be combined with --disable_aug_branch (no augmented view exists).")
 if opts.disable_aug_branch and opts.aug_side != 'both':
     raise ValueError(
         f"--disable_aug_branch cannot be combined with --aug_side {opts.aug_side}: there is no "
